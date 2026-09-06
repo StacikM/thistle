@@ -1,0 +1,56 @@
+name: CI
+
+# Builds the engine (and both example programs) on real macOS, Windows, and
+# Linux runners on every push/PR to main, then runs the one test that's
+# actually safe to run headlessly (thistle_net_smoketest — see the comment
+# on it in CMakeLists.txt). thistle_smoketest opens a real window and never
+# exits on its own, so it's built here (catches link/compile regressions —
+# this exact CI would have caught both Windows-specific bugs already found
+# by hand this project) but never executed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:   # lets you re-run it manually from the Actions tab
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false   # one platform failing shouldn't hide the other two's results
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # sokol's desktop-GL backend needs real X11/GL dev headers to link
+      # against; GitHub's ubuntu-latest image doesn't ship them by default.
+      # This is genuinely the first time this platform's build gets tried
+      # anywhere — nobody has run a game on it yet (see docs/building.md) —
+      # so treat a red X here as real, useful information, not a fluke.
+      - name: Install Linux GL/X11 dev packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev
+
+      # sokol/stb/miniaudio/fontstash are fetched from `master` (only box2d
+      # is pinned — see CMakeLists.txt), so this cache can go stale if
+      # upstream changes; it's keyed on CMakeLists.txt so a real dependency
+      # change busts it, same tradeoff as a long-lived local build/_deps dir.
+      - name: Cache FetchContent dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S . -B build -DTHISTLE_BUILD_SMOKETEST=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Test (net_smoketest — real TCP client/server, no GPU/display needed)
+        run: ctest --test-dir build -C Release --output-on-failure
