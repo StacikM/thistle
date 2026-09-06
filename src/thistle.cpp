@@ -28,6 +28,12 @@
 #include <nlohmann/json.hpp>
 
 #if defined(_WIN32)
+// Must come before any windows.h-family include: windows.h defines min/max
+// as macros unless told not to, which mangles every std::min/std::max call
+// in this file (MSVC error C2589, found by CI actually building on real
+// Windows — see docs/building.md's running theme).
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <direct.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>

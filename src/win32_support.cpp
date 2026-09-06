@@ -11,6 +11,11 @@
 #include <memory>
 #include <thread>
 
+// Before windows.h: it defines min/max as macros unless told not to, which
+// breaks any std::min/std::max used later in this file (see the same fix
+// and full explanation in thistle.cpp).
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <windows.h>
 #include <winhttp.h>
 
