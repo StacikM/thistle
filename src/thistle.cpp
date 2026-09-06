@@ -62,6 +62,17 @@ extern "C" void thistle_apple_haptic(int style);
 extern "C" void* thistle_http_start(const char* method, const char* url, const char* body);
 extern "C" int   thistle_http_poll(void* h, int* status, const char** body, int* len);
 extern "C" void  thistle_http_free(void* h);
+// StoreKit bridge (see ios_support.mm). Products/events cross the C boundary
+// as JSON strings — thistle.cpp parses them — rather than a pile of
+// individually-fragile const char* out-params.
+extern "C" int         thistle_iap_can_make_payments(void);
+extern "C" void        thistle_iap_fetch_products(const char* ids_json);
+extern "C" int         thistle_iap_products_ready(void);
+extern "C" const char* thistle_iap_products_json(void);
+extern "C" void        thistle_iap_purchase(const char* product_id);
+extern "C" void        thistle_iap_restore_purchases(void);
+extern "C" void        thistle_iap_finish_transaction(const char* transaction_id);
+extern "C" const char* thistle_iap_poll_event_json(void);
 #elif defined(_WIN32)
 // Real async HTTP on Windows too (see src/win32_support.cpp) — same poll-based
 // interface as the Apple side, just backed by WinHTTP instead of NSURLSession.
@@ -1988,6 +1999,98 @@ bool NetClient::connected() const { return impl_->connected; }
 NetObject* NetClient::find(uint32_t id) const {
     auto it = impl_->objects.find(id);
     return it != impl_->objects.end() ? it->second.get() : nullptr;
+}
+
+// --- in-app purchases -----------------------------------------------------
+
+bool iap_can_make_payments() {
+#if defined(__APPLE__)
+    return thistle_iap_can_make_payments() != 0;
+#else
+    return false;
+#endif
+}
+
+void iap_fetch_products(const std::vector<std::string>& product_ids) {
+#if defined(__APPLE__)
+    nlohmann::json arr = product_ids;
+    thistle_iap_fetch_products(arr.dump().c_str());
+#else
+    (void)product_ids;
+#endif
+}
+
+bool iap_products_ready() {
+#if defined(__APPLE__)
+    return thistle_iap_products_ready() != 0;
+#else
+    return true;   // nothing was ever requested, so "ready" with an empty list
+#endif
+}
+
+const std::vector<IAPProduct>& iap_products() {
+    static std::vector<IAPProduct> cache;
+#if defined(__APPLE__)
+    cache.clear();
+    try {
+        auto j = nlohmann::json::parse(thistle_iap_products_json());
+        for (auto& p : j) {
+            IAPProduct ip;
+            ip.id            = p.value("id", std::string());
+            ip.title         = p.value("title", std::string());
+            ip.description   = p.value("description", std::string());
+            ip.price_string  = p.value("price_string", std::string());
+            ip.price_value   = p.value("price_value", 0.0);
+            ip.currency_code = p.value("currency_code", std::string());
+            cache.push_back(std::move(ip));
+        }
+    } catch (...) { log_error("iap_products: bad JSON from the platform bridge"); }
+#endif
+    return cache;
+}
+
+void iap_purchase(const std::string& product_id) {
+#if defined(__APPLE__)
+    thistle_iap_purchase(product_id.c_str());
+#else
+    log_warn("iap_purchase(\"" + product_id + "\"): not supported on this platform");
+#endif
+}
+
+void iap_restore_purchases() {
+#if defined(__APPLE__)
+    thistle_iap_restore_purchases();
+#endif
+}
+
+void iap_finish_transaction(const std::string& transaction_id) {
+#if defined(__APPLE__)
+    thistle_iap_finish_transaction(transaction_id.c_str());
+#else
+    (void)transaction_id;
+#endif
+}
+
+bool iap_poll_event(IAPEvent& out) {
+#if defined(__APPLE__)
+    const char* raw = thistle_iap_poll_event_json();
+    if (!raw || !*raw) return false;
+    try {
+        auto j = nlohmann::json::parse(raw);
+        std::string kind = j.value("kind", std::string());
+        out.kind = kind == "purchased" ? IAPEventKind::Purchased
+                 : kind == "restored"  ? IAPEventKind::Restored
+                 : kind == "deferred"  ? IAPEventKind::Deferred
+                                       : IAPEventKind::Failed;
+        out.product_id     = j.value("product_id", std::string());
+        out.transaction_id = j.value("transaction_id", std::string());
+        out.error_message  = j.value("error_message", std::string());
+        return true;
+    } catch (...) { return false; }
+#else
+    (void)out;
+    return false;
+#endif
 }
 
 // --- save --------------------------------------------------------------

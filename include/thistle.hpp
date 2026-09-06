@@ -638,6 +638,64 @@ private:
     friend struct NetObjectAccess;
 };
 
+// --- in-app purchases -----------------------------------------------------
+// Poll-based, same shape as Http: kick a request off, poll for the result
+// each frame. iOS/macOS via StoreKit — specifically the classic Objective-C
+// StoreKit 1 API, not StoreKit 2, which is Swift-only and has no C/C++-
+// callable surface at all. A no-op everywhere else: Android (Google Play
+// Billing) would need its own JNI bridge the same way Windows got its own
+// WinHTTP bridge, and there's no working Android build target yet to bridge
+// to (see docs/building.md) — nothing to add this to until that exists.
+
+struct IAPProduct {
+    std::string id;
+    std::string title;
+    std::string description;
+    std::string price_string;    // localized ("$4.99") — display this, don't format price_value yourself
+    double      price_value = 0.0;
+    std::string currency_code;   // e.g. "USD"
+};
+
+enum class IAPEventKind { Purchased, Failed, Restored, Deferred };
+
+struct IAPEvent {
+    IAPEventKind kind = IAPEventKind::Failed;
+    std::string product_id;
+    std::string transaction_id;  // pass to iap_finish_transaction() once you've delivered the content
+    std::string error_message;   // set when kind == Failed
+};
+
+// Whether this device/account can make payments at all (parental controls,
+// managed devices, restricted regions) — check before showing a buy button.
+bool iap_can_make_payments();
+
+// Kicks off an async product-info request for the given App Store Connect
+// product identifiers. Poll iap_products_ready() each frame; once true,
+// iap_products() has whatever Apple returned — misconfigured/unknown ids
+// are just silently absent, so check the count against what you asked for.
+void iap_fetch_products(const std::vector<std::string>& product_ids);
+bool iap_products_ready();
+const std::vector<IAPProduct>& iap_products();
+
+// Starts a purchase (must be one of the ids from a completed
+// iap_fetch_products() first — you can't purchase by id blind). This does
+// NOT tell you whether it succeeded; that arrives later as an IAPEvent.
+void iap_purchase(const std::string& product_id);
+
+// Re-delivers past non-consumable/subscription purchases as IAPEvents
+// (kind == Restored) — required by App Review for anything non-consumable.
+void iap_restore_purchases();
+
+// Call once you've durably delivered whatever the transaction paid for
+// (unlocked content, credited currency, etc.) — StoreKit keeps re-delivering
+// a transaction on every launch until you finish it.
+void iap_finish_transaction(const std::string& transaction_id);
+
+// Pops one pending purchase/restore/failure event, if there is one:
+//   IAPEvent e;
+//   while (iap_poll_event(e)) { ... }
+bool iap_poll_event(IAPEvent& out);
+
 // --- menu ---------------------------------------------------------------
 
 // A vertical, horizontally-centered stack of menu items with an entrance

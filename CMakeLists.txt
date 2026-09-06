@@ -101,6 +101,7 @@ if(APPLE)
             "-framework AudioToolbox"
             "-framework AVFoundation"
             "-framework GameController"
+            "-framework StoreKit"
         )
     else()
         target_link_libraries(thistle PRIVATE
@@ -112,6 +113,7 @@ if(APPLE)
             "-framework AudioUnit"
             "-framework CoreAudio"
             "-framework CoreFoundation"
+            "-framework StoreKit"
             "-framework GameController"
         )
     endif()
