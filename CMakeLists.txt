@@ -142,5 +142,12 @@ if(THISTLE_BUILD_SMOKETEST)
     target_link_libraries(thistle_smoketest PRIVATE thistle)
     if(WIN32)
         set_target_properties(thistle_smoketest PROPERTIES WIN32_EXECUTABLE ON)
+        if(MSVC)
+            # WIN32_EXECUTABLE (subsystem:windows) makes link.exe look for
+            # WinMain, but SOKOL_NO_ENTRY (sokol_impl.c) means we provide a
+            # plain main() ourselves — point the linker at the CRT startup
+            # that calls main() instead.
+            target_link_options(thistle_smoketest PRIVATE "/ENTRY:mainCRTStartup")
+        endif()
     endif()
 endif()
