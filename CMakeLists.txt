@@ -160,4 +160,13 @@ if(THISTLE_BUILD_SMOKETEST)
     # fixup needed here since this one never touches sokol_app.
     add_executable(thistle_net_smoketest examples/net_smoketest.cpp)
     target_link_libraries(thistle_net_smoketest PRIVATE thistle)
+
+    # Only thistle_net_smoketest is registered as a test — it's headless and
+    # actually exits. thistle_smoketest opens a real window and never quits
+    # on its own, so running it via ctest would just hang forever; CI still
+    # builds it (catches link/compile regressions like the two Windows ones
+    # already found this way) but never executes it.
+    enable_testing()
+    add_test(NAME net_smoketest COMMAND thistle_net_smoketest)
+    set_tests_properties(net_smoketest PROPERTIES TIMEOUT 30)
 endif()
