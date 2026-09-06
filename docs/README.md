@@ -8,6 +8,7 @@ You want to make a game, not read a novel. Here's the map:
 - [input-and-audio.md](input-and-audio.md) — keyboard, mouse, touch, gamepad, sound, music.
 - [physics.md](physics.md) — the Box2D wrapper. 2D only. Read the caveats before you build something that needs them.
 - [platform-and-networking.md](platform-and-networking.md) — save data, HTTP, clipboard, haptics, text input, logging, platform queries.
+- [networking.md](networking.md) — realtime client/server (Mirror-flavored `NetVar`/Command/ClientRpc over TCP). Read the scope section before you plan a game around it.
 
 ## What this actually is
 

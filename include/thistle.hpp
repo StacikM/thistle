@@ -4,6 +4,9 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <cstdint>
+
+#include <nlohmann/json.hpp>
 
 // Thistle — a small, cross-platform 2D game engine.
 // Include <thistle> (the umbrella header) from game code and `using namespace thistle;`.
@@ -26,6 +29,11 @@ inline vec2 operator-(vec2 a, vec2 b) { return {a.x - b.x, a.y - b.y}; }
 inline vec2 operator*(vec2 v, float s) { return {v.x * s, v.y * s}; }
 inline vec2 operator*(float s, vec2 v) { return {v.x * s, v.y * s}; }
 
+// ADL hooks so vec2 can be a NetVar<vec2> or go straight into a NetArgs
+// payload — `nlohmann::json(v)` / `j.get<vec2>()` just work.
+inline void to_json(nlohmann::json& j, const vec2& v) { j = {v.x, v.y}; }
+inline void from_json(const nlohmann::json& j, vec2& v) { v.x = j.at(0).get<float>(); v.y = j.at(1).get<float>(); }
+
 // A point/vector in 3D world space, for the minor-3D drawing calls below.
 struct vec3 {
     float x = 0.0f;
@@ -41,6 +49,9 @@ inline vec3 operator+(vec3 a, vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}
 inline vec3 operator-(vec3 a, vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 inline vec3 operator*(vec3 v, float s) { return {v.x * s, v.y * s, v.z * s}; }
 inline vec3 operator*(float s, vec3 v) { return {v.x * s, v.y * s, v.z * s}; }
+
+inline void to_json(nlohmann::json& j, const vec3& v) { j = {v.x, v.y, v.z}; }
+inline void from_json(const nlohmann::json& j, vec3& v) { v.x = j.at(0).get<float>(); v.y = j.at(1).get<float>(); v.z = j.at(2).get<float>(); }
 
 // An axis-aligned rectangle in pixels.
 struct Rect {
@@ -63,6 +74,11 @@ struct rgba {
 
 // Custom color; for a specific alpha just write rgba{r, g, b, a} directly.
 inline rgba rgb(float r, float g, float b) { return {r, g, b, 1.0f}; }
+
+inline void to_json(nlohmann::json& j, const rgba& c) { j = {c.r, c.g, c.b, c.a}; }
+inline void from_json(const nlohmann::json& j, rgba& c) {
+    c.r = j.at(0).get<float>(); c.g = j.at(1).get<float>(); c.b = j.at(2).get<float>(); c.a = j.at(3).get<float>();
+}
 
 // Built-in colors are values, not function calls.
 inline constexpr rgba midnight {0.055f, 0.067f, 0.098f, 1.0f};
@@ -441,6 +457,185 @@ private:
     bool done_ = false;
     int  status_ = 0;
     std::string body_;
+};
+
+// --- realtime networking (a small Mirror-flavored layer over TCP) -------
+// A server-authoritative client/server model, deliberately scoped: TCP only
+// (no UDP), JSON messages (not a packed binary format), no NAT traversal or
+// relay (you still need port-forwarding or a host both sides can reach —
+// same as raw Mirror without its relay service), no client-side prediction,
+// no interest management, no "host mode" (a process is a server OR a
+// client, not both at once). It gets real client/server play working on a
+// LAN or through a dedicated server; it is not a shooter's netcode. See
+// docs/networking.md before building anything serious on this.
+
+namespace net {
+    bool is_server();   // true from NetServer::listen() succeeding until stop()
+    bool is_client();   // true from NetClient::connect() succeeding until disconnect()
+}
+
+// Arguments/payload for Commands and ClientRpcs: NetArgs{{"x", 1.0f}} to
+// build, args.at("x").get<float>() to read. It's just nlohmann::json.
+using NetArgs = nlohmann::json;
+
+// A server-authoritative synced field (Mirror's [SyncVar]). Assign it from
+// server-side code; every connected (and later-connecting) client's copy
+// updates automatically on the next NetServer::update(). Read it anywhere
+// via the implicit conversion. T must be JSON-convertible — every built-in
+// numeric type, std::string, and vec2/vec3/rgba already are; give your own
+// structs ADL to_json/from_json overloads the same way vec2 does, above.
+template <typename T>
+class NetVar {
+public:
+    NetVar() = default;
+    NetVar(const T& v) : value_(v) {}
+    operator const T&() const { return value_; }
+    NetVar& operator=(const T& v) { value_ = v; dirty_ = true; return *this; }
+    const T& get() const { return value_; }
+
+private:
+    T value_{};
+    bool dirty_ = false;
+    friend class NetObject;
+};
+
+// Base class for a networked entity. Register synced fields and RPC handlers
+// in your constructor; NetServer::update() / NetClient::update() do the rest
+// every tick. Don't construct these directly — use net_spawn() server-side;
+// clients get theirs automatically when the server spawns one.
+class NetObject {
+public:
+    NetObject() = default;
+    virtual ~NetObject() = default;
+    NetObject(const NetObject&) = delete;
+    NetObject& operator=(const NetObject&) = delete;
+
+    uint32_t net_id() const { return id_; }
+    const std::string& class_name() const { return class_name_; }
+
+protected:
+    // Registers a field for auto-sync. Call once per field, in your
+    // constructor, on a NetVar<T> member of the derived class.
+    template <typename T>
+    void net_sync(const std::string& name, NetVar<T>& var) {
+        NetSyncField field;
+        field.get        = [&var]() -> nlohmann::json { return var.value_; };
+        field.is_dirty    = [&var]() { return var.dirty_; };
+        field.clear_dirty = [&var]() { var.dirty_ = false; };
+        field.set         = [&var](const nlohmann::json& j) { var.value_ = j.get<T>(); var.dirty_ = false; };
+        add_sync_field(name, std::move(field));
+    }
+
+    // Runs on the SERVER when a client calls call_command(name, ...) on its
+    // local copy of this same object (matched by net_id).
+    void on_command(const std::string& name, std::function<void(const NetArgs&)> fn);
+    // Runs on EVERY CLIENT when the server calls call_client_rpc(name, ...).
+    void on_client_rpc(const std::string& name, std::function<void(const NetArgs&)> fn);
+
+    // Client-side: sends a Command to the server for this object. Called
+    // server-side instead: logs a warning and does nothing (Commands only
+    // flow client -> server, same restriction Mirror enforces).
+    void call_command(const std::string& name, NetArgs args = NetArgs::object());
+    // Server-side: sends a ClientRpc to every connected client for this
+    // object. Called client-side instead: logs a warning and does nothing.
+    void call_client_rpc(const std::string& name, NetArgs args = NetArgs::object());
+
+private:
+    struct NetSyncField {
+        std::function<nlohmann::json()> get;
+        std::function<bool()> is_dirty;
+        std::function<void()> clear_dirty;
+        std::function<void(const nlohmann::json&)> set;
+    };
+    void add_sync_field(const std::string& name, NetSyncField field);
+
+    uint32_t id_ = 0;
+    std::string class_name_;
+    std::vector<std::pair<std::string, NetSyncField>> fields_;
+    std::vector<std::pair<std::string, std::function<void(const NetArgs&)>>> commands_;
+    std::vector<std::pair<std::string, std::function<void(const NetArgs&)>>> client_rpcs_;
+
+    friend struct NetObjectAccess;   // lets the .cpp's send/dispatch code reach these
+};
+
+// Registers a spawnable class by name. Every machine that will ever spawn or
+// receive this type — the server AND every client — must call this with the
+// same name and an equivalent constructor before it can be spawned or
+// replicated. Do it once at startup, not per-spawn.
+void net_register_class(const std::string& class_name, std::function<std::unique_ptr<NetObject>()> make);
+
+// Server-only: spawns a NetObject and replicates it (class + current field
+// values) to every connected client, and to anyone who connects later.
+// Returns nullptr if called on a client — the server is always authoritative
+// over what exists, there is no client-requested spawning in this version.
+NetObject* net_spawn(const std::string& class_name);
+
+// Server-only: despawns an object and tells every client to remove theirs.
+void net_despawn(NetObject* obj);
+
+// Looks up an object this process currently knows about, by id — the
+// server's authoritative instance, or a client's local replica of it.
+// nullptr if this process has never heard of that id. This is how
+// client-side code gets from "the server told me about object 7" to a
+// Player* it can actually render or read. If this process has BOTH an
+// active NetServer and an active NetClient (uncommon — "host mode" isn't
+// really supported, see the top of this section — mainly a same-process
+// test harness would do this), this prefers the server's copy; call
+// NetServer::find() / NetClient::find() directly when you need to
+// disambiguate.
+NetObject* net_find(uint32_t id);
+
+// Calls fn once for every object this process currently knows about (every
+// spawned object on the server, every replicated object on a client) —
+// the usual way a render loop draws "all the players." Same server-over-
+// client tiebreak as net_find() if both are active in one process.
+void net_each_object(const std::function<void(NetObject&)>& fn);
+
+class NetServer {
+public:
+    NetServer();
+    ~NetServer();
+    NetServer(const NetServer&) = delete;
+    NetServer& operator=(const NetServer&) = delete;
+
+    bool listen(int port);   // starts accepting connections; false on bind/listen failure
+    void update();            // call every tick: accept, read+dispatch Commands, flush dirty NetVars
+    void stop();
+
+    int connection_count() const;
+    NetObject* find(uint32_t id) const;   // unambiguous even if a NetClient is also active in this process
+
+    std::function<void(int conn_id)> on_connect;
+    std::function<void(int conn_id)> on_disconnect;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+    friend struct NetObjectAccess;
+    friend NetObject* net_spawn(const std::string&);
+    friend void net_despawn(NetObject*);
+};
+
+class NetClient {
+public:
+    NetClient();
+    ~NetClient();
+    NetClient(const NetClient&) = delete;
+    NetClient& operator=(const NetClient&) = delete;
+
+    bool connect(const std::string& host, int port);   // resolves + connects; blocks briefly
+    void update();                                       // call every tick: read+dispatch incoming messages
+    void disconnect();
+    bool connected() const;
+    NetObject* find(uint32_t id) const;   // unambiguous even if a NetServer is also active in this process
+
+    std::function<void()> on_connect;
+    std::function<void()> on_disconnect;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+    friend struct NetObjectAccess;
 };
 
 // --- menu ---------------------------------------------------------------

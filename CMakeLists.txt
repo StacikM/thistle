@@ -64,14 +64,17 @@ add_library(thistle STATIC
 )
 
 target_include_directories(thistle
+    # third_party (nlohmann/json) is PUBLIC because the networking API's
+    # NetArgs type is nlohmann::json — consumers including thistle.hpp need
+    # it on their include path too, not just the engine's own .cpp files.
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     PRIVATE
         ${sokol_SOURCE_DIR}
         ${sokol_SOURCE_DIR}/util
         ${stb_SOURCE_DIR}
         ${miniaudio_SOURCE_DIR}
         ${fontstash_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
 
 target_link_libraries(thistle PUBLIC box2d)
@@ -117,7 +120,7 @@ elseif(WIN32)
     # linker doesn't honor, so d3d11/dxgi need to be listed explicitly here (MSVC
     # builds just get them twice, which is harmless).
     target_sources(thistle PRIVATE src/win32_support.cpp)
-    target_link_libraries(thistle PRIVATE winhttp d3d11 dxgi)
+    target_link_libraries(thistle PRIVATE winhttp d3d11 dxgi ws2_32)
 elseif(EMSCRIPTEN)
     # sokol uses WebGL2 (SOKOL_GLES3); the executable sets the emcc link flags.
     # Nothing to link into the engine library itself here.
@@ -150,4 +153,11 @@ if(THISTLE_BUILD_SMOKETEST)
             target_link_options(thistle_smoketest PRIVATE "/ENTRY:mainCRTStartup")
         endif()
     endif()
+
+    # A plain console program (no window, no App/Frame) that spins up a real
+    # NetServer + NetClient over localhost and checks the results — proof the
+    # networking layer actually works, not just compiles. No WIN32_EXECUTABLE
+    # fixup needed here since this one never touches sokol_app.
+    add_executable(thistle_net_smoketest examples/net_smoketest.cpp)
+    target_link_libraries(thistle_net_smoketest PRIVATE thistle)
 endif()
