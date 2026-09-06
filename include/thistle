@@ -1,0 +1,3 @@
+#pragma once
+// Umbrella header so game code can write: #include <thistle>
+#include "thistle.hpp"

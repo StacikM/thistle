@@ -1,0 +1,10 @@
+build/
+build-*/
+_deps/
+compile_commands.json
+.DS_Store
+*.o
+*.obj
+*.a
+*.lib
+*.exe
