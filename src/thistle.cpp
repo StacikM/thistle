@@ -83,6 +83,7 @@ struct EngineState {
     sg_sampler sampler = {};
     sgl_pipeline pip = {};          // alpha-blended pipeline for 2D
     sgl_pipeline pip_additive = {}; // additive-blend pipeline (Blend::Additive)
+    sgl_pipeline pip_3d = {};       // depth-tested pipeline for camera3d()/cube()/etc.
     sg_image white_img = {};        // 1x1 white texel so rects and sprites share one path
     sg_view white_view = {};
 
@@ -199,6 +200,20 @@ void init_cb() {
     apip.colors[0].blend.src_factor_alpha = SG_BLENDFACTOR_ZERO;
     apip.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ONE;
     g_state->pip_additive = sgl_make_pipeline(&apip);
+
+    // Depth-tested pipeline for the minor-3D drawing calls (camera3d/cube/
+    // plane3d/line3d). Uses the swapchain's own depth buffer, which sokol_app
+    // provisions by default — no offscreen pass needed.
+    sg_pipeline_desc pip3 = {};
+    pip3.colors[0].blend.enabled = true;
+    pip3.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_SRC_ALPHA;
+    pip3.colors[0].blend.dst_factor_rgb = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    pip3.colors[0].blend.src_factor_alpha = SG_BLENDFACTOR_ONE;
+    pip3.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    pip3.depth.pixel_format = sglue_environment().defaults.depth_format;
+    pip3.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
+    pip3.depth.write_enabled = true;
+    g_state->pip_3d = sgl_make_pipeline(&pip3);
 
     // 1x1 white texture: rects draw it tinted, so rects and sprites share one
     // texture-enabled path and sokol_gl can batch consecutive draws.
@@ -1764,9 +1779,101 @@ vec2 Frame::measure_text(const std::string& str, TextOpts opts) const {
 }
 
 void Frame::camera(vec2 offset) {
+    // Also resets to 2D/orthographic mode in case camera3d() ran earlier this
+    // frame — projection and pipeline are part of "the camera" here too.
+    sgl_load_pipeline(g_state->pip);
+    sgl_matrix_mode_projection();
+    sgl_load_identity();
+    sgl_ortho(0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, -1.0f, 1.0f);
     sgl_matrix_mode_modelview();
     sgl_load_identity();
     sgl_translate(offset.x, offset.y, 0.0f);
+    sgl_enable_texture();
+}
+
+void Frame::camera3d(const Camera3D& cam) {
+    sgl_load_pipeline(g_state->pip_3d);
+    sgl_matrix_mode_projection();
+    sgl_load_identity();
+    const float aspect = height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
+    sgl_perspective(sgl_rad(cam.fov_deg), aspect, cam.near_z, cam.far_z);
+    sgl_matrix_mode_modelview();
+    sgl_load_identity();
+    sgl_lookat(cam.eye.x, cam.eye.y, cam.eye.z,
+               cam.target.x, cam.target.y, cam.target.z,
+               cam.up.x, cam.up.y, cam.up.z);
+}
+
+namespace {
+// A single fixed key light (pre-normalized ~(0.4, 0.8, 0.5)) used to flat-
+// shade the minor-3D primitives — cheap per-face brightness, not a real
+// lighting model (there's no shader stage to compute one in).
+constexpr float kLight3DX = 0.390f, kLight3DY = 0.781f, kLight3DZ = 0.488f;
+
+rgba shade_face(rgba color, float nx, float ny, float nz) {
+    const float ndotl = nx * kLight3DX + ny * kLight3DY + nz * kLight3DZ;
+    const float shade = 0.45f + 0.55f * std::max(0.0f, ndotl); // ambient floor + diffuse
+    return rgba{color.r * shade, color.g * shade, color.b * shade, color.a};
+}
+} // namespace
+
+void Frame::cube(vec3 center, vec3 size, rgba color) {
+    const float hx = size.x * 0.5f, hy = size.y * 0.5f, hz = size.z * 0.5f;
+    const vec3 c[8] = {
+        {center.x - hx, center.y - hy, center.z - hz}, {center.x + hx, center.y - hy, center.z - hz},
+        {center.x + hx, center.y + hy, center.z - hz}, {center.x - hx, center.y + hy, center.z - hz},
+        {center.x - hx, center.y - hy, center.z + hz}, {center.x + hx, center.y - hy, center.z + hz},
+        {center.x + hx, center.y + hy, center.z + hz}, {center.x - hx, center.y + hy, center.z + hz},
+    };
+    struct Face { int a, b, c, d; float nx, ny, nz; };
+    static const Face faces[6] = {
+        {0, 1, 2, 3,  0.0f,  0.0f, -1.0f}, // back
+        {5, 4, 7, 6,  0.0f,  0.0f,  1.0f}, // front
+        {4, 0, 3, 7, -1.0f,  0.0f,  0.0f}, // left
+        {1, 5, 6, 2,  1.0f,  0.0f,  0.0f}, // right
+        {3, 2, 6, 7,  0.0f,  1.0f,  0.0f}, // top
+        {4, 5, 1, 0,  0.0f, -1.0f,  0.0f}, // bottom
+    };
+    sgl_disable_texture();
+    sgl_begin_triangles();
+    for (const Face& fc : faces) {
+        const rgba sc = shade_face(color, fc.nx, fc.ny, fc.nz);
+        const vec3& v0 = c[fc.a]; const vec3& v1 = c[fc.b]; const vec3& v2 = c[fc.c]; const vec3& v3 = c[fc.d];
+        sgl_v3f_c4f(v0.x, v0.y, v0.z, sc.r, sc.g, sc.b, sc.a);
+        sgl_v3f_c4f(v1.x, v1.y, v1.z, sc.r, sc.g, sc.b, sc.a);
+        sgl_v3f_c4f(v2.x, v2.y, v2.z, sc.r, sc.g, sc.b, sc.a);
+        sgl_v3f_c4f(v0.x, v0.y, v0.z, sc.r, sc.g, sc.b, sc.a);
+        sgl_v3f_c4f(v2.x, v2.y, v2.z, sc.r, sc.g, sc.b, sc.a);
+        sgl_v3f_c4f(v3.x, v3.y, v3.z, sc.r, sc.g, sc.b, sc.a);
+    }
+    sgl_end();
+    sgl_enable_texture();
+}
+
+void Frame::plane3d(vec3 center, float width_, float depth_, rgba color) {
+    const float hw = width_ * 0.5f, hd = depth_ * 0.5f;
+    const rgba sc = shade_face(color, 0.0f, 1.0f, 0.0f);
+    const vec3 v0{center.x - hw, center.y, center.z - hd}, v1{center.x + hw, center.y, center.z - hd},
+               v2{center.x + hw, center.y, center.z + hd}, v3{center.x - hw, center.y, center.z + hd};
+    sgl_disable_texture();
+    sgl_begin_triangles();
+    sgl_v3f_c4f(v0.x, v0.y, v0.z, sc.r, sc.g, sc.b, sc.a);
+    sgl_v3f_c4f(v1.x, v1.y, v1.z, sc.r, sc.g, sc.b, sc.a);
+    sgl_v3f_c4f(v2.x, v2.y, v2.z, sc.r, sc.g, sc.b, sc.a);
+    sgl_v3f_c4f(v0.x, v0.y, v0.z, sc.r, sc.g, sc.b, sc.a);
+    sgl_v3f_c4f(v2.x, v2.y, v2.z, sc.r, sc.g, sc.b, sc.a);
+    sgl_v3f_c4f(v3.x, v3.y, v3.z, sc.r, sc.g, sc.b, sc.a);
+    sgl_end();
+    sgl_enable_texture();
+}
+
+void Frame::line3d(vec3 a, vec3 b, rgba color) {
+    sgl_disable_texture();
+    sgl_begin_lines();
+    sgl_v3f_c4f(a.x, a.y, a.z, color.r, color.g, color.b, color.a);
+    sgl_v3f_c4f(b.x, b.y, b.z, color.r, color.g, color.b, color.a);
+    sgl_end();
+    sgl_enable_texture();
 }
 
 Font load_font(const std::string& path) {

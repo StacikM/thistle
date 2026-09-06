@@ -26,6 +26,22 @@ inline vec2 operator-(vec2 a, vec2 b) { return {a.x - b.x, a.y - b.y}; }
 inline vec2 operator*(vec2 v, float s) { return {v.x * s, v.y * s}; }
 inline vec2 operator*(float s, vec2 v) { return {v.x * s, v.y * s}; }
 
+// A point/vector in 3D world space, for the minor-3D drawing calls below.
+struct vec3 {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+
+    vec3& operator+=(vec3 o) { x += o.x; y += o.y; z += o.z; return *this; }
+    vec3& operator-=(vec3 o) { x -= o.x; y -= o.y; z -= o.z; return *this; }
+    vec3& operator*=(float s) { x *= s; y *= s; z *= s; return *this; }
+};
+
+inline vec3 operator+(vec3 a, vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
+inline vec3 operator-(vec3 a, vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+inline vec3 operator*(vec3 v, float s) { return {v.x * s, v.y * s, v.z * s}; }
+inline vec3 operator*(float s, vec3 v) { return {v.x * s, v.y * s, v.z * s}; }
+
 // An axis-aligned rectangle in pixels.
 struct Rect {
     vec2 pos;
@@ -221,6 +237,21 @@ enum class Pad { A, B, X, Y, Up, Down, Left, Right, L1, R1, Start, Back };
 
 enum class PadKind { None, Xbox, PlayStation, Nintendo, Generic };
 
+// --- minor 3D -------------------------------------------------------------
+// A small perspective/depth-tested drawing mode layered onto the same
+// immediate-mode Frame — for simple 3D objects (a spinning prop, a debug
+// scene), not a full 3D pipeline: no lighting model, no meshes/materials,
+// just flat-shaded boxes/planes/lines using a single fixed key light.
+
+struct Camera3D {
+    vec3 eye{0.0f, 0.0f, 5.0f};
+    vec3 target{0.0f, 0.0f, 0.0f};
+    vec3 up{0.0f, 1.0f, 0.0f};
+    float fov_deg = 60.0f;
+    float near_z = 0.05f;
+    float far_z = 500.0f;
+};
+
 // --- frame --------------------------------------------------------------
 
 // Passed to your update callback each frame. Pixels, origin top-left, y down.
@@ -250,9 +281,25 @@ public:
     // Pixel width/height the string would occupy with the given options.
     vec2 measure_text(const std::string& str, TextOpts opts = {}) const;
 
-    // Shift all subsequent draws this frame by offset (a simple camera).
-    // Pass {0, 0} to reset — e.g. before drawing a fixed HUD.
+    // Shift all subsequent draws this frame by offset (a simple 2D camera).
+    // Pass {0, 0} to reset — e.g. before drawing a fixed HUD. Also switches
+    // drawing back to 2D/orthographic mode if camera3d() was used earlier
+    // this frame.
     void camera(vec2 offset);
+
+    // Switches to a perspective-projected, depth-tested 3D pass. Draw with
+    // cube()/plane3d()/line3d() (world-space vec3 positions) after calling
+    // this; call camera({0, 0}) afterward to go back to 2D/UI drawing.
+    void camera3d(const Camera3D& cam);
+
+    // Flat-shaded box centered at `center`, `size` along each axis.
+    void cube(vec3 center, vec3 size, rgba color);
+
+    // A flat, horizontal (XZ) ground/wall-sized quad centered at `center`.
+    void plane3d(vec3 center, float width, float depth, rgba color);
+
+    // A 3D line (1px, GPU line width — thickness is best-effort/platform-dependent).
+    void line3d(vec3 a, vec3 b, rgba color);
 
     // Transform stack (used by Node). Draws between push/pop are translated,
     // rotated (radians), then scaled; nest freely, pop what you push.

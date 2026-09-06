@@ -3,6 +3,7 @@
 // engine and its platform glue on whatever platform it's built for. Build
 // with -DTHISTLE_BUILD_SMOKETEST=ON.
 #include <thistle.hpp>
+#include <cmath>
 using namespace thistle;
 
 int main() {
@@ -13,6 +14,19 @@ int main() {
 
     app.update([&](Frame f) {
         f.clear(rgb(0.08f, 0.10f, 0.16f));
+
+        // Minor-3D check: a spinning cube + a ground plane + an axis line,
+        // depth-tested against each other.
+        Camera3D cam;
+        const float t = static_cast<float>(f.time);
+        cam.eye = {3.0f * std::cos(t), 2.0f, 3.0f * std::sin(t)};
+        cam.target = {0.0f, 0.0f, 0.0f};
+        f.camera3d(cam);
+        f.plane3d({0, -1, 0}, 6.0f, 6.0f, rgb(0.3f, 0.5f, 0.3f));
+        f.cube({0, 0, 0}, {1, 1, 1}, rgb(0.85f, 0.35f, 0.3f));
+        f.line3d({0, -1, 0}, {0, 2, 0}, rgb(1, 1, 0.3f));
+
+        f.camera({0, 0});   // back to 2D for the HUD rect below
         f.rect({40, 40}, {200, 80}, rgb(0.3f, 0.6f, 0.9f));
 
         if (!reported && req.done()) {
