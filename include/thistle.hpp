@@ -426,6 +426,62 @@ void set_clipboard(const std::string& text);
 enum class Haptic { Light, Medium, Heavy, Success };
 void haptic(Haptic style = Haptic::Light);
 
+// --- crash reporting (fully local — nothing is ever sent anywhere) ------
+// Installed automatically when you construct an App. On a crash (segfault,
+// abort/assert, floating-point exception, an uncaught C++ exception, ...)
+// writes a plain text file — when, what kind of crash, a best-effort stack
+// trace, any context you attached with set_crash_context(), and the last
+// ~50 log lines leading up to it — into crash_log_dir(), then lets the
+// crash continue as normal (the OS still sees a real crash; this doesn't
+// swallow or "fix" anything, it just leaves a note explaining what
+// happened before the process actually goes down). This is not Unreal's
+// crash reporter — there's no server, no upload, no telemetry of any
+// kind; the file just sits on disk for you (or a player who hits a crash)
+// to find and read.
+//
+// Read this before you lean on it: signal/exception handlers run in a
+// severely restricted context where most of the C++ standard library is
+// technically unsafe to call (the crash could have interrupted a malloc
+// call, and calling malloc again from the handler can deadlock). This is
+// the same pragmatic "best effort" every real-world game crash handler
+// makes — it writes a report the overwhelming majority of the time, but a
+// sufficiently unlucky crash can occasionally make the handler itself fail
+// silently rather than produce a file. It fails open: worst case is no
+// report, never a hang or a second crash that erases the first one's
+// information.
+
+// Where crash_*.txt files get written (next to your save data).
+std::string crash_log_dir();
+
+// Whether a crash also shows a native "the game crashed" dialog, on top of
+// always writing the report file. On by default. Turn it off if you'd
+// rather build your own crash UI, or for automated/CI test runs where a
+// blocking system dialog would just hang the run.
+//
+// How this is actually shown, per platform, and why: rendering a NEW UI
+// from inside the crashed process's own (possibly the actual cause of the
+// crash) graphics context is exactly the kind of risky work a crash
+// handler should avoid — so this never touches Thistle's own renderer.
+// Windows calls the OS's native MessageBox directly (a separate system
+// surface, not dependent on your app's window/graphics state). macOS
+// spawns a fresh `osascript` process to show a native alert — a genuinely
+// separate, uncorrupted process, the same principle real crash reporters
+// (Crashpad, Breakpad) use. Linux tries `zenity` if it's on the system;
+// if it isn't, this silently does nothing — the report file still gets
+// written either way, this only affects the popup. iOS never shows one:
+// once an iOS app crashes, the OS has already killed it and returned to
+// the home screen before any of your code could run — there's no hook
+// for a crashed app to show anything. The file's still there for you to
+// pull off the device later; there's just no in-the-moment popup possible.
+void set_crash_popup(bool enabled);
+
+// Attaches extra context that shows up in a crash report if one happens —
+// e.g. set_crash_context("level", "3") so a crash report says what level
+// the player was on. Call as often as you want; only the latest value per
+// key is kept. Purely in-memory bookkeeping, no cost unless a crash
+// actually occurs.
+void set_crash_context(const std::string& key, const std::string& value);
+
 // On-screen text input. begin_text_input() shows the soft keyboard on mobile and
 // starts capturing typed characters (printable ASCII; Backspace edits); read the
 // buffer with text_input() each frame; end_text_input() hides it. Use for naming

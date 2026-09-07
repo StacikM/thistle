@@ -159,7 +159,7 @@ elseif(WIN32)
     # linker doesn't honor, so d3d11/dxgi need to be listed explicitly here (MSVC
     # builds just get them twice, which is harmless).
     target_sources(thistle PRIVATE src/win32_support.cpp)
-    target_link_libraries(thistle PRIVATE winhttp d3d11 dxgi ws2_32)
+    target_link_libraries(thistle PRIVATE winhttp d3d11 dxgi ws2_32 dbghelp user32)
 elseif(EMSCRIPTEN)
     # sokol uses WebGL2 (SOKOL_GLES3); the executable sets the emcc link flags.
     # Nothing to link into the engine library itself here.
@@ -199,6 +199,14 @@ if(THISTLE_BUILD_SMOKETEST)
     # fixup needed here since this one never touches sokol_app.
     add_executable(thistle_net_smoketest examples/net_smoketest.cpp)
     target_link_libraries(thistle_net_smoketest PRIVATE thistle)
+
+    # Deliberately crashes one of three ways (segv/abort/throw) to verify the
+    # crash handler for real — does a report file actually get written, with
+    # the right content. Not registered as a ctest: it's supposed to crash,
+    # and a passing "test" here means checking a file afterward, not the
+    # process's exit code — see docs/crash-handler.md for how to run it.
+    add_executable(thistle_crash_smoketest examples/crash_smoketest.cpp)
+    target_link_libraries(thistle_crash_smoketest PRIVATE thistle)
 
     # Only thistle_net_smoketest is registered as a test — it's headless and
     # actually exits. thistle_smoketest opens a real window and never quits

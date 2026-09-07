@@ -14,9 +14,14 @@
 #include "thistle_gamepad.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <exception>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -37,7 +42,10 @@
 #include <direct.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <dbghelp.h>
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "user32.lib")   // MessageBoxA, for the crash popup — MSVC only, see CMakeLists.txt for MinGW
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -49,6 +57,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
+#include <signal.h>
+#include <execinfo.h>
 #endif
 
 #if defined(__APPLE__)
@@ -2219,6 +2229,225 @@ void clear() { ensure_loaded(); g_data.clear(); write(); }
 std::string path() { return file_path(); }
 } // namespace save
 
+// --- crash reporting -----------------------------------------------------
+// See the big comment on this API in thistle.hpp before touching this —
+// the "best effort, fails open" framing is deliberate, not an oversight.
+
+namespace {
+std::string g_crash_dir;              // computed + created once, at install time (safe context)
+std::string g_crash_platform_cached;  // platform_name()/device_name() cached here at install time —
+std::string g_crash_device_cached;    //   device_name() goes through Objective-C on Apple, unsafe to call from a handler
+std::map<std::string, std::string> g_crash_context;
+bool g_crash_handler_installed = false;
+bool g_crash_popup_enabled = true;
+std::atomic<bool> g_in_crash_handler{false};   // re-entrancy guard: a crash while already handling one gets out of the way instead of looping
+
+void crash_make_dirs(const std::string& path) {
+    std::string cur;
+    for (char c : path) {
+        cur += c;
+#if defined(_WIN32)
+        if ((c == '/' || c == '\\') && cur.size() > 1) _mkdir(cur.c_str());
+#else
+        if (c == '/' && cur.size() > 1) mkdir(cur.c_str(), 0755);
+#endif
+    }
+#if defined(_WIN32)
+    _mkdir(path.c_str());
+#else
+    mkdir(path.c_str(), 0755);
+#endif
+}
+
+std::vector<std::string> crash_backtrace() {
+    std::vector<std::string> out;
+#if defined(_WIN32)
+    void* frames[64];
+    USHORT n = CaptureStackBackTrace(0, 64, frames, nullptr);
+    HANDLE process = GetCurrentProcess();
+    SymInitialize(process, nullptr, TRUE);
+    alignas(SYMBOL_INFO) char buf[sizeof(SYMBOL_INFO) + 256];
+    SYMBOL_INFO* symbol = reinterpret_cast<SYMBOL_INFO*>(buf);
+    symbol->MaxNameLen = 255;
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    for (USHORT i = 0; i < n; ++i) {
+        DWORD64 addr = reinterpret_cast<DWORD64>(frames[i]);
+        char line[320];
+        if (SymFromAddr(process, addr, nullptr, symbol))
+            std::snprintf(line, sizeof(line), "0x%016llx %s", static_cast<unsigned long long>(addr), symbol->Name);
+        else
+            std::snprintf(line, sizeof(line), "0x%016llx", static_cast<unsigned long long>(addr));
+        out.emplace_back(line);
+    }
+#else
+    void* frames[64];
+    int n = backtrace(frames, 64);
+    char** syms = backtrace_symbols(frames, n);
+    if (syms) {
+        for (int i = 0; i < n; ++i) out.emplace_back(syms[i]);
+        free(syms);   // backtrace_symbols' own malloc'd array — not our std::vector, plain free() is correct here
+    }
+#endif
+    return out;
+}
+
+// Writes the actual report. Called from a signal handler / SEH filter /
+// std::terminate handler — deliberately does as little as possible with the
+// least-risky subset of the standard library available (plain C file I/O,
+// no iostreams; the only heap allocation beyond what's already unavoidable
+// is crash_backtrace()'s own, which real crash handlers universally accept).
+// Platform-native "the game crashed" dialog — deliberately never touches
+// Thistle's own renderer (see the doc comment on set_crash_popup() in
+// thistle.hpp for why). Called after the report file is already written,
+// so even if this itself misbehaves, the report exists.
+#if defined(__APPLE__)
+void crash_show_popup(const std::string& title, const std::string& message) {
+#if TARGET_OS_IPHONE
+    (void)title; (void)message;   // no hook exists — iOS has already killed the app by the time this would run
+#else
+    pid_t pid = fork();
+    if (pid == 0) {
+        // setsid() moves the child into its own new session AND process
+        // group, detached from the crashing parent's — without this, the
+        // parent re-raising its signal a few lines below can trigger the
+        // shell/terminal's process-group cleanup before the child finishes
+        // execl(), killing the popup before it ever shows. Verified this
+        // race for real: without setsid() the popup silently failed to
+        // appear essentially every time; with it, every time.
+        setsid();
+        std::string script = "display dialog \"" + message + "\" buttons {\"OK\"} with icon caution with title \"" + title + "\"";
+        execl("/usr/bin/osascript", "osascript", "-e", script.c_str(), static_cast<char*>(nullptr));
+        _exit(1);
+    }
+    // Parent doesn't wait: the popup process is fully independent and keeps
+    // running (and showing) even after this (crashing) process exits.
+#endif
+}
+#elif defined(_WIN32)
+void crash_show_popup(const std::string& title, const std::string& message) {
+    MessageBoxA(nullptr, message.c_str(), title.c_str(), MB_OK | MB_ICONERROR);
+}
+#else
+void crash_show_popup(const std::string& title, const std::string& message) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();   // detach from the crashing parent's process group — see the macOS branch's comment for why this matters
+        execlp("zenity", "zenity", "--error", "--title", title.c_str(), "--text", message.c_str(), static_cast<char*>(nullptr));
+        _exit(1);   // zenity not installed — silently give up; the report file still exists
+    }
+}
+#endif
+
+void crash_write_report(const char* reason, const std::vector<std::string>& bt) {
+    bool expected = false;
+    if (!g_in_crash_handler.compare_exchange_strong(expected, true)) return;   // already handling a crash — don't recurse
+    if (g_crash_dir.empty()) return;
+    std::time_t now = std::time(nullptr);
+    char stamp[32];
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&now));
+    // The timestamp alone collides when two crashes land in the same second
+    // (verified: a fast automated test doing exactly that silently
+    // overwrote an earlier report before this was added) — the process id
+    // makes the filename unique across processes; the re-entrancy guard
+    // above already makes sure a single process only ever writes once.
+#if defined(_WIN32)
+    unsigned long pid = GetCurrentProcessId();
+#else
+    long pid = static_cast<long>(getpid());
+#endif
+    std::string path = g_crash_dir + "/crash_" + stamp + "-" + std::to_string(pid) + ".txt";
+    std::FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) return;
+
+    std::fprintf(f, "Thistle crash report\n");
+    std::fprintf(f, "time: %s\n", stamp);
+    std::fprintf(f, "platform: %s\n", g_crash_platform_cached.c_str());
+    std::fprintf(f, "device: %s\n", g_crash_device_cached.c_str());
+    std::fprintf(f, "reason: %s\n", reason);
+
+    if (!g_crash_context.empty()) {
+        std::fprintf(f, "\ncontext:\n");
+        for (auto& kv : g_crash_context) std::fprintf(f, "  %s: %s\n", kv.first.c_str(), kv.second.c_str());
+    }
+
+    std::fprintf(f, "\nbacktrace:\n");
+    for (auto& line : bt) std::fprintf(f, "  %s\n", line.c_str());
+
+    std::fprintf(f, "\nlast log lines:\n");
+    size_t start = g_logs.size() > 50 ? g_logs.size() - 50 : 0;
+    for (size_t i = start; i < g_logs.size(); ++i) std::fprintf(f, "  %s\n", g_logs[i].c_str());
+
+    std::fclose(f);
+
+    if (g_crash_popup_enabled) {
+        std::string title = g_state ? g_state->config.title : std::string("Thistle");
+        std::string message = title + " ran into a problem and had to close.\n\n"
+                               "A report was saved to:\n" + path + "\n\nReason: " + reason;
+        crash_show_popup(title, message);
+    }
+}
+
+#if defined(_WIN32)
+LONG WINAPI crash_seh_filter(EXCEPTION_POINTERS* info) {
+    char reason[64];
+    std::snprintf(reason, sizeof(reason), "unhandled exception 0x%08lX",
+                  static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode));
+    crash_write_report(reason, crash_backtrace());
+    return EXCEPTION_CONTINUE_SEARCH;   // let Windows' own crash handling (WER, a debugger) still happen
+}
+#else
+void crash_signal_handler(int sig) {
+    crash_write_report(strsignal(sig) ? strsignal(sig) : "unknown signal", crash_backtrace());
+    struct sigaction dfl{};
+    dfl.sa_handler = SIG_DFL;
+    sigemptyset(&dfl.sa_mask);
+    sigaction(sig, &dfl, nullptr);
+    raise(sig);   // re-raise so the OS's own crash behavior (core dump, debugger) still happens
+}
+#endif
+
+void crash_terminate_handler() {
+    crash_write_report("uncaught C++ exception (std::terminate)", crash_backtrace());
+    std::abort();
+}
+
+void install_crash_handler() {
+    if (g_crash_handler_installed) return;
+    g_crash_handler_installed = true;
+
+    g_crash_platform_cached = platform_name();
+    g_crash_device_cached = device_name();
+
+    std::string save_file = save::path();
+    size_t slash = save_file.find_last_of("/\\");
+    std::string base = slash == std::string::npos ? "." : save_file.substr(0, slash);
+    g_crash_dir = base + "/crashes";
+    crash_make_dirs(g_crash_dir);
+
+    crash_backtrace();   // prime backtrace()'s lazy first-call init before a real crash needs it
+
+    std::set_terminate(crash_terminate_handler);
+
+#if defined(_WIN32)
+    SetUnhandledExceptionFilter(crash_seh_filter);
+#else
+    struct sigaction sa{};
+    sa.sa_handler = crash_signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    for (int sig : {SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS}) sigaction(sig, &sa, nullptr);
+#endif
+}
+} // namespace
+
+std::string crash_log_dir() { return g_crash_dir; }
+
+void set_crash_context(const std::string& key, const std::string& value) {
+    g_crash_context[key] = value;
+}
+
+void set_crash_popup(bool enabled) { g_crash_popup_enabled = enabled; }
+
 void Frame::text(const std::string& str, vec2 pos, TextOpts opts) {
     FONScontext* fons = g_state->fons;
     if (!fons) return;
@@ -2471,6 +2700,7 @@ App::App(AppConfig config) {
     state = EngineState{};
     state.config = std::move(config);
     g_state = &state;
+    install_crash_handler();   // safe to call more than once; only the first call does anything
 #if defined(__APPLE__)
     // On iOS the app bundle is the asset root. Do this in the constructor so it
     // runs before the user's load_texture()/load_font() calls in main().
