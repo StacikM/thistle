@@ -1,0 +1,27 @@
+# {{name}}
+
+Made with [Thistle](https://github.com/StacikM/thistle).
+
+## Build & run
+
+```bash
+thistle build
+thistle run
+```
+
+Don't have the `thistle` CLI on your PATH? Plain CMake works too:
+
+```bash
+cmake -S . -B build
+cmake --build build
+```
+
+## Version
+
+This project's version lives in `thistle.json`, gets baked into `version.hpp` at build time, and is available in code as `GAME_VERSION` (see `src/main.cpp`). Change it with:
+
+```bash
+thistle version bump patch   # or minor / major
+thistle version set 2.0.0
+thistle version show
+```

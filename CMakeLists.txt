@@ -13,6 +13,43 @@ set(CMAKE_C_STANDARD 11)
 # project with -DTHISTLE_DEBUG=ON to turn it on.
 option(THISTLE_DEBUG "Build with the in-app debug log overlay" OFF)
 
+# Gets an assets/ directory next to your executable, on every platform, so
+# relative paths like "assets/font.ttf" resolve the same way whether you're
+# on macOS, Windows, or Linux. Call once per executable target, after
+# add_executable() — see tools/thistle-cli's generated CMakeLists.txt for the
+# canonical example. Defined here (not in a consumer project) specifically so
+# every project that adds this engine as a subdirectory gets it for free,
+# instead of every game hand-rolling its own per-platform bundling logic —
+# which is exactly the gap that existed before this: only the Apple half of
+# asset-copying had ever been written anywhere in this project's history.
+function(thistle_bundle_assets TARGET ASSETS_DIR)
+    if(NOT IS_DIRECTORY "${ASSETS_DIR}")
+        message(WARNING "thistle_bundle_assets: '${ASSETS_DIR}' is not a directory, skipping")
+        return()
+    endif()
+
+    if(APPLE)
+        # MACOSX_PACKAGE_LOCATION only takes effect on a bundle target
+        # (add_executable(... MACOSX_BUNDLE ...) on macOS, or any iOS app
+        # target) — a plain non-bundle executable ignores it harmlessly.
+        file(GLOB_RECURSE _thistle_asset_files "${ASSETS_DIR}/*")
+        foreach(_thistle_asset_file ${_thistle_asset_files})
+            file(RELATIVE_PATH _thistle_asset_rel "${ASSETS_DIR}" "${_thistle_asset_file}")
+            get_filename_component(_thistle_asset_reldir "${_thistle_asset_rel}" DIRECTORY)
+            set_source_files_properties("${_thistle_asset_file}" PROPERTIES
+                MACOSX_PACKAGE_LOCATION "Resources/assets/${_thistle_asset_reldir}")
+        endforeach()
+        target_sources(${TARGET} PRIVATE ${_thistle_asset_files})
+    else()
+        # Windows/Linux: a plain post-build copy next to the executable.
+        add_custom_command(TARGET ${TARGET} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${ASSETS_DIR}" "$<TARGET_FILE_DIR:${TARGET}>/assets"
+            COMMENT "thistle_bundle_assets: copying assets next to ${TARGET}"
+        )
+    endif()
+endfunction()
+
 include(FetchContent)
 
 # sokol — windowing + graphics (header-only).

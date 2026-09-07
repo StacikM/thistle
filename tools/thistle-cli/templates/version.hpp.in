@@ -1,0 +1,4 @@
+// Generated from thistle.json's "version" field by CMake's configure_file()
+// on every build — don't hand-edit; use `thistle version bump`/`set` instead.
+#pragma once
+inline constexpr const char* GAME_VERSION = "@THISTLE_PROJECT_VERSION@";

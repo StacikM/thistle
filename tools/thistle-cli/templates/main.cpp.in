@@ -1,0 +1,28 @@
+// {{name}} — made with Thistle. This is your whole game loop: edit it, then
+// run `thistle run` again to see the change.
+//
+// Deliberately draws shapes only, not text — text needs a .ttf loaded via
+// load_font() first (there's no built-in font), and this starter shouldn't
+// depend on you having one yet. Drop a font into assets/ and see
+// docs/drawing.md in the engine repo when you're ready to add text.
+#include <thistle.hpp>
+#include <version.hpp>
+#include <cmath>
+using namespace thistle;
+
+int main() {
+    App app{{.title = "{{name}} v" + std::string(GAME_VERSION), .width = 1280, .height = 720}};
+
+    app.update([&](Frame f) {
+        f.clear(rgb(0.08f, 0.09f, 0.14f));
+
+        // A moving circle so it's obvious this is actually running, not a
+        // static image — and a rect, so you have two shapes to start editing.
+        const float t = static_cast<float>(f.time);
+        f.circle({640.0f + std::cos(t) * 200.0f, 360.0f + std::sin(t) * 120.0f}, 40.0f,
+                 rgb(0.35f, 0.65f, 0.95f));
+        f.rect({40, 40}, {200, 60}, rgb(0.85f, 0.4f, 0.3f));
+    });
+
+    return app.run();
+}

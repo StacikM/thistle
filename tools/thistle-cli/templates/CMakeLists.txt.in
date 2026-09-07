@@ -1,0 +1,39 @@
+cmake_minimum_required(VERSION 3.20)
+project({{name}} LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Path to the Thistle engine, set by `thistle new` when this project was
+# created. Override with -DTHISTLE_DIR=... if you move this project
+# somewhere else relative to the engine.
+set(THISTLE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/{{engine_dir}}" CACHE PATH "Path to the Thistle engine source")
+add_subdirectory(${THISTLE_DIR} ${CMAKE_BINARY_DIR}/thistle)
+
+# Bakes the version from thistle.json into a header your code can #include —
+# see src/version.hpp.in and `thistle version bump`. configure_file() only
+# reruns when CMake reconfigures, not on every `cmake --build` — this
+# CONFIGURE_DEPENDS line is what makes editing thistle.json (via `thistle
+# version bump`, or by hand) automatically trigger that reconfigure on your
+# next build, instead of silently building with a stale version.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/thistle.json")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/thistle.json" THISTLE_PROJECT_JSON)
+string(JSON THISTLE_PROJECT_VERSION GET "${THISTLE_PROJECT_JSON}" version)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/version.hpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/version.hpp"
+    @ONLY
+)
+
+if(APPLE)
+    add_executable({{name}} MACOSX_BUNDLE src/main.cpp)
+else()
+    add_executable({{name}} src/main.cpp)
+endif()
+
+target_link_libraries({{name}} PRIVATE thistle)
+target_include_directories({{name}} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+
+# Gets assets/ next to the built executable on every platform — see the
+# function's definition (and why it exists) in the engine's own CMakeLists.txt.
+thistle_bundle_assets({{name}} "${CMAKE_CURRENT_SOURCE_DIR}/assets")
