@@ -457,8 +457,14 @@ void init_cb() {
 
 // --- post-processing helpers -------------------------------------------
 
+// One post-effect shader per backend, all doing the exact same thing: sample
+// a fullscreen triangle (no vertex buffer — the classic (vid<<1)&2 / vid&2
+// trick) and apply whichever effect `params.x` (the PostEffect enum value)
+// selects, at strength `params.y`. Keeping four near-identical shaders
+// instead of one is the price of not depending on a build-time cross-compiler
+// like sokol-shdc — see ensure_post() for how each one gets wired up.
 #if defined(__APPLE__)
-const char* POST_MSL = R"MSL(
+const char* POST_SHADER = R"MSL(
 #include <metal_stdlib>
 using namespace metal;
 struct vs_out { float4 pos [[position]]; float2 uv; };
@@ -485,6 +491,59 @@ fragment float4 fs_main(vs_out in [[stage_in]],
     return c;
 }
 )MSL";
+#elif defined(_WIN32)
+const char* POST_SHADER = R"HLSL(
+struct vs_out { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+vs_out vs_main(uint vid : SV_VertexID) {
+    float2 p = float2(float((vid << 1) & 2), float(vid & 2));
+    vs_out o;
+    o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0);
+    o.uv = float2(p.x, 1.0 - p.y);
+    return o;
+}
+cbuffer params : register(b0) { float4 params; };
+Texture2D tex : register(t0);
+SamplerState smp : register(s0);
+float4 fs_main(vs_out inp) : SV_Target {
+    float4 c = tex.Sample(smp, inp.uv);
+    int mode = int(params.x);
+    float k = params.y;
+    if (mode == 1) { float g = dot(c.rgb, float3(0.299, 0.587, 0.114)); c.rgb = lerp(c.rgb, float3(g, g, g), k); }
+    else if (mode == 2) { float2 d = inp.uv - 0.5; float v = 1.0 - dot(d, d) * k * 3.0; c.rgb *= saturate(v); }
+    else if (mode == 3) { float o = 0.004 * k; c.r = tex.Sample(smp, inp.uv + float2(o, 0.0)).r; c.b = tex.Sample(smp, inp.uv - float2(o, 0.0)).b; }
+    else if (mode == 4) { c.rgb = lerp(c.rgb, float3(1.0, 1.0, 1.0), k); }
+    else if (mode == 5) { c.rgb *= (1.0 - k); }
+    return c;
+}
+)HLSL";
+#else
+// GLCore (Linux) and GLES3 (Android/Web) share the same GLSL body — only the
+// #version/precision preamble differs, so it's spliced on in ensure_post().
+const char* POST_GLSL_VS_BODY = R"GLSL(
+out vec2 uv;
+void main() {
+    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+    uv = vec2(p.x, 1.0 - p.y);
+}
+)GLSL";
+const char* POST_GLSL_FS_BODY = R"GLSL(
+in vec2 uv;
+out vec4 frag_color;
+uniform sampler2D tex_smp;
+uniform vec4 params; // x=mode y=intensity z=time w=unused
+void main() {
+    vec4 c = texture(tex_smp, uv);
+    int mode = int(params.x);
+    float k = params.y;
+    if (mode == 1) { float g = dot(c.rgb, vec3(0.299, 0.587, 0.114)); c.rgb = mix(c.rgb, vec3(g), k); }
+    else if (mode == 2) { vec2 d = uv - 0.5; float v = 1.0 - dot(d, d) * k * 3.0; c.rgb *= clamp(v, 0.0, 1.0); }
+    else if (mode == 3) { float o = 0.004 * k; c.r = texture(tex_smp, uv + vec2(o, 0.0)).r; c.b = texture(tex_smp, uv - vec2(o, 0.0)).b; }
+    else if (mode == 4) { c.rgb = mix(c.rgb, vec3(1.0), k); }
+    else if (mode == 5) { c.rgb *= (1.0 - k); }
+    frag_color = c;
+}
+)GLSL";
 #endif
 
 void destroy_offscreen(EngineState& s) {
@@ -498,9 +557,8 @@ void destroy_offscreen(EngineState& s) {
 }
 
 // Lazily creates the post pipeline + (re)sizes the offscreen target. Returns
-// true when everything is ready to render through. Metal only for now.
+// true when everything is ready to render through.
 bool ensure_post(EngineState& s, int w, int h) {
-#if defined(__APPLE__)
     const sg_environment env = sglue_environment();
     if (!s.post_pipeline_ready) {
         sg_sampler_desc smp = {};
@@ -511,21 +569,47 @@ bool ensure_post(EngineState& s, int w, int h) {
         s.post_sampler = sg_make_sampler(&smp);
 
         sg_shader_desc sd = {};
-        sd.vertex_func.source = POST_MSL;   sd.vertex_func.entry = "vs_main";
-        sd.fragment_func.source = POST_MSL; sd.fragment_func.entry = "fs_main";
         sd.uniform_blocks[0].stage = SG_SHADERSTAGE_FRAGMENT;
-        sd.uniform_blocks[0].size = 16;
-        sd.uniform_blocks[0].msl_buffer_n = 0;
         sd.views[0].texture.stage = SG_SHADERSTAGE_FRAGMENT;
         sd.views[0].texture.image_type = SG_IMAGETYPE_2D;
         sd.views[0].texture.sample_type = SG_IMAGESAMPLETYPE_FLOAT;
-        sd.views[0].texture.msl_texture_n = 0;
         sd.samplers[0].stage = SG_SHADERSTAGE_FRAGMENT;
         sd.samplers[0].sampler_type = SG_SAMPLERTYPE_FILTERING;
-        sd.samplers[0].msl_sampler_n = 0;
         sd.texture_sampler_pairs[0].stage = SG_SHADERSTAGE_FRAGMENT;
         sd.texture_sampler_pairs[0].view_slot = 0;
         sd.texture_sampler_pairs[0].sampler_slot = 0;
+
+#if defined(__APPLE__)
+        sd.vertex_func.source = POST_SHADER;   sd.vertex_func.entry = "vs_main";
+        sd.fragment_func.source = POST_SHADER; sd.fragment_func.entry = "fs_main";
+        sd.uniform_blocks[0].size = 16;
+        sd.uniform_blocks[0].msl_buffer_n = 0;
+        sd.views[0].texture.msl_texture_n = 0;
+        sd.samplers[0].msl_sampler_n = 0;
+#elif defined(_WIN32)
+        sd.vertex_func.source = POST_SHADER;   sd.vertex_func.entry = "vs_main";
+        sd.fragment_func.source = POST_SHADER; sd.fragment_func.entry = "fs_main";
+        sd.uniform_blocks[0].size = 16;
+        sd.uniform_blocks[0].hlsl_register_b_n = 0;
+        sd.views[0].texture.hlsl_register_t_n = 0;
+        sd.samplers[0].hlsl_register_s_n = 0;
+#else
+        // GLCore (Linux) vs GLES3 (Android/Web) only differ in the
+        // #version/precision preamble — see the shader-source comment above.
+        #if defined(__ANDROID__) || defined(__EMSCRIPTEN__)
+        static const std::string vs_src = "#version 300 es\n" + std::string(POST_GLSL_VS_BODY);
+        static const std::string fs_src = "#version 300 es\nprecision mediump float;\n" + std::string(POST_GLSL_FS_BODY);
+        #else
+        static const std::string vs_src = "#version 410 core\n" + std::string(POST_GLSL_VS_BODY);
+        static const std::string fs_src = "#version 410 core\n" + std::string(POST_GLSL_FS_BODY);
+        #endif
+        sd.vertex_func.source = vs_src.c_str();   sd.vertex_func.entry = "main";
+        sd.fragment_func.source = fs_src.c_str(); sd.fragment_func.entry = "main";
+        sd.uniform_blocks[0].size = 16;
+        sd.uniform_blocks[0].glsl_uniforms[0].type = SG_UNIFORMTYPE_FLOAT4;
+        sd.uniform_blocks[0].glsl_uniforms[0].glsl_name = "params";
+        sd.texture_sampler_pairs[0].glsl_name = "tex_smp";
+#endif
         s.post_shader = sg_make_shader(&sd);
 
         sg_pipeline_desc pd = {};
@@ -564,10 +648,6 @@ bool ensure_post(EngineState& s, int w, int h) {
         s.off_h = h;
     }
     return true;
-#else
-    (void)s; (void)w; (void)h;
-    return false;
-#endif
 }
 
 #ifdef THISTLE_DEBUG
@@ -690,11 +770,7 @@ void frame_cb() {
         g_state->clear_color.r, g_state->clear_color.g,
         g_state->clear_color.b, g_state->clear_color.a};
 
-#if defined(__APPLE__)
     const bool use_post = g_state->post_effect != PostEffect::None && ensure_post(*g_state, w, h);
-#else
-    const bool use_post = false;
-#endif
 
     if (g_state->fons) sfons_flush(g_state->fons); // upload any newly rasterized glyphs
 

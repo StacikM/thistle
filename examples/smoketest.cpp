@@ -23,6 +23,10 @@ int main() {
     iap_fetch_products({"com.stacik.thistle.smoketest.nonexistent"});
     bool iap_reported = false;
 
+    // Post-processing check: a vignette should darken the corners of
+    // everything drawn below, on every backend (Metal/D3D11/GLCore/GLES3).
+    set_post_effect(PostEffect::Vignette, 1.0f);
+
     app.update([&](Frame f) {
         f.clear(rgb(0.08f, 0.10f, 0.16f));
 

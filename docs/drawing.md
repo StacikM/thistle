@@ -93,7 +93,9 @@ Resets to `Alpha` automatically at the start of the *next* frame, not immediatel
 set_post_effect(PostEffect::Vignette, 0.6f);
 ```
 
-Full-screen effects (`Grayscale`, `Vignette`, `Chromatic`, `Flash`, `Fade`) applied after your frame is rendered, via an offscreen pass. **Metal only right now** — a no-op everywhere else, silently. If you build a damage-flash effect around this and then wonder why it doesn't show up on your Windows build, this is why: check `platform()` if it matters, or drive the same visual effect a different way (a full-screen `f.rect` with additive blend gets you 80% of `Flash` and works everywhere).
+Full-screen effects (`Grayscale`, `Vignette`, `Chromatic`, `Flash`, `Fade`) applied after your frame is rendered, via an offscreen pass. Every backend has a real shader now — Metal, D3D11 (Windows), GLCore (Linux), GLES3 (Android/Web) — instead of Metal being the only one that did anything.
+
+Verification differs by backend: Metal is unchanged from the version that's been running in Fling, so that one's genuinely proven. The three new ones (D3D11/GLCore/GLES3) are verified by independently compiling their actual shader source through `glslangValidator`'s real GLSL and HLSL frontends — real syntax/semantic checking, not a guess — plus a clean `sg_make_shader`/`sg_make_pipeline` at runtime with no validation errors. None of the three have been confirmed by an actual rendered vignette on a screen yet; `examples/smoketest.cpp` turns one on (`Vignette`, full strength) specifically so the first person to run it on Windows/Linux/Android sees immediately whether it's right.
 
 ## Minor 3D — read this before you get excited
 
