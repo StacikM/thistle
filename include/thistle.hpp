@@ -987,3 +987,22 @@ public:
 void set_scene(const std::string& name);
 
 } // namespace thistle
+
+// --- entry point ---------------------------------------------------------
+// Everywhere except Android, a Thistle game is a plain `int main()` that ends
+// with `return app.run();` — write it however you like, these macros are
+// optional there.
+//
+// Android has no process main(): the OS loads your game as a shared library
+// and jumps straight into sokol_app.h's own ANativeActivity_onCreate, which
+// expects a sokol_main() it can call to get set up — not a function that
+// blocks running a game loop. THISTLE_MAIN/THISTLE_RUN hide that difference:
+// wrap your entry point in THISTLE_MAIN { ... THISTLE_RUN(app); } and the
+// exact same source compiles unchanged on every platform, Android included.
+#if defined(__ANDROID__)
+    #define THISTLE_MAIN extern "C" void thistle_user_main()
+    #define THISTLE_RUN(app) do { (app).run(); return; } while (0)
+#else
+    #define THISTLE_MAIN int main()
+    #define THISTLE_RUN(app) return (app).run()
+#endif

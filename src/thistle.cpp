@@ -58,7 +58,15 @@
 #include <fcntl.h>
 #include <cerrno>
 #include <signal.h>
+#if !defined(__ANDROID__)
+// Bionic (Android's libc) doesn't provide execinfo.h/backtrace() — see
+// crash_backtrace()'s Android branch, which skips stack traces entirely.
 #include <execinfo.h>
+#endif
+#if defined(__ANDROID__)
+#include <android/native_activity.h>
+#include <android/asset_manager.h>
+#endif
 #endif
 
 #if defined(__APPLE__)
@@ -91,8 +99,128 @@ extern "C" int   thistle_http_poll(void* h, int* status, const char** body, int*
 extern "C" void  thistle_http_free(void* h);
 #endif
 
+#if defined(__ANDROID__)
+// App::run() has no sapp_run() call to block in on Android — there's no
+// process main() for it to block from. Instead it stashes the desc here and
+// sokol_main() (defined at the bottom of this file, called by sokol_app.h's
+// own ANativeActivity_onCreate) hands it back. See THISTLE_MAIN in thistle.hpp.
+static sapp_desc g_thistle_android_desc;
+#endif
+
 namespace thistle {
 namespace {
+
+#if defined(__ANDROID__)
+// --- Android asset loading ----------------------------------------------
+// Everywhere else, game assets are plain files next to the executable
+// ("assets/foo.png"). On Android they're packed inside the APK's zip and
+// only reachable through AAssetManager — there's no fopen()-able path at
+// all. examples/android/build_apk.sh packages the game's assets/ directory
+// contents directly at the APK assets root (see its `aapt add`), so a path
+// like "assets/foo.png" needs that literal prefix stripped before it means
+// anything to AAssetManager.
+std::string android_asset_path(const std::string& path) {
+    const std::string prefix = "assets/";
+    return path.compare(0, prefix.size(), prefix) == 0 ? path.substr(prefix.size()) : path;
+}
+
+bool android_read_asset(const std::string& path, std::vector<unsigned char>& out) {
+    const auto* activity = static_cast<const ANativeActivity*>(sapp_android_get_native_activity());
+    if (!activity || !activity->assetManager) return false;
+    AAsset* asset = AAssetManager_open(activity->assetManager, android_asset_path(path).c_str(), AASSET_MODE_BUFFER);
+    if (!asset) return false;
+    const off_t len = AAsset_getLength(asset);
+    out.resize(static_cast<size_t>(len));
+    const int n = len > 0 ? AAsset_read(asset, out.data(), out.size()) : 0;
+    AAsset_close(asset);
+    return n == static_cast<int>(out.size());
+}
+
+// Lets fontstash own the buffer (matches fonsAddFont's own file-loading path,
+// which also hands fonsAddFontMem a malloc'd buffer with freeData=1) instead
+// of us tracking its lifetime separately.
+int android_fons_add_font(FONScontext* fons, const std::string& path) {
+    std::vector<unsigned char> bytes;
+    if (!android_read_asset(path, bytes)) return FONS_INVALID;
+    unsigned char* data = static_cast<unsigned char*>(std::malloc(bytes.size()));
+    if (!data) return FONS_INVALID;
+    std::memcpy(data, bytes.data(), bytes.size());
+    return fonsAddFontMem(fons, "font", data, static_cast<int>(bytes.size()), 1);
+}
+
+// miniaudio VFS backed by AAssetManager, so play_sound()/play_music() (and
+// anything else that goes through the engine's ma_resource_manager) work
+// unchanged on Android — see where this gets installed in init_cb() below.
+// Read-only: games don't write audio assets, so onWrite/onOpenW are unused.
+ma_result android_ma_vfs_open(ma_vfs*, const char* filePath, ma_uint32 openMode, ma_vfs_file* pFile) {
+    if ((openMode & MA_OPEN_MODE_WRITE) != 0) return MA_NOT_IMPLEMENTED;
+    const auto* activity = static_cast<const ANativeActivity*>(sapp_android_get_native_activity());
+    if (!activity || !activity->assetManager) return MA_ERROR;
+    AAsset* asset = AAssetManager_open(activity->assetManager, android_asset_path(filePath).c_str(), AASSET_MODE_RANDOM);
+    if (!asset) return MA_DOES_NOT_EXIST;
+    *pFile = reinterpret_cast<ma_vfs_file>(asset);
+    return MA_SUCCESS;
+}
+ma_result android_ma_vfs_close(ma_vfs*, ma_vfs_file file) {
+    AAsset_close(reinterpret_cast<AAsset*>(file));
+    return MA_SUCCESS;
+}
+ma_result android_ma_vfs_read(ma_vfs*, ma_vfs_file file, void* dst, size_t sizeInBytes, size_t* pBytesRead) {
+    const int n = AAsset_read(reinterpret_cast<AAsset*>(file), dst, sizeInBytes);
+    if (n < 0) return MA_ERROR;
+    if (pBytesRead) *pBytesRead = static_cast<size_t>(n);
+    return (n == 0 && sizeInBytes > 0) ? MA_AT_END : MA_SUCCESS;
+}
+ma_result android_ma_vfs_seek(ma_vfs*, ma_vfs_file file, ma_int64 offset, ma_seek_origin origin) {
+    const int whence = origin == ma_seek_origin_start ? SEEK_SET : origin == ma_seek_origin_end ? SEEK_END : SEEK_CUR;
+    return AAsset_seek(reinterpret_cast<AAsset*>(file), static_cast<off_t>(offset), whence) < 0 ? MA_ERROR : MA_SUCCESS;
+}
+ma_result android_ma_vfs_tell(ma_vfs*, ma_vfs_file file, ma_int64* pCursor) {
+    AAsset* asset = reinterpret_cast<AAsset*>(file);
+    if (pCursor) *pCursor = static_cast<ma_int64>(AAsset_getLength(asset) - AAsset_getRemainingLength(asset));
+    return MA_SUCCESS;
+}
+ma_result android_ma_vfs_info(ma_vfs*, ma_vfs_file file, ma_file_info* pInfo) {
+    if (pInfo) pInfo->sizeInBytes = static_cast<ma_uint64>(AAsset_getLength(reinterpret_cast<AAsset*>(file)));
+    return MA_SUCCESS;
+}
+ma_vfs_callbacks g_android_ma_vfs = {
+    android_ma_vfs_open, nullptr /* onOpenW: never used off Windows */, android_ma_vfs_close,
+    android_ma_vfs_read, nullptr /* onWrite: assets are read-only */, android_ma_vfs_seek,
+    android_ma_vfs_tell, android_ma_vfs_info,
+};
+ma_resource_manager g_android_ma_resource_manager;
+#endif
+
+// stb_image only knows fopen(); on Android that means reading the asset into
+// memory ourselves first. Everywhere else this is just stbi_load().
+unsigned char* thistle_stbi_load(const std::string& path, int* w, int* h, int* channels, int req_comp) {
+#if defined(__ANDROID__)
+    std::vector<unsigned char> bytes;
+    if (!android_read_asset(path, bytes)) return nullptr;
+    return stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()), w, h, channels, req_comp);
+#else
+    return stbi_load(path.c_str(), w, h, channels, req_comp);
+#endif
+}
+
+// Same story as thistle_stbi_load, for the text-based tilemap formats
+// (Tiled CSV/JSON) that otherwise read via std::ifstream.
+bool thistle_read_text_asset(const std::string& path, std::string& out) {
+#if defined(__ANDROID__)
+    std::vector<unsigned char> bytes;
+    if (!android_read_asset(path, bytes)) return false;
+    out.assign(bytes.begin(), bytes.end());
+    return true;
+#else
+    std::ifstream file(path);
+    if (!file) return false;
+    std::stringstream buf;
+    buf << file.rdbuf();
+    out = buf.str();
+    return true;
+#endif
+}
 
 struct TextureRecord {
     unsigned char* pixels = nullptr; // CPU copy, freed after GPU upload
@@ -270,7 +398,22 @@ void init_cb() {
 #if defined(__APPLE__)
     thistle_ios_init_audio_session(); // no-op on macOS
 #endif
+#if defined(__ANDROID__)
+    // Route every audio file load through AAssetManager instead of fopen —
+    // see android_ma_vfs_open() above. play_sound()/play_music() need no
+    // changes themselves; this is transparent to everything above them.
+    ma_resource_manager_config rm_config = ma_resource_manager_config_init();
+    rm_config.pVFS = reinterpret_cast<ma_vfs*>(&g_android_ma_vfs);
+    bool audio_ok = ma_resource_manager_init(&rm_config, &g_android_ma_resource_manager) == MA_SUCCESS;
+    if (audio_ok) {
+        ma_engine_config engine_config = ma_engine_config_init();
+        engine_config.pResourceManager = &g_android_ma_resource_manager;
+        audio_ok = ma_engine_init(&engine_config, &g_state->audio) == MA_SUCCESS;
+    }
+    if (audio_ok) {
+#else
     if (ma_engine_init(nullptr, &g_state->audio) == MA_SUCCESS) {
+#endif
         g_state->audio_ready = true;
         if (ma_sound_group_init(&g_state->audio, 0, nullptr, &g_state->sfx_group) == MA_SUCCESS) {
             g_state->sfx_group_ready = true;
@@ -297,7 +440,11 @@ void init_cb() {
     // Load any fonts requested before the window existed.
     for (size_t i = 0; i < g_state->font_paths.size(); ++i) {
         if (g_state->font_ids[i] == FONS_INVALID) {
+#if defined(__ANDROID__)
+            const int fid = android_fons_add_font(g_state->fons, g_state->font_paths[i]);
+#else
             const int fid = fonsAddFont(g_state->fons, "font", g_state->font_paths[i].c_str());
+#endif
             g_state->font_ids[i] = fid;
             if (fid != FONS_INVALID && g_state->default_font == FONS_INVALID) {
                 g_state->default_font = fid;
@@ -1112,8 +1259,9 @@ vec2 Node::world_pos() const {
 // --- tilemap -----------------------------------------------------------
 
 bool Tilemap::load_csv(const std::string& csv_path, Texture tileset, int tw, int th, int tileset_cols) {
-    std::ifstream in(csv_path);
-    if (!in) { log_warn("tilemap: could not open " + csv_path); return false; }
+    std::string content;
+    if (!thistle_read_text_asset(csv_path, content)) { log_warn("tilemap: could not open " + csv_path); return false; }
+    std::istringstream in(content);
     tileset_ = tileset;
     tile_w = tw;
     tile_h = th;
@@ -1142,10 +1290,10 @@ bool Tilemap::load_csv(const std::string& csv_path, Texture tileset, int tw, int
 }
 
 bool Tilemap::load_tiled_json(const std::string& path) {
-    std::ifstream in(path);
-    if (!in) { log_warn("tilemap: could not open " + path); return false; }
+    std::string content;
+    if (!thistle_read_text_asset(path, content)) { log_warn("tilemap: could not open " + path); return false; }
     nlohmann::json j;
-    try { in >> j; } catch (...) { log_warn("tilemap: invalid JSON " + path); return false; }
+    try { j = nlohmann::json::parse(content); } catch (...) { log_warn("tilemap: invalid JSON " + path); return false; }
 
     cols_ = j.value("width", 0);
     rows_ = j.value("height", 0);
@@ -2132,6 +2280,12 @@ std::string base_dir() {
     std::string base;
 #if defined(__APPLE__)
     base = thistle_apple_writable_dir();
+#elif defined(__ANDROID__)
+    // The only path an Android app can actually write to; there's no HOME or
+    // XDG env var here. Set on the activity before sokol_main() ever runs
+    // (see ANativeActivity_onCreate in sokol_app.h), so this is safe anywhere.
+    const auto* activity = static_cast<const ANativeActivity*>(sapp_android_get_native_activity());
+    base = (activity && activity->internalDataPath) ? activity->internalDataPath : "/data/local/tmp";
 #elif defined(_WIN32)
     const char* ad = std::getenv("APPDATA");
     base = (ad && *ad) ? ad : ".";
@@ -2279,6 +2433,11 @@ std::vector<std::string> crash_backtrace() {
             std::snprintf(line, sizeof(line), "0x%016llx", static_cast<unsigned long long>(addr));
         out.emplace_back(line);
     }
+#elif defined(__ANDROID__)
+    // Bionic doesn't provide execinfo.h/backtrace(); a real unwinder would
+    // need <unwind.h>'s _Unwind_Backtrace plus a symbolizer. Not done — the
+    // report still gets the reason, context, and log tail, just no frames.
+    out.emplace_back("(backtrace not available on Android)");
 #else
     void* frames[64];
     int n = backtrace(frames, 64);
@@ -2594,7 +2753,11 @@ Font load_font(const std::string& path) {
     const int idx = static_cast<int>(g_state->font_ids.size());
     int fid = FONS_INVALID;
     if (g_state->fons) { // window already up: load immediately
+#if defined(__ANDROID__)
+        fid = android_fons_add_font(g_state->fons, path);
+#else
         fid = fonsAddFont(g_state->fons, "font", path.c_str());
+#endif
         if (fid != FONS_INVALID && g_state->default_font == FONS_INVALID) {
             g_state->default_font = fid;
         }
@@ -2606,7 +2769,7 @@ Font load_font(const std::string& path) {
 
 Texture load_texture(const std::string& path) {
     int w = 0, h = 0, channels = 0;
-    unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &channels, 4);
+    unsigned char* pixels = thistle_stbi_load(path, &w, &h, &channels, 4);
     if (pixels == nullptr) {
         return Texture{}; // invalid handle; draws nothing
     }
@@ -2637,7 +2800,7 @@ void reload_texture(Texture tex) {
     TextureRecord& rec = g_state->textures[tex.id];
     if (rec.path.empty()) return;
     int w = 0, h = 0, channels = 0;
-    unsigned char* px = stbi_load(rec.path.c_str(), &w, &h, &channels, 4);
+    unsigned char* px = thistle_stbi_load(rec.path, &w, &h, &channels, 4);
     if (!px) { log_warn("reload_texture: could not read " + rec.path); return; }
     if (rec.pixels) stbi_image_free(rec.pixels);
     if (rec.view.id != SG_INVALID_ID) { sg_destroy_view(rec.view); rec.view = {}; }
@@ -2741,6 +2904,24 @@ void set_scene(const std::string& name) {
 }
 
 int App::run() {
+#if defined(__ANDROID__)
+    // Window icons need AAssetManager-based asset loading (not done yet), and
+    // there's no sapp_run() call here — see the comment on g_thistle_android_desc.
+    sapp_desc d = {};
+    d.init_cb = init_cb;
+    d.frame_cb = frame_cb;
+    d.cleanup_cb = cleanup_cb;
+    d.event_cb = event_cb;
+    d.width = g_state->config.width;
+    d.height = g_state->config.height;
+    d.window_title = g_state->config.title.c_str();
+    d.logger.func = slog_func;
+    d.enable_clipboard = true;
+    d.clipboard_size = 16384;
+    d.icon.sokol_default = true;
+    g_thistle_android_desc = d;
+    return 0;
+#else
     // Load the window/dock icon (if any) up front; sokol reads the pixels while
     // sapp_run() starts up, so the buffer must outlive that call.
     unsigned char* icon_px = nullptr;
@@ -2774,6 +2955,24 @@ int App::run() {
 
     if (icon_px) stbi_image_free(icon_px);
     return 0;
+#endif
 }
 
 } // namespace thistle
+
+#if defined(__ANDROID__)
+// Defined for real by THISTLE_MAIN in the game's own .cpp, which overrides
+// this weak no-op default — needed so headless Android executables that link
+// against libthistle (e.g. thistle_net_smoketest, which never touches App at
+// all) don't fail to link over a symbol they have no reason to define.
+extern "C" __attribute__((weak)) void thistle_user_main() {}
+
+// Declared by sokol_app.h; its own ANativeActivity_onCreate calls this
+// directly (there is no process main() to call it for us) to get the desc it
+// needs before it starts the real frame loop on a background thread.
+sapp_desc sokol_main(int argc, char* argv[]) {
+    (void)argc; (void)argv;
+    thistle_user_main();
+    return g_thistle_android_desc;
+}
+#endif

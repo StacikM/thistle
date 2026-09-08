@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Deliberately hand-written, not Gradle-generated: this whole example builds
+  without Gradle or the Android Gradle Plugin, using only the NDK + the
+  command-line SDK build-tools (aapt2/zipalign/apksigner) — see
+  docs/android.md for the exact build_apk.sh steps. A real game will probably
+  still want Gradle for a proper Play Store release build, but nothing about
+  Thistle itself requires it.
+
+  android:hasCode="false" + android.app.NativeActivity is the whole trick:
+  NativeActivity is a stock class the OS already has — this app ships no
+  Java/Kotlin of its own. android.app.lib_name must match the .so's base name
+  (libmain.so here, set via OUTPUT_NAME "main" in CMakeLists.txt).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.thistle.smoketest"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34" />
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+
+    <application
+        android:label="ThistleSmoketest"
+        android:hasCode="false">
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:configChanges="orientation|keyboardHidden|screenSize">
+            <meta-data android:name="android.app.lib_name" android:value="main" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

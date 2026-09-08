@@ -12,10 +12,11 @@ You want to make a game, not read a novel. Here's the map:
 - [iap.md](iap.md) — in-app purchases via StoreKit (iOS/macOS only). Read the "what's actually been verified" section before you assume a purchase has ever succeeded.
 - [cli.md](cli.md) — the `thistle` CLI: scaffold a project, build/run it, manage its version. No dependencies to install, on purpose.
 - [crash-handler.md](crash-handler.md) — local-only crash reporting: a report file plus a native popup, automatically, on every crash. No telemetry, ever.
+- [android.md](android.md) — building, packaging (no Gradle needed), and what is and isn't verified on Android yet. Read the "what's not verified" section before you assume rendering works.
 
 ## What this actually is
 
-A small immediate-mode 2D game engine glued together from other people's good work: [sokol](https://github.com/floooh/sokol) for the window and GPU, Box2D for physics, miniaudio for sound, fontstash for text, nlohmann/json if you need it. It runs on iOS, macOS, Windows, Linux, and in principle the web (untested — nobody's tried it).
+A small immediate-mode 2D game engine glued together from other people's good work: [sokol](https://github.com/floooh/sokol) for the window and GPU, Box2D for physics, miniaudio for sound, fontstash for text, nlohmann/json if you need it. It runs on iOS, macOS, Windows, Linux, and in principle the web (untested — nobody's tried it). Android builds, links, and packages into a real APK, but rendering isn't verified working yet — see [android.md](android.md).
 
 It is not Unreal. It is not even close to Unreal. It draws rectangles, circles, sprites, and text through one function call each, every frame, and gets out of your way. If you want a scene editor, a material system, or physically-based rendering, this is the wrong engine and you should know that before you invest a week in it.
 

@@ -1,6 +1,9 @@
 build/
 build-*/
 _deps/
+examples/android/out/
+examples/android/debug.keystore
+examples/android/test_assets/
 compile_commands.json
 .DS_Store
 *.o
