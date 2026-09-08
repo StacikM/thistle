@@ -36,6 +36,8 @@ if (f.pad_connected()) {
 
 Only the first connected controller is polled. No multi-controller support. If you're building local co-op, that's an engine change (`thistle_gamepad.h`/`.mm`, and the Frame API), not a workaround in game code — don't fake it.
 
+Backed by GameController.framework (iOS/macOS), XInput (Windows), and the kernel joystick API (Linux, `/dev/input/js0`) — Android and web still get a no-op. The Linux backend assumes a fairly standard Xbox-shaped button/axis layout (matching the kernel's `xpad` driver, by far the most common case); a controller using a different driver may report the wrong button in the wrong slot. This hasn't been verified against real hardware on Windows or Linux yet — it's checked in by code review and a clean compile/link against the real XInput/joystick APIs, not by an actual button press. Try it on real hardware before trusting it for something that matters.
+
 ## Audio
 
 ```cpp

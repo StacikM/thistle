@@ -7,6 +7,7 @@
 // so it stays alive until the request finishes even if the caller frees its
 // handle first (same use-after-free fix as the Apple side).
 #include <string>
+#include <cstring>
 #include <atomic>
 #include <memory>
 #include <thread>
@@ -18,8 +19,12 @@
 #define NOMINMAX
 #include <windows.h>
 #include <winhttp.h>
+#include <xinput.h>
+
+#include "thistle_gamepad.h"
 
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "xinput.lib")
 
 extern "C" void* thistle_http_start(const char* method, const char* url, const char* body);
 extern "C" int   thistle_http_poll(void* h, int* status, const char** body, int* len);
@@ -123,3 +128,45 @@ int thistle_http_poll(void* handle, int* status, const char** body, int* len) {
 }
 
 void thistle_http_free(void* handle) { delete static_cast<HttpPtr*>(handle); }
+
+// --- gamepad via XInput ------------------------------------------------
+// XInput only ever represents an Xbox-shaped controller (that's the whole
+// point of the API — it's how Windows normalizes third-party pads too), so
+// kind is always Xbox; there's no vendor-name query to do here the way
+// GameController.framework or a Linux joystick device name lets us pick a
+// real display name. -32768..32767 sticks and 0..255 triggers get normalized
+// to match the same -1..1 / 0..1 ranges every other platform reports.
+void thistle_win32_poll_gamepad(ThistleGamepad* g) {
+    std::memset(g, 0, sizeof(*g));
+    XINPUT_STATE state{};
+    DWORD found = ERROR_DEVICE_NOT_CONNECTED;
+    for (DWORD i = 0; i < XUSER_MAX_COUNT && found != ERROR_SUCCESS; ++i) {
+        found = XInputGetState(i, &state);
+    }
+    if (found != ERROR_SUCCESS) return;
+
+    g->connected = 1;
+    g->kind = 1; // Xbox
+    std::strncpy(g->name, "XInput Controller", sizeof(g->name) - 1);
+
+    const WORD b = state.Gamepad.wButtons;
+    g->a = (b & XINPUT_GAMEPAD_A) != 0;
+    g->b = (b & XINPUT_GAMEPAD_B) != 0;
+    g->x = (b & XINPUT_GAMEPAD_X) != 0;
+    g->y = (b & XINPUT_GAMEPAD_Y) != 0;
+    g->up = (b & XINPUT_GAMEPAD_DPAD_UP) != 0;
+    g->down = (b & XINPUT_GAMEPAD_DPAD_DOWN) != 0;
+    g->left = (b & XINPUT_GAMEPAD_DPAD_LEFT) != 0;
+    g->right = (b & XINPUT_GAMEPAD_DPAD_RIGHT) != 0;
+    g->l1 = (b & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0;
+    g->r1 = (b & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0;
+    g->start = (b & XINPUT_GAMEPAD_START) != 0;
+    g->back = (b & XINPUT_GAMEPAD_BACK) != 0;
+
+    g->lx = state.Gamepad.sThumbLX / 32767.0f;
+    g->ly = state.Gamepad.sThumbLY / 32767.0f;
+    g->rx = state.Gamepad.sThumbRX / 32767.0f;
+    g->ry = state.Gamepad.sThumbRY / 32767.0f;
+    g->lt = state.Gamepad.bLeftTrigger / 255.0f;
+    g->rt = state.Gamepad.bRightTrigger / 255.0f;
+}

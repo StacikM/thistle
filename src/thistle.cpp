@@ -637,6 +637,10 @@ void frame_cb() {
     g_state->pad_prev = g_state->pad_cur;
 #if defined(__APPLE__)
     thistle_apple_poll_gamepad(&g_state->pad_cur);
+#elif defined(_WIN32)
+    thistle_win32_poll_gamepad(&g_state->pad_cur);
+#elif defined(__linux__) && !defined(__ANDROID__)
+    thistle_linux_poll_gamepad(&g_state->pad_cur);
 #else
     g_state->pad_cur = ThistleGamepad{};
 #endif

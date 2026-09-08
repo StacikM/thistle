@@ -159,7 +159,7 @@ elseif(WIN32)
     # linker doesn't honor, so d3d11/dxgi need to be listed explicitly here (MSVC
     # builds just get them twice, which is harmless).
     target_sources(thistle PRIVATE src/win32_support.cpp)
-    target_link_libraries(thistle PRIVATE winhttp d3d11 dxgi ws2_32 dbghelp user32)
+    target_link_libraries(thistle PRIVATE winhttp d3d11 dxgi ws2_32 dbghelp user32 xinput)
 elseif(EMSCRIPTEN)
     # sokol uses WebGL2 (SOKOL_GLES3); the executable sets the emcc link flags.
     # Nothing to link into the engine library itself here.
@@ -168,6 +168,7 @@ elseif(ANDROID)
         GLESv3 EGL android log OpenSLES
     )
 elseif(UNIX)
+    target_sources(thistle PRIVATE src/linux_gamepad.cpp)
     find_package(OpenGL REQUIRED)
     target_link_libraries(thistle PRIVATE
         OpenGL::GL X11 Xi Xcursor GL EGL dl m pthread
