@@ -2,13 +2,23 @@
 
 `tools/thistle-cli/thistle.py` — one file, standard library only, no dependencies to install. That's not a minimalism flex, it's the actual point: the thing this tool exists to fix is exactly the problem old Cocos2d tooling had — its project generator required Python 2, dead since January 2020 and gone from macOS entirely. If Python 3 runs at all, this has everything it needs.
 
+## Installing
+
 ```bash
-python3 tools/thistle-cli/thistle.py new mygame
-cd ../mygame        # created next to the engine by default
-python3 /path/to/thistle.py run
+curl -fsSL https://raw.githubusercontent.com/StacikM/thistle/main/install.sh | bash
 ```
 
-Put `thistle.py` on your `PATH` (or alias it to `thistle`) and it's just `thistle new`/`thistle build`/`thistle run` from anywhere.
+Clones the engine to `~/.thistle` (override with `THISTLE_HOME`) and symlinks `thistle.py` as `thistle` on your `PATH` (`~/.local/bin` by default, override with `THISTLE_BIN_DIR`). Re-running it later just does a `git pull` — that's the whole update mechanism, there's no separate "upgrade" command. Verified for real: a clean clone via this exact script, through `thistle new` → `thistle build`, produces a real linked binary — see `install.sh`'s own comment for why there's no prebuilt package instead.
+
+If you'd rather not run someone else's install script blind (fair), do the two steps it does by hand:
+
+```bash
+git clone https://github.com/StacikM/thistle.git ~/.thistle
+ln -s ~/.thistle/tools/thistle-cli/thistle.py ~/.local/bin/thistle   # anywhere on your PATH works
+chmod +x ~/.thistle/tools/thistle-cli/thistle.py
+```
+
+Then it's `thistle new`/`thistle build`/`thistle run` from anywhere.
 
 ## What `new` actually generates
 

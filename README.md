@@ -18,14 +18,23 @@ See [docs/](docs/) for the real documentation — building, drawing, physics, ne
 
 Almost every line here (~99%) was written by Claude (Anthropic's AI), directed and verified at every step by a human who tested on real hardware, actually ran things instead of assuming they worked, and pushed back whenever something was hand-wavy. That's not a disclaimer tucked at the bottom of the page — it's the actual premise of the project: this is what an AI building real infrastructure looks like when it's held to a real "does it actually work" bar instead of "does it look plausible." Judge the code on that basis, and check `docs/` for the places this project is honest about where that bar hasn't been fully cleared yet.
 
-## Building
+## Quick start
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/StacikM/thistle/main/install.sh | bash
+thistle new mygame && cd mygame && thistle run
+```
+
+Installs the engine and the `thistle` CLI (see [docs/cli.md](docs/cli.md)) — no dependencies to fight, standard library only.
+
+## Building the engine directly
 
 ```
 cmake -S . -B build
 cmake --build build --target thistle
 ```
 
-Requires a consumer project (game) that adds this as a subdirectory and links against the `thistle` target. See `-DTHISTLE_BUILD_SMOKETEST=ON` for a minimal example executable (`examples/smoketest.cpp`) that opens a window and exercises 2D + minor-3D drawing and HTTP.
+Requires a consumer project (game) that adds this as a subdirectory and links against the `thistle` target — see [docs/building.md](docs/building.md) if you're not going through the CLI. `-DTHISTLE_BUILD_SMOKETEST=ON` builds a minimal example executable (`examples/smoketest.cpp`) that opens a window and exercises 2D + minor-3D drawing and HTTP.
 
 ## Contributing
 
