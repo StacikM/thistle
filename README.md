@@ -27,6 +27,10 @@ cmake --build build --target thistle
 
 Requires a consumer project (game) that adds this as a subdirectory and links against the `thistle` target. See `-DTHISTLE_BUILD_SMOKETEST=ON` for a minimal example executable (`examples/smoketest.cpp`) that opens a window and exercises 2D + minor-3D drawing and HTTP.
 
+## Contributing
+
+See [AGENTS.md](AGENTS.md) — repo layout, conventions, and the one rule that matters most here: don't claim something works unless you actually ran it.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
