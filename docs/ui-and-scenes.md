@@ -60,6 +60,17 @@ Parent/child transforms (position, rotation, scale, alpha all inherit down the t
 
 Use it if your game actually has a hierarchy worth modeling — a formation of enemies that move together, a UI element with child decorations that should inherit its fade. Don't reach for it by default. A single `vec2 pos` and a hand-written tween is simpler and faster for the common case of "one thing moves from A to B," and every line of `Node` machinery you don't need is a line you have to read later when something's wrong. Fling doesn't use `Node` anywhere — it does everything with plain structs and direct math, because a physics-driven slingshot game has no hierarchy to speak of. Let the shape of your game decide, not a habit from a bigger engine.
 
+### Saving and loading a `Node` tree
+
+```cpp
+save_scene(root, save::path() + "/checkpoint.json");   // whatever pos/rotation/alpha/etc. actually are right now
+std::unique_ptr<Node> loaded = load_scene(save::path() + "/checkpoint.json");
+```
+
+This is a checkpoint/save-game mechanism, not a level-authoring format — nobody is meant to open the JSON and hand-edit it to change a level. It captures live values at the instant you call `save_scene()` (wherever physics/gameplay actually moved things to), not however the tree looked when it was first built. `sprite` (a `Texture` — just a runtime id, meaningless after a restart) doesn't survive the round trip on its own; set `sprite_path` alongside it and `load_scene()` calls `load_texture()` for you, once per unique path even if many nodes share one.
+
+Queued actions (`move_to`, `delay`, `call`, ...) are **not** saved — only the static pose. A `call()` action holds a `std::function`, which fundamentally can't be written to JSON, and "this node is 60% through a move_to" isn't something a level snapshot needs anyway. If you save mid-animation, the loaded node just has wherever that animation had gotten to as its resting pose — the motion itself doesn't resume.
+
 ## `App::scene` — named states, if a giant lambda stops being enough
 
 ```cpp

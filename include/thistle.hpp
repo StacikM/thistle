@@ -63,6 +63,9 @@ struct Rect {
     }
 };
 
+inline void to_json(nlohmann::json& j, const Rect& r) { j = {{"pos", r.pos}, {"size", r.size}}; }
+inline void from_json(const nlohmann::json& j, Rect& r) { j.at("pos").get_to(r.pos); j.at("size").get_to(r.size); }
+
 // --- color --------------------------------------------------------------
 
 struct rgba {
@@ -831,6 +834,12 @@ public:
     vec2 sprite_size{0, 0};   // {0,0} = texture's native size
     rgba sprite_tint = white;
     Rect sprite_src{{0, 0}, {0, 0}};
+    // The path sprite was loaded from, if any — save_scene()'s only reason to
+    // exist. A Texture is just a runtime id; the id from this run means
+    // nothing after a restart, so this is what actually survives a save.
+    // Set this yourself if you assign `sprite` directly instead of through
+    // load_scene(); save_scene() has no other way to know where it came from.
+    std::string sprite_path;
 
     Node* add_child(std::unique_ptr<Node> c) {
         c->parent_ = this;
@@ -864,6 +873,19 @@ private:
     Node& push(const Action& a) { actions_.push_back(a); return *this; }
     void draw_rec(Frame& f, float inherited_alpha);
 };
+
+// Snapshots (or restores) a Node subtree's pose/sprite/hierarchy as JSON — a
+// save-game or checkpoint, not a level-authoring format; nobody is meant to
+// hand-edit the file. Captures whatever pos/rotation/alpha/etc. actually are
+// at the moment you call it, live gameplay values included, not just however
+// the tree was originally built. Queued actions (move_to, call, ...) are NOT
+// saved — only the static pose survives a round trip, same as a snapshot of
+// a struct wouldn't include "and it's 60% of the way through animating."
+// load_scene() calls load_texture() for every sprite_path it finds (once per
+// unique path, even if many nodes share one) and returns the new root, or
+// nullptr if the file couldn't be read/parsed.
+bool save_scene(const Node& root, const std::string& path);
+std::unique_ptr<Node> load_scene(const std::string& path);
 
 // --- physics (Box2D) ----------------------------------------------------
 

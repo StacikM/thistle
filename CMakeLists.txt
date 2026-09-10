@@ -209,6 +209,13 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_crash_smoketest examples/crash_smoketest.cpp)
     target_link_libraries(thistle_crash_smoketest PRIVATE thistle)
 
+    # Round-trips a Node tree through save_scene()/load_scene() and checks
+    # every field survives. Headless like net_smoketest (constructs App for
+    # load_texture()'s sake but never calls run()) — no window, no GPU, no
+    # sprite assets needed since it never sets a sprite_path.
+    add_executable(thistle_scene_smoketest examples/scene_smoketest.cpp)
+    target_link_libraries(thistle_scene_smoketest PRIVATE thistle)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -219,12 +226,14 @@ if(THISTLE_BUILD_SMOKETEST)
         set_target_properties(thistle_android_smoketest PROPERTIES OUTPUT_NAME "main")
     endif()
 
-    # Only thistle_net_smoketest is registered as a test — it's headless and
-    # actually exits. thistle_smoketest opens a real window and never quits
-    # on its own, so running it via ctest would just hang forever; CI still
-    # builds it (catches link/compile regressions like the two Windows ones
-    # already found this way) but never executes it.
+    # net_smoketest and scene_smoketest are both headless and actually exit,
+    # so both run as real ctests. thistle_smoketest opens a real window and
+    # never quits on its own, so running it via ctest would just hang
+    # forever; CI still builds it (catches link/compile regressions like the
+    # two Windows ones already found this way) but never executes it.
     enable_testing()
     add_test(NAME net_smoketest COMMAND thistle_net_smoketest)
     set_tests_properties(net_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME scene_smoketest COMMAND thistle_scene_smoketest)
+    set_tests_properties(scene_smoketest PROPERTIES TIMEOUT 30)
 endif()

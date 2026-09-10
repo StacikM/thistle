@@ -1336,6 +1336,68 @@ vec2 Node::world_pos() const {
     return p;
 }
 
+// --- scene serialization -------------------------------------------------
+
+namespace {
+nlohmann::json node_to_json(const Node& n) {
+    nlohmann::json j;
+    j["pos"] = n.pos;
+    j["scale"] = n.scale;
+    j["rotation"] = n.rotation;
+    j["alpha"] = n.alpha;
+    j["visible"] = n.visible;
+    j["sprite_path"] = n.sprite_path;
+    j["sprite_size"] = n.sprite_size;
+    j["sprite_tint"] = n.sprite_tint;
+    j["sprite_src"] = n.sprite_src;
+    auto children = nlohmann::json::array();
+    for (std::size_t i = 0; i < n.child_count(); ++i) children.push_back(node_to_json(*n.child(i)));
+    j["children"] = std::move(children);
+    return j;
+}
+
+// tex_cache avoids reloading (and re-uploading to the GPU) the same PNG once
+// per node when many nodes share a sprite_path.
+std::unique_ptr<Node> node_from_json(const nlohmann::json& j, std::unordered_map<std::string, Texture>& tex_cache) {
+    auto n = std::make_unique<Node>();
+    if (j.contains("pos")) j.at("pos").get_to(n->pos);
+    if (j.contains("scale")) j.at("scale").get_to(n->scale);
+    n->rotation = j.value("rotation", 0.0f);
+    n->alpha = j.value("alpha", 1.0f);
+    n->visible = j.value("visible", true);
+    n->sprite_path = j.value("sprite_path", std::string());
+    if (j.contains("sprite_size")) j.at("sprite_size").get_to(n->sprite_size);
+    if (j.contains("sprite_tint")) j.at("sprite_tint").get_to(n->sprite_tint);
+    if (j.contains("sprite_src")) j.at("sprite_src").get_to(n->sprite_src);
+
+    if (!n->sprite_path.empty()) {
+        auto it = tex_cache.find(n->sprite_path);
+        if (it == tex_cache.end()) it = tex_cache.emplace(n->sprite_path, load_texture(n->sprite_path)).first;
+        n->sprite = it->second;
+    }
+    if (j.contains("children")) {
+        for (const auto& cj : j.at("children")) n->add_child(node_from_json(cj, tex_cache));
+    }
+    return n;
+}
+} // namespace
+
+bool save_scene(const Node& root, const std::string& path) {
+    std::ofstream out(path);
+    if (!out) { log_warn("save_scene: could not open " + path); return false; }
+    out << node_to_json(root).dump(2);
+    return true;
+}
+
+std::unique_ptr<Node> load_scene(const std::string& path) {
+    std::ifstream in(path);
+    if (!in) { log_warn("load_scene: could not open " + path); return nullptr; }
+    nlohmann::json j;
+    try { j = nlohmann::json::parse(in); } catch (...) { log_warn("load_scene: invalid JSON " + path); return nullptr; }
+    std::unordered_map<std::string, Texture> tex_cache;
+    return node_from_json(j, tex_cache);
+}
+
 // --- tilemap -----------------------------------------------------------
 
 bool Tilemap::load_csv(const std::string& csv_path, Texture tileset, int tw, int th, int tileset_cols) {
