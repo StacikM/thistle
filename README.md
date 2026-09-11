@@ -2,7 +2,7 @@
 
 **Thistle is an AI-built game engine** — an explicit experiment in whether an AI can build something a beginner can actually pick up and use, not just something technically impressive. Existing engines in this space have a real reputation for the opposite: Cocos2d alone ships three incompatible codebases under one name (Cocos2d-x, Cocos2d-js, Cocos Creator), and its old project-generator CLI required Python 2 — dead since January 2020, and gone from macOS entirely. The bar this project is trying to clear isn't "does it render a triangle," it's "would a beginner's first hour with this be spent making something, or fighting the tooling."
 
-A small, cross-platform 2D (and now minor-3D) game engine built on [sokol](https://github.com/floooh/sokol), with Box2D physics, miniaudio audio, fontstash text rendering, realtime networking, and in-app purchases.
+A small, simple, cross-platform 2D (and now minor-3D) C++ game engine built on the [sokol](https://github.com/floooh/sokol) renderer, with Box2D physics, miniaudio audio, fontstash text rendering, realtime networking, and in-app purchases — plus a `thistle` command-line tool for scaffolding, building, and running a project. The entire public API is a single umbrella header, `thistle.hpp` — `#include` it and you have everything; the engine itself compiles to one `thistle` CMake target you link against (not literally header-only in the no-linking sense, since it's more than a handful of one-liner functions, but there's exactly one header to ever look at).
 
 - **Graphics:** Metal (iOS/macOS), D3D11 (Windows), GLCore (Linux), GLES3 (Android, Web) — all through sokol_gfx/sokol_gl.
 - **Physics:** Box2D (2D only).
