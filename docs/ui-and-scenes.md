@@ -16,7 +16,33 @@ f.progress_bar(loading_t, {{100, 260}, {200, 16}}, coral);
 
 The tradeoff, and it's a real one: **you lay out every rectangle yourself, every frame.** There's no flow layout, no anchors, no percentage sizing beyond what you compute from `f.width`/`f.height` yourself. Fling's entire UI is hand-computed percentages of screen height (`H * 0.14f` for a button width, etc.) specifically so it holds up across a 1280×720 desktop window and a phone's actual framebuffer size. That's not a shortcut, that's the actual technique — learn it, don't fight it looking for a layout system that isn't coming.
 
-`ButtonStyle` controls colors/text size per call — there's no global theme object, so if you want a consistent look, build your own `ButtonStyle` presets in game code and reuse them. The engine won't do this for you and shouldn't; it doesn't know your game's palette.
+`ButtonStyle` controls colors/text size/font per call — there's no global theme object, so if you want a consistent look, build your own `ButtonStyle` presets in game code and reuse them. The engine won't do this for you and shouldn't; it doesn't know your game's palette.
+
+### Making a button that doesn't look like every other engine's default button
+
+`f.button()` draws a flat rect + centered text — fine for a prototype, not what you want for a real UI. Two primitives get you the rest of the way to a genuinely custom look, no shader/asset-pipeline work required:
+
+```cpp
+// A filled rounded rectangle — pure geometry, works with any color/gradient
+// you can express as a fill (draw two, offset, for a border effect).
+f.rounded_rect({100, 100}, {200, 60}, 12, rgb(0.2f, 0.6f, 0.9f));
+
+// 9-slice: your own button-skin art, drawn once at any convenient size in an
+// image editor, scaled cleanly to any target size. The 32px border stays at
+// native scale (no blurry stretched corners); only the edges/center stretch.
+Texture skin = load_texture("assets/button_skin.png");
+f.sprite9(skin, {100, 200}, {200, 60}, 32);
+```
+
+Neither of these knows anything about clicking — that's deliberate, and it's not a gap, because the interaction logic `f.button()` uses internally is three lines you already have full access to:
+
+```cpp
+const bool hover = area.contains(f.mouse());
+const bool held = hover && f.mouse_down(Mouse::Left);
+const bool clicked = hover && f.mouse_pressed(Mouse::Left);
+```
+
+Draw whatever you want above (a `sprite9` skin, a `rounded_rect`, an icon `sprite`, custom-font `text` via `TextOpts::font`), check `clicked` for the action, and you have a fully custom button — same amount of code as before, just not locked into `f.button()`'s specific look. This is the same relationship `Menu` has to raw `f.button()` calls: a convenience for the common shape, not a wall around the engine's actual drawing primitives.
 
 ## `Menu`: for when you actually have a vertical stack
 

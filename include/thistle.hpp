@@ -127,15 +127,6 @@ private:
     bool loop_ = false;
 };
 
-// --- ui -----------------------------------------------------------------
-
-struct ButtonStyle {
-    rgba bg       {0.16f, 0.17f, 0.24f, 1.0f};
-    rgba bg_hover {0.24f, 0.26f, 0.36f, 1.0f};
-    rgba bg_press = coral;
-    rgba text     = white;
-    float text_size = 28.0f;
-};
 
 // Entrance animations for Menu.
 enum class MenuAnim { None, FromTop, FromLeft, FromRight, FromBottom, FadeIn, SmallToBig };
@@ -235,6 +226,17 @@ struct TextOpts {
     float line_spacing = 1.25f; // line height as a multiple of size
 };
 
+// --- ui -----------------------------------------------------------------
+
+struct ButtonStyle {
+    rgba bg       {0.16f, 0.17f, 0.24f, 1.0f};
+    rgba bg_hover {0.24f, 0.26f, 0.36f, 1.0f};
+    rgba bg_press = coral;
+    rgba text     = white;
+    float text_size = 28.0f;
+    Font font = {};   // unset => the default (first-loaded) font, same as TextOpts
+};
+
 // --- input --------------------------------------------------------------
 
 // Values match sokol/GLFW keycodes so no lookup table is needed internally.
@@ -284,6 +286,13 @@ public:
     void clear(rgba color);
     void rect(vec2 pos, vec2 size, rgba color);
 
+    // A filled rectangle with rounded corners — pure geometry, no texture, so
+    // it costs nothing but a few extra triangles. `radius` clamps to half the
+    // shorter side, so passing anything large just gets you a pill/circle.
+    // For a border, draw a slightly bigger one in the border color first and
+    // a smaller one in the fill color on top — no separate outline call.
+    void rounded_rect(vec2 pos, vec2 size, float radius, rgba color, int segments_per_corner = 8);
+
     // Vector shapes (filled/outline), for debug draws, HUDs, effects.
     void line(vec2 a, vec2 b, rgba color, float thickness = 2.0f);
     void triangle(vec2 a, vec2 b, vec2 c, rgba color);
@@ -293,6 +302,15 @@ public:
     // Draw a texture. The first overload uses the image's native size.
     void sprite(Texture tex, vec2 pos);
     void sprite(Texture tex, vec2 pos, SpriteOpts opts);
+
+    // 9-slice: stretches `tex` to fill `size` while keeping its four
+    // `border`-pixel corners at native scale (only the edges/center stretch).
+    // This is the actual way to get a fully custom-looking button/panel that
+    // isn't a flat color — draw your own rounded/gradient/glowing frame once
+    // in an image editor at any convenient size, and this scales it cleanly
+    // to whatever button size you need instead of stretching it and blurring
+    // the corners. Uses the whole texture; no sub-rect support (yet).
+    void sprite9(Texture tex, vec2 pos, vec2 size, float border, rgba tint = white);
 
     // Draw text with its top-left corner at pos.
     void text(const std::string& str, vec2 pos, TextOpts opts = {});

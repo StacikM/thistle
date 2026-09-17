@@ -971,6 +971,46 @@ void Frame::rect(vec2 pos, vec2 size, rgba color) {
     sgl_end();
 }
 
+void Frame::rounded_rect(vec2 pos, vec2 size, float radius, rgba color, int segments_per_corner) {
+    radius = std::min({radius, size.x * 0.5f, size.y * 0.5f});
+    if (radius <= 0.0f) { rect(pos, size, color); return; }
+    if (segments_per_corner < 1) segments_per_corner = 1;
+
+    const float x0 = pos.x, y0 = pos.y, x1 = pos.x + size.x, y1 = pos.y + size.y;
+
+    sgl_texture(g_state->white_view, g_state->sampler);
+    sgl_c4f(color.r, color.g, color.b, color.a);
+    sgl_begin_triangles();
+
+    // Body, decomposed into 3 rects (avoiding the 4 rounded corners) plus 4
+    // quarter-circle fans — the standard gap-free tiling for a filled
+    // rounded rect with no shader/SDF involved, just triangles.
+    auto quad = [](float ax, float ay, float bx, float by) {
+        sgl_v2f_t2f(ax, ay, 0.0f, 0.0f); sgl_v2f_t2f(bx, ay, 0.0f, 0.0f); sgl_v2f_t2f(bx, by, 0.0f, 0.0f);
+        sgl_v2f_t2f(ax, ay, 0.0f, 0.0f); sgl_v2f_t2f(bx, by, 0.0f, 0.0f); sgl_v2f_t2f(ax, by, 0.0f, 0.0f);
+    };
+    quad(x0 + radius, y0, x1 - radius, y1);              // center band, full height
+    quad(x0, y0 + radius, x0 + radius, y1 - radius);      // left band
+    quad(x1 - radius, y0 + radius, x1, y1 - radius);      // right band
+
+    auto corner_fan = [&](float cx, float cy, float start_angle) {
+        const float step = 1.5707963f / static_cast<float>(segments_per_corner); // 90 degrees
+        for (int i = 0; i < segments_per_corner; ++i) {
+            const float a0 = start_angle + static_cast<float>(i) * step;
+            const float a1 = start_angle + static_cast<float>(i + 1) * step;
+            sgl_v2f_t2f(cx, cy, 0.0f, 0.0f);
+            sgl_v2f_t2f(cx + std::cos(a0) * radius, cy + std::sin(a0) * radius, 0.0f, 0.0f);
+            sgl_v2f_t2f(cx + std::cos(a1) * radius, cy + std::sin(a1) * radius, 0.0f, 0.0f);
+        }
+    };
+    corner_fan(x0 + radius, y0 + radius, 3.14159265f);  // top-left:     180 -> 270 deg
+    corner_fan(x1 - radius, y0 + radius, 4.71238898f);  // top-right:    270 -> 360 deg
+    corner_fan(x1 - radius, y1 - radius, 0.0f);         // bottom-right:   0 ->  90 deg
+    corner_fan(x0 + radius, y1 - radius, 1.57079633f);  // bottom-left:   90 -> 180 deg
+
+    sgl_end();
+}
+
 void Frame::line(vec2 a, vec2 b, rgba color, float thickness) {
     const float dx = b.x - a.x, dy = b.y - a.y;
     const float len = std::sqrt(dx * dx + dy * dy);
@@ -1072,6 +1112,41 @@ void Frame::sprite(Texture tex, vec2 pos, SpriteOpts opts) {
 
 void Frame::sprite(Texture tex, vec2 pos) {
     sprite(tex, pos, SpriteOpts{});
+}
+
+void Frame::sprite9(Texture tex, vec2 pos, vec2 size, float border, rgba tint) {
+    if (!tex.valid()) return;
+    TextureRecord& rec = g_state->textures[tex.id];
+    ensure_uploaded(rec);
+    if (rec.img.id == SG_INVALID_ID) return;
+
+    const float texW = static_cast<float>(tex.width);
+    const float texH = static_cast<float>(tex.height);
+    if (texW <= 0.0f || texH <= 0.0f) return;
+
+    // Clamp so the border can't exceed half the target box or half the
+    // source texture — either would make the 9 slices overlap/invert.
+    const float b = std::min({border, size.x * 0.5f, size.y * 0.5f, texW * 0.5f, texH * 0.5f});
+    const float bu = b / texW;
+    const float bv = b / texH;
+
+    const float x[4] = {pos.x, pos.x + b, pos.x + size.x - b, pos.x + size.x};
+    const float y[4] = {pos.y, pos.y + b, pos.y + size.y - b, pos.y + size.y};
+    const float u[4] = {0.0f, bu, 1.0f - bu, 1.0f};
+    const float v[4] = {0.0f, bv, 1.0f - bv, 1.0f};
+
+    sgl_texture(rec.view, g_state->sampler);
+    sgl_c4f(tint.r, tint.g, tint.b, tint.a);
+    sgl_begin_quads();
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            sgl_v2f_t2f(x[col],     y[row],     u[col],     v[row]);
+            sgl_v2f_t2f(x[col + 1], y[row],     u[col + 1], v[row]);
+            sgl_v2f_t2f(x[col + 1], y[row + 1], u[col + 1], v[row + 1]);
+            sgl_v2f_t2f(x[col],     y[row + 1], u[col],     v[row + 1]);
+        }
+    }
+    sgl_end();
 }
 
 bool Frame::key_down(Key k) const {
@@ -1693,11 +1768,11 @@ bool Frame::button(const std::string& label, Rect area, ButtonStyle style) {
     const bool clicked = hover && mouse_pressed(Mouse::Left);
     const rgba bg = held ? style.bg_press : (hover ? style.bg_hover : style.bg);
     rect(area.pos, area.size, bg);
-    const vec2 tm = measure_text(label, {.size = style.text_size});
+    const vec2 tm = measure_text(label, {.size = style.text_size, .font = style.font});
     text(label,
          {area.pos.x + (area.size.x - tm.x) * 0.5f,
           area.pos.y + (area.size.y - style.text_size) * 0.5f},
-         {.size = style.text_size, .color = style.text});
+         {.size = style.text_size, .color = style.text, .font = style.font});
     return clicked;
 }
 
@@ -1713,7 +1788,7 @@ bool Frame::checkbox(const std::string& label, bool& value, Rect area, ButtonSty
     rect(area.pos, {bs, bs}, hover ? style.bg_hover : style.bg);
     if (value) rect({area.pos.x + bs * 0.25f, area.pos.y + bs * 0.25f}, {bs * 0.5f, bs * 0.5f}, style.bg_press);
     text(label, {area.pos.x + bs + 10.0f, area.pos.y + (bs - style.text_size) * 0.5f},
-         {.size = style.text_size, .color = style.text});
+         {.size = style.text_size, .color = style.text, .font = style.font});
     return clicked;
 }
 
