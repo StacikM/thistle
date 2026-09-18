@@ -99,7 +99,7 @@ Verification differs by backend: Metal is unchanged from the version that's been
 
 ## Minor 3D — read this before you get excited
 
-`camera3d()`, `cube()`, `plane3d()`, `line3d()`, `sphere3d()`, `cylinder3d()`, `cone3d()` exist because sokol_gl (the library the 2D renderer sits on) is secretly a full legacy-OpenGL-style immediate-mode API with its own matrix stack, perspective projection, and depth testing already built in. Exposing it took an afternoon; the extra primitives and texture support below took an afternoon more. It is not a 3D renderer. Do not confuse the two.
+`camera3d()`, `cube()`, `plane3d()`, `line3d()`, `sphere3d()`, `cylinder3d()`, `cone3d()`, `mesh3d()` exist because sokol_gl (the library the 2D renderer sits on) is secretly a full legacy-OpenGL-style immediate-mode API with its own matrix stack, perspective projection, and depth testing already built in. Exposing it took an afternoon; the extra primitives, texture support, and `.obj` mesh loading below took a bit more. It is still not a 3D renderer. Do not confuse the two.
 
 ```cpp
 Camera3D cam;
@@ -130,11 +130,24 @@ f.cone3d({4, 0, 0}, 0.6f, 1.2f, skin, coral);        // optional tint multiplies
 
 Every primitive has a textured overload taking a `Texture` instead of (or in addition to, via the trailing `tint`) an `rgba`. There's no tiling control and no per-face UV customization — `plane3d()` stretches the whole texture across its full width/depth (scale the mesh or pre-tile the image yourself if you want repetition), and `cube()` puts the whole texture on each of its six faces independently rather than unwrapping one texture across the box. An invalid/unloaded `Texture` silently falls back to the flat-color draw instead of drawing garbage.
 
+### Real meshes: `load_mesh()`/`mesh3d()`
+
+```cpp
+Mesh crate = load_mesh("assets/crate.obj");   // safe to call before app.run()
+
+f.mesh3d(crate, {0, 0, 0});                                       // flat white, no rotation/scale
+f.mesh3d(crate, {2, 0, 0}, {0, f.time, 0}, {1, 1, 1}, coral);      // spinning on Y, flat-colored
+f.mesh3d(crate, {4, 0, 0}, {0, 0, 0}, {1, 1, 1}, skin);            // textured
+```
+
+This loads an actual Wavefront `.obj` — real authored geometry, not generated primitives — as a flat triangle list. It's still drawn through the exact same immediate-mode path as `cube()`/`sphere3d()`/etc: no persistent GPU vertex buffer, no `sg_pipeline` of its own, the whole mesh gets re-walked and re-shaded (same one fixed key light, same `shade_face` math) every single frame via sokol_gl's matrix stack for the position/rotation/scale transform. `rotation_rad` is Euler angles in radians, applied X then Y then Z. That per-frame CPU walk is the real cost here — fine for a handful of props, not something to do for a level's worth of static geometry every frame without measuring first.
+
+What `load_mesh()` actually parses: `v`/`vn`/`vt`, `f` faces (fan-triangulated if they're quads/n-gons, since only triangles get drawn). If a vertex's face entry doesn't reference a `vn`, its normal is computed as the flat face normal of that triangle instead — so a `.obj` with real per-vertex normals shades smooth, one with none shades faceted, same as it would in any other engine. Everything else in the file — `o`/`g`/`s`, `usemtl`/`mtllib`, multiple objects — is ignored; every face in the file becomes one flat triangle soup, whatever objects/groups it was organized into in the source file.
+
 What you do **not** get, and what it would actually take to get it:
 
 - **Lighting.** There's no shader stage here at all — sokol_gl's pipeline is fixed-function. A real lighting model (even flat Phong, forget PBR) means writing actual vertex/fragment shaders and a real `sg_pipeline`-based renderer that bypasses sokol_gl entirely for anything lit. That's a from-scratch mini-renderer, one set of shaders per backend (Metal MSL / D3D11 HLSL / GL GLSL, or one GLSL source cross-compiled with sokol-shdc). Weeks, not an afternoon.
-- **Real meshes.** Every primitive here — cube, plane, sphere, cylinder, cone — is hardcoded generated geometry. There is no model loader. Loading real assets means a glTF parser and a vertex/index buffer pipeline — model loading, not model *drawing*, is the actual work.
-- **Materials, skeletal animation, normal maps, tiling UVs.** None of it exists. Don't go looking.
-- **3D physics.** `Physics` below is Box2D. Box2D is 2D. There is zero relationship between the minor-3D drawing calls and any physics simulation — if a cube "falls," you're moving its position yourself, there's no gravity or collision for it.
+- **Materials, skeletal animation, normal maps, tiling UVs.** `load_mesh()` reads geometry and nothing else — no `.mtl`, no rigging, no per-face materials. Loading a `.gltf`/`.glb` instead would get you PBR materials and skinning in the *file format*, but none of it would render any differently here — there's still no shader stage to use a material or a skeleton with, so it wasn't worth the much bigger parser for zero rendering payoff.
+- **3D physics or 3D collision.** `Physics` below is Box2D. Box2D is 2D. There is zero relationship between the minor-3D drawing calls (primitives or meshes) and any physics simulation — nothing here even knows a mesh's bounding box, let alone collides against its triangles.
 
 Use this for: a spinning icon on a menu, a background scene behind 2D gameplay (this is what Fling does — see its `draw_background3d`), a debug visualization, a title-screen flourish. Do not use this as the foundation for an actual 3D game and then be surprised when "add lighting" turns into a multi-week project. You were warned in this file.

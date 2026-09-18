@@ -232,6 +232,22 @@ struct TextureRecord {
     std::string path; // original file, for reload_texture
 };
 
+// A single loaded-mesh vertex — position, normal (for the fixed key light),
+// and a UV for the optional textured mesh3d() overload.
+struct MeshVertex {
+    vec3 pos;
+    vec3 normal;
+    float u = 0.0f;
+    float v = 0.0f;
+};
+
+// A flat triangle list (3 MeshVertex per triangle) — everything load_mesh()
+// parses out of a .obj, with no further structure (no per-object/material
+// grouping) since Frame::mesh3d() draws the whole thing in one pass anyway.
+struct MeshRecord {
+    std::vector<MeshVertex> tris;
+};
+
 struct EngineState {
     AppConfig config;
     std::function<void()> on_start;
@@ -246,6 +262,7 @@ struct EngineState {
     double elapsed = 0.0;
 
     std::vector<TextureRecord> textures;
+    std::vector<MeshRecord> meshes;
     sg_sampler sampler = {};
     sgl_pipeline pip = {};          // alpha-blended pipeline for 2D
     sgl_pipeline pip_additive = {}; // additive-blend pipeline (Blend::Additive)
@@ -3036,6 +3053,22 @@ void gen_cone(vec3 center, float radius, float height, int segments, Emit&& emit
         emit(pBase0, down, 0.5f + c0 * 0.5f, 0.5f + s0 * 0.5f);
     }
 }
+
+// Rotates a normal by the same X-then-Y-then-Z Euler angles Frame::mesh3d()
+// feeds to sgl_rotate() for the vertex positions, so the CPU-computed
+// per-vertex shading (done in world space, since sgl's matrix stack only
+// transforms the position it's given) lines up with where the mesh actually
+// ends up. Translation/scale don't affect a direction, so they're not part
+// of this — see mesh3d()'s doc comment for the non-uniform-scale caveat.
+vec3 rotate_normal(vec3 n, vec3 rot) {
+    const float cx = std::cos(rot.x), sx = std::sin(rot.x);
+    const float cy = std::cos(rot.y), sy = std::sin(rot.y);
+    const float cz = std::cos(rot.z), sz = std::sin(rot.z);
+    const vec3 afterX{n.x, n.y * cx - n.z * sx, n.y * sx + n.z * cx};
+    const vec3 afterY{afterX.x * cy + afterX.z * sy, afterX.y, -afterX.x * sy + afterX.z * cy};
+    const vec3 afterZ{afterY.x * cz - afterY.y * sz, afterY.x * sz + afterY.y * cz, afterY.z};
+    return afterZ;
+}
 } // namespace
 
 void Frame::cube(vec3 center, vec3 size, rgba color) {
@@ -3180,6 +3213,47 @@ void Frame::cone3d(vec3 center, float radius, float height, Texture tex, rgba ti
     sgl_end();
 }
 
+void Frame::mesh3d(Mesh mesh, vec3 pos, vec3 rotation_rad, vec3 scale, rgba tint) {
+    if (mesh.id < 0 || mesh.id >= static_cast<int>(g_state->meshes.size())) return;
+    const MeshRecord& rec = g_state->meshes[mesh.id];
+    sgl_disable_texture();
+    sgl_push_matrix();
+    sgl_translate(pos.x, pos.y, pos.z);
+    sgl_rotate(rotation_rad.x, 1.0f, 0.0f, 0.0f);
+    sgl_rotate(rotation_rad.y, 0.0f, 1.0f, 0.0f);
+    sgl_rotate(rotation_rad.z, 0.0f, 0.0f, 1.0f);
+    sgl_scale(scale.x, scale.y, scale.z);
+    sgl_begin_triangles();
+    for (const MeshVertex& mv : rec.tris) {
+        const vec3 wn = rotate_normal(mv.normal, rotation_rad);
+        const rgba sc = shade_face(tint, wn.x, wn.y, wn.z);
+        sgl_v3f_c4f(mv.pos.x, mv.pos.y, mv.pos.z, sc.r, sc.g, sc.b, sc.a);
+    }
+    sgl_end();
+    sgl_pop_matrix();
+    sgl_enable_texture();
+}
+
+void Frame::mesh3d(Mesh mesh, vec3 pos, vec3 rotation_rad, vec3 scale, Texture tex, rgba tint) {
+    if (!bind_texture3d(tex)) { mesh3d(mesh, pos, rotation_rad, scale, tint); return; }
+    if (mesh.id < 0 || mesh.id >= static_cast<int>(g_state->meshes.size())) return;
+    const MeshRecord& rec = g_state->meshes[mesh.id];
+    sgl_push_matrix();
+    sgl_translate(pos.x, pos.y, pos.z);
+    sgl_rotate(rotation_rad.x, 1.0f, 0.0f, 0.0f);
+    sgl_rotate(rotation_rad.y, 0.0f, 1.0f, 0.0f);
+    sgl_rotate(rotation_rad.z, 0.0f, 0.0f, 1.0f);
+    sgl_scale(scale.x, scale.y, scale.z);
+    sgl_begin_triangles();
+    for (const MeshVertex& mv : rec.tris) {
+        const vec3 wn = rotate_normal(mv.normal, rotation_rad);
+        const rgba sc = shade_face(tint, wn.x, wn.y, wn.z);
+        sgl_v3f_t2f_c4f(mv.pos.x, mv.pos.y, mv.pos.z, mv.u, mv.v, sc.r, sc.g, sc.b, sc.a);
+    }
+    sgl_end();
+    sgl_pop_matrix();
+}
+
 Font load_font(const std::string& path) {
     const int idx = static_cast<int>(g_state->font_ids.size());
     int fid = FONS_INVALID;
@@ -3212,6 +3286,114 @@ Texture load_texture(const std::string& path) {
     const int id = static_cast<int>(g_state->textures.size());
     g_state->textures.push_back(rec);
     return Texture{id, w, h};
+}
+
+namespace {
+// Parses one OBJ face-vertex token ("3", "3/4", "3//5", "3/4/5") into 0-based
+// indices, resolving OBJ's 1-based (or negative-relative-to-end) indexing.
+// Any component the token doesn't have comes back -1.
+struct ObjFaceIndex { int p = -1, t = -1, n = -1; };
+
+int resolve_obj_index(int raw, int count) {
+    if (raw == 0) return -1;
+    return raw > 0 ? raw - 1 : count + raw;
+}
+
+ObjFaceIndex parse_obj_face_token(const std::string& tok, int posCount, int uvCount, int nCount) {
+    ObjFaceIndex out;
+    const size_t p1 = tok.find('/');
+    const std::string a = (p1 == std::string::npos) ? tok : tok.substr(0, p1);
+    if (!a.empty()) out.p = resolve_obj_index(std::atoi(a.c_str()), posCount);
+    if (p1 == std::string::npos) return out;
+    const std::string rest = tok.substr(p1 + 1);
+    const size_t p2 = rest.find('/');
+    const std::string b = (p2 == std::string::npos) ? rest : rest.substr(0, p2);
+    if (!b.empty()) out.t = resolve_obj_index(std::atoi(b.c_str()), uvCount);
+    if (p2 == std::string::npos) return out;
+    const std::string c = rest.substr(p2 + 1);
+    if (!c.empty()) out.n = resolve_obj_index(std::atoi(c.c_str()), nCount);
+    return out;
+}
+
+vec3 normalize_or(vec3 v, vec3 fallback) {
+    const float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    return len > 1e-8f ? vec3{v.x / len, v.y / len, v.z / len} : fallback;
+}
+} // namespace
+
+Mesh load_mesh(const std::string& path) {
+    std::string content;
+    if (!thistle_read_text_asset(path, content)) { log_warn("load_mesh: could not open " + path); return Mesh{}; }
+
+    std::vector<vec3> positions;
+    std::vector<vec3> normals;
+    std::vector<std::pair<float, float>> uvs;
+    MeshRecord rec;
+
+    std::istringstream in(content);
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream ls(line);
+        std::string tag;
+        ls >> tag;
+        if (tag == "v") {
+            vec3 p; ls >> p.x >> p.y >> p.z;
+            positions.push_back(p);
+        } else if (tag == "vn") {
+            vec3 n; ls >> n.x >> n.y >> n.z;
+            normals.push_back(normalize_or(n, vec3{0.0f, 1.0f, 0.0f}));
+        } else if (tag == "vt") {
+            float u = 0.0f, v = 0.0f; ls >> u >> v;
+            uvs.emplace_back(u, v);
+        } else if (tag == "f") {
+            std::vector<ObjFaceIndex> face;
+            std::string tok;
+            while (ls >> tok) {
+                face.push_back(parse_obj_face_token(tok, static_cast<int>(positions.size()),
+                                                     static_cast<int>(uvs.size()), static_cast<int>(normals.size())));
+            }
+            if (face.size() < 3) continue;
+            // Fan-triangulate anything beyond a triangle (n-gons, quads).
+            for (size_t i = 1; i + 1 < face.size(); ++i) {
+                const ObjFaceIndex& fa = face[0];
+                const ObjFaceIndex& fb = face[i];
+                const ObjFaceIndex& fc = face[i + 1];
+                auto pos_of = [&](const ObjFaceIndex& fi) {
+                    return (fi.p >= 0 && fi.p < static_cast<int>(positions.size())) ? positions[fi.p] : vec3{};
+                };
+                const vec3 pa = pos_of(fa), pb = pos_of(fb), pc = pos_of(fc);
+                const vec3 e1{pb.x - pa.x, pb.y - pa.y, pb.z - pa.z};
+                const vec3 e2{pc.x - pa.x, pc.y - pa.y, pc.z - pa.z};
+                const vec3 flatNormal = normalize_or(
+                    vec3{e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x},
+                    vec3{0.0f, 1.0f, 0.0f});
+                auto vertex_of = [&](const ObjFaceIndex& fi) {
+                    MeshVertex mv;
+                    mv.pos = pos_of(fi);
+                    mv.normal = (fi.n >= 0 && fi.n < static_cast<int>(normals.size())) ? normals[fi.n] : flatNormal;
+                    if (fi.t >= 0 && fi.t < static_cast<int>(uvs.size())) { mv.u = uvs[fi.t].first; mv.v = uvs[fi.t].second; }
+                    return mv;
+                };
+                rec.tris.push_back(vertex_of(fa));
+                rec.tris.push_back(vertex_of(fb));
+                rec.tris.push_back(vertex_of(fc));
+            }
+        }
+        // Everything else (o/g/s/usemtl/mtllib/comments) is deliberately
+        // ignored — see load_mesh()'s doc comment for what that means.
+    }
+
+    if (rec.tris.empty()) { log_warn("load_mesh: no triangles parsed from " + path); return Mesh{}; }
+    const int id = static_cast<int>(g_state->meshes.size());
+    g_state->meshes.push_back(std::move(rec));
+    return Mesh{id};
+}
+
+void unload_mesh(Mesh& mesh) {
+    if (mesh.id >= 0 && mesh.id < static_cast<int>(g_state->meshes.size())) {
+        g_state->meshes[mesh.id] = MeshRecord{};
+    }
+    mesh = Mesh{};
 }
 
 void unload_texture(Texture& tex) {

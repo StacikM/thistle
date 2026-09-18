@@ -10,7 +10,7 @@ A small, simple, cross-platform 2D (and now minor-3D) C++ game engine built on t
 - **Text:** fontstash.
 - **Networking:** async HTTP (NSURLSession/WinHTTP) plus a Mirror-flavored realtime client/server layer — synced fields, Commands, ClientRpcs — over TCP.
 - **In-app purchases:** StoreKit (iOS/macOS).
-- **Minor 3D:** a perspective/depth-tested drawing mode (`camera3d`, `cube`, `plane3d`, `sphere3d`, `cylinder3d`, `cone3d`, `line3d`) layered on top of the 2D renderer — shaded primitives, optionally textured, not a full lit 3D pipeline.
+- **Minor 3D:** a perspective/depth-tested drawing mode (`camera3d`, `cube`, `plane3d`, `sphere3d`, `cylinder3d`, `cone3d`, `line3d`, plus real `.obj` meshes via `load_mesh`/`mesh3d`) layered on top of the 2D renderer — shaded primitives, optionally textured, not a full lit 3D pipeline.
 
 See [docs/](docs/) for the real documentation — building, drawing, physics, networking, in-app purchases — written with the actual limitations spelled out, not glossed over.
 

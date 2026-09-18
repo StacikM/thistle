@@ -153,6 +153,26 @@ void unload_texture(Texture& tex);
 // Re-reads a texture from its original file and re-uploads it (hot reload).
 void reload_texture(Texture tex);
 
+// --- meshes ---------------------------------------------------------------
+
+// A lightweight handle to mesh geometry loaded from a .obj file. Copyable,
+// owns nothing itself — the triangle data lives engine-side, keyed by id.
+struct Mesh {
+    int id = -1;
+    bool valid() const { return id >= 0; }
+};
+
+// Loads a Wavefront .obj as a flat triangle list (position + normal + UV per
+// vertex). N-gon faces are fan-triangulated; any vertex missing a "vn" gets
+// the flat face normal computed from its triangle instead, so a file with no
+// normals at all still shades correctly (just faceted, not smoothed). No
+// materials, no .mtl, no per-object/group split — every face in the file
+// becomes one flat triangle list. See docs/drawing.md before assuming more.
+Mesh load_mesh(const std::string& path);
+
+// Frees a mesh's triangle data and invalidates the handle.
+void unload_mesh(Mesh& mesh);
+
 // Optional per-sprite draw settings. Use designated initializers:
 //   f.sprite(tex, pos, { .size = {64, 64}, .tint = coral, .rotation = 0.5f });
 struct SpriteOpts {
@@ -362,6 +382,14 @@ public:
     // `center.y - height * 0.5`, apex at `center.y + height * 0.5`.
     void cone3d(vec3 center, float radius, float height, rgba color, int segments = 16);
     void cone3d(vec3 center, float radius, float height, Texture tex, rgba tint = white, int segments = 16);
+
+    // Draws a mesh loaded with load_mesh(), shaded with the same fixed key
+    // light as cube()/sphere3d()/etc. `rotation_rad` is Euler angles (radians)
+    // applied X, then Y, then Z. Scale isn't corrected for in the shading
+    // normals, so a heavily non-uniform scale will shade a little wrong —
+    // fine for gameplay-scale stretching, not something to lean on.
+    void mesh3d(Mesh mesh, vec3 pos, vec3 rotation_rad = {0, 0, 0}, vec3 scale = {1, 1, 1}, rgba tint = white);
+    void mesh3d(Mesh mesh, vec3 pos, vec3 rotation_rad, vec3 scale, Texture tex, rgba tint = white);
 
     // Transform stack (used by Node). Draws between push/pop are translated,
     // rotated (radians), then scaled; nest freely, pop what you push.
