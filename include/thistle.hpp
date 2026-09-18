@@ -332,11 +332,36 @@ public:
     // Flat-shaded box centered at `center`, `size` along each axis.
     void cube(vec3 center, vec3 size, rgba color);
 
+    // Same box, textured instead of flat-colored — one texture wrapped
+    // 0..1 per face (six faces, so it repeats per-face, not seamlessly
+    // across the whole box). `tint` multiplies the sampled color.
+    void cube(vec3 center, vec3 size, Texture tex, rgba tint = white);
+
     // A flat, horizontal (XZ) ground/wall-sized quad centered at `center`.
     void plane3d(vec3 center, float width, float depth, rgba color);
 
+    // Same quad, textured 0..1 across its whole width/depth (no tiling —
+    // scale width/depth or your texture if you want repetition).
+    void plane3d(vec3 center, float width, float depth, Texture tex, rgba tint = white);
+
     // A 3D line (1px, GPU line width — thickness is best-effort/platform-dependent).
     void line3d(vec3 a, vec3 b, rgba color);
+
+    // A smooth-shaded UV sphere (per-vertex normals, unlike the flat-per-face
+    // cube). `rings`/`segments` are latitude/longitude subdivisions — more
+    // means rounder and more triangles.
+    void sphere3d(vec3 center, float radius, rgba color, int rings = 12, int segments = 16);
+    void sphere3d(vec3 center, float radius, Texture tex, rgba tint = white, int rings = 12, int segments = 16);
+
+    // A capped cylinder, axis along Y, centered at `center` (extends
+    // `height` * 0.5 up and down from `center.y`).
+    void cylinder3d(vec3 center, float radius, float height, rgba color, int segments = 16);
+    void cylinder3d(vec3 center, float radius, float height, Texture tex, rgba tint = white, int segments = 16);
+
+    // A capped cone, axis along Y, apex up: base sits at
+    // `center.y - height * 0.5`, apex at `center.y + height * 0.5`.
+    void cone3d(vec3 center, float radius, float height, rgba color, int segments = 16);
+    void cone3d(vec3 center, float radius, float height, Texture tex, rgba tint = white, int segments = 16);
 
     // Transform stack (used by Node). Draws between push/pop are translated,
     // rotated (radians), then scaled; nest freely, pop what you push.

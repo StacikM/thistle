@@ -99,7 +99,7 @@ Verification differs by backend: Metal is unchanged from the version that's been
 
 ## Minor 3D — read this before you get excited
 
-`camera3d()`, `cube()`, `plane3d()`, `line3d()` exist because sokol_gl (the library the 2D renderer sits on) is secretly a full legacy-OpenGL-style immediate-mode API with its own matrix stack, perspective projection, and depth testing already built in. Exposing it took an afternoon. It is not a 3D renderer. Do not confuse the two.
+`camera3d()`, `cube()`, `plane3d()`, `line3d()`, `sphere3d()`, `cylinder3d()`, `cone3d()` exist because sokol_gl (the library the 2D renderer sits on) is secretly a full legacy-OpenGL-style immediate-mode API with its own matrix stack, perspective projection, and depth testing already built in. Exposing it took an afternoon; the extra primitives and texture support below took an afternoon more. It is not a 3D renderer. Do not confuse the two.
 
 ```cpp
 Camera3D cam;
@@ -109,18 +109,32 @@ f.camera3d(cam);
 
 f.plane3d({0, -1, 0}, 20, 20, rgb(0.3f, 0.5f, 0.3f));   // ground
 f.cube({0, 0, 0}, {1, 1, 1}, coral);
+f.sphere3d({-2, 0, 0}, 0.6f, rgb(0.9f, 0.8f, 0.2f));
+f.cylinder3d({2, 0, 0}, 0.5f, 1.2f, rgb(0.4f, 0.7f, 0.9f));
+f.cone3d({4, 0, 0}, 0.6f, 1.2f, rgb(0.8f, 0.4f, 0.8f));
 f.line3d({0, -1, 0}, {0, 2, 0}, white);                  // an axis, a gizmo, whatever
 
 f.camera({0, 0});   // MANDATORY before drawing 2D UI again
 ```
 
-What you get: a perspective camera (`eye`/`target`/`up`/`fov_deg`), real depth testing against the swapchain's own depth buffer (no offscreen pass needed, sokol_app gives you one by default), and flat-shaded boxes/planes/lines under one fixed key light baked into the vertex color on the CPU. That's it.
+What you get: a perspective camera (`eye`/`target`/`up`/`fov_deg`), real depth testing against the swapchain's own depth buffer (no offscreen pass needed, sokol_app gives you one by default), and shaded primitives under one fixed key light baked into the vertex color on the CPU. `cube()`/`plane3d()` are flat-shaded per face (one normal per face); `sphere3d()`/`cylinder3d()`/`cone3d()` shade per vertex instead, so they read as smoothly round rather than faceted once `rings`/`segments` are reasonably high. That's it — same one fixed light for all of them, no per-object lights.
+
+```cpp
+Texture skin = load_texture("assets/crate.png");
+f.cube({0, 0, 0}, {1, 1, 1}, skin);                  // whole texture per face, 6x
+f.plane3d({0, -1, 0}, 20, 20, skin);                 // whole texture across the quad, no tiling
+f.sphere3d({-2, 0, 0}, 0.6f, skin);                  // equirectangular wrap
+f.cylinder3d({2, 0, 0}, 0.5f, 1.2f, skin);           // wraps around the side, caps get a circular UV
+f.cone3d({4, 0, 0}, 0.6f, 1.2f, skin, coral);        // optional tint multiplies the sampled color
+```
+
+Every primitive has a textured overload taking a `Texture` instead of (or in addition to, via the trailing `tint`) an `rgba`. There's no tiling control and no per-face UV customization — `plane3d()` stretches the whole texture across its full width/depth (scale the mesh or pre-tile the image yourself if you want repetition), and `cube()` puts the whole texture on each of its six faces independently rather than unwrapping one texture across the box. An invalid/unloaded `Texture` silently falls back to the flat-color draw instead of drawing garbage.
 
 What you do **not** get, and what it would actually take to get it:
 
 - **Lighting.** There's no shader stage here at all — sokol_gl's pipeline is fixed-function. A real lighting model (even flat Phong, forget PBR) means writing actual vertex/fragment shaders and a real `sg_pipeline`-based renderer that bypasses sokol_gl entirely for anything lit. That's a from-scratch mini-renderer, one set of shaders per backend (Metal MSL / D3D11 HLSL / GL GLSL, or one GLSL source cross-compiled with sokol-shdc). Weeks, not an afternoon.
-- **Meshes.** `cube()` and `plane3d()` are hardcoded generated geometry. There is no model loader. Loading real assets means a glTF parser and a vertex/index buffer pipeline — model loading, not model *drawing*, is the actual work.
-- **Textures on 3D geometry, materials, skeletal animation.** None of it exists. Don't go looking.
+- **Real meshes.** Every primitive here — cube, plane, sphere, cylinder, cone — is hardcoded generated geometry. There is no model loader. Loading real assets means a glTF parser and a vertex/index buffer pipeline — model loading, not model *drawing*, is the actual work.
+- **Materials, skeletal animation, normal maps, tiling UVs.** None of it exists. Don't go looking.
 - **3D physics.** `Physics` below is Box2D. Box2D is 2D. There is zero relationship between the minor-3D drawing calls and any physics simulation — if a cube "falls," you're moving its position yourself, there's no gravity or collision for it.
 
 Use this for: a spinning icon on a menu, a background scene behind 2D gameplay (this is what Fling does — see its `draw_background3d`), a debug visualization, a title-screen flourish. Do not use this as the foundation for an actual 3D game and then be surprised when "add lighting" turns into a multi-week project. You were warned in this file.

@@ -2905,28 +2905,145 @@ rgba shade_face(rgba color, float nx, float ny, float nz) {
     const float shade = 0.45f + 0.55f * std::max(0.0f, ndotl); // ambient floor + diffuse
     return rgba{color.r * shade, color.g * shade, color.b * shade, color.a};
 }
+
+// Binds `tex` for a textured 3D draw, uploading it first if needed. Returns
+// false (nothing bound) if the texture is invalid or failed to upload, so
+// callers can fall back to a flat-colored draw instead of drawing garbage.
+bool bind_texture3d(Texture tex) {
+    if (!tex.valid()) return false;
+    TextureRecord& rec = g_state->textures[tex.id];
+    ensure_uploaded(rec);
+    if (rec.img.id == SG_INVALID_ID) return false;
+    sgl_texture(rec.view, g_state->sampler);
+    return true;
+}
+
+struct CubeFace { int a, b, c, d; float nx, ny, nz; };
+constexpr CubeFace kCubeFaces[6] = {
+    {0, 1, 2, 3,  0.0f,  0.0f, -1.0f}, // back
+    {5, 4, 7, 6,  0.0f,  0.0f,  1.0f}, // front
+    {4, 0, 3, 7, -1.0f,  0.0f,  0.0f}, // left
+    {1, 5, 6, 2,  1.0f,  0.0f,  0.0f}, // right
+    {3, 2, 6, 7,  0.0f,  1.0f,  0.0f}, // top
+    {4, 5, 1, 0,  0.0f, -1.0f,  0.0f}, // bottom
+};
+
+void cube_corners(vec3 center, vec3 size, vec3 out[8]) {
+    const float hx = size.x * 0.5f, hy = size.y * 0.5f, hz = size.z * 0.5f;
+    out[0] = {center.x - hx, center.y - hy, center.z - hz};
+    out[1] = {center.x + hx, center.y - hy, center.z - hz};
+    out[2] = {center.x + hx, center.y + hy, center.z - hz};
+    out[3] = {center.x - hx, center.y + hy, center.z - hz};
+    out[4] = {center.x - hx, center.y - hy, center.z + hz};
+    out[5] = {center.x + hx, center.y - hy, center.z + hz};
+    out[6] = {center.x + hx, center.y + hy, center.z + hz};
+    out[7] = {center.x - hx, center.y + hy, center.z + hz};
+}
+
+constexpr float kPi = 3.14159265358979f;
+constexpr float kTwoPi = 6.28318530717959f;
+
+// Walks a UV-sphere's triangles (two per lat/lon quad, degenerate slivers
+// at the poles — harmless zero-area triangles) calling emit(pos, normal, u, v)
+// for every vertex. Shared by the flat-color and textured sphere3d() overloads
+// so the trig only lives in one place.
+template <typename Emit>
+void gen_sphere(vec3 center, float radius, int rings, int segments, Emit&& emit) {
+    if (rings < 2) rings = 2;
+    if (segments < 3) segments = 3;
+    for (int r = 0; r < rings; ++r) {
+        const float v0 = static_cast<float>(r) / rings, v1 = static_cast<float>(r + 1) / rings;
+        const float phi0 = v0 * kPi, phi1 = v1 * kPi;
+        for (int s = 0; s < segments; ++s) {
+            const float u0 = static_cast<float>(s) / segments, u1 = static_cast<float>(s + 1) / segments;
+            const float th0 = u0 * kTwoPi, th1 = u1 * kTwoPi;
+            auto normal_at = [&](float phi, float theta) {
+                const float sp = std::sin(phi), cp = std::cos(phi);
+                return vec3{sp * std::cos(theta), cp, sp * std::sin(theta)};
+            };
+            auto point_at = [&](vec3 n) {
+                return vec3{center.x + radius * n.x, center.y + radius * n.y, center.z + radius * n.z};
+            };
+            const vec3 n00 = normal_at(phi0, th0), n01 = normal_at(phi0, th1);
+            const vec3 n10 = normal_at(phi1, th0), n11 = normal_at(phi1, th1);
+            const vec3 p00 = point_at(n00), p01 = point_at(n01);
+            const vec3 p10 = point_at(n10), p11 = point_at(n11);
+            emit(p00, n00, u0, v0); emit(p10, n10, u0, v1); emit(p11, n11, u1, v1);
+            emit(p00, n00, u0, v0); emit(p11, n11, u1, v1); emit(p01, n01, u1, v0);
+        }
+    }
+}
+
+// Walks a capped cylinder's triangles (smooth normal around the side,
+// flat +-Y normal on the caps). Shared by both cylinder3d() overloads.
+template <typename Emit>
+void gen_cylinder(vec3 center, float radius, float height, int segments, Emit&& emit) {
+    if (segments < 3) segments = 3;
+    const float halfH = height * 0.5f;
+    const float yTop = center.y + halfH, yBot = center.y - halfH;
+    for (int s = 0; s < segments; ++s) {
+        const float u0 = static_cast<float>(s) / segments, u1 = static_cast<float>(s + 1) / segments;
+        const float th0 = u0 * kTwoPi, th1 = u1 * kTwoPi;
+        const float c0 = std::cos(th0), s0 = std::sin(th0);
+        const float c1 = std::cos(th1), s1 = std::sin(th1);
+        const vec3 n0{c0, 0.0f, s0}, n1{c1, 0.0f, s1};
+        const vec3 pTop0{center.x + radius * c0, yTop, center.z + radius * s0};
+        const vec3 pTop1{center.x + radius * c1, yTop, center.z + radius * s1};
+        const vec3 pBot0{center.x + radius * c0, yBot, center.z + radius * s0};
+        const vec3 pBot1{center.x + radius * c1, yBot, center.z + radius * s1};
+        emit(pBot0, n0, u0, 0.0f); emit(pBot1, n1, u1, 0.0f); emit(pTop1, n1, u1, 1.0f);
+        emit(pBot0, n0, u0, 0.0f); emit(pTop1, n1, u1, 1.0f); emit(pTop0, n0, u0, 1.0f);
+
+        const vec3 up{0.0f, 1.0f, 0.0f}, down{0.0f, -1.0f, 0.0f};
+        const vec3 capCenterTop{center.x, yTop, center.z}, capCenterBot{center.x, yBot, center.z};
+        emit(capCenterTop, up, 0.5f, 0.5f);
+        emit(pTop1, up, 0.5f + c1 * 0.5f, 0.5f + s1 * 0.5f);
+        emit(pTop0, up, 0.5f + c0 * 0.5f, 0.5f + s0 * 0.5f);
+        emit(capCenterBot, down, 0.5f, 0.5f);
+        emit(pBot0, down, 0.5f + c0 * 0.5f, 0.5f + s0 * 0.5f);
+        emit(pBot1, down, 0.5f + c1 * 0.5f, 0.5f + s1 * 0.5f);
+    }
+}
+
+// Walks a capped cone's triangles (apex up). Side normals slope by
+// radius/height (a wide, flat cone has near-vertical side normals, a tall
+// thin one has near-horizontal ones); the base cap is a flat -Y fan.
+template <typename Emit>
+void gen_cone(vec3 center, float radius, float height, int segments, Emit&& emit) {
+    if (segments < 3) segments = 3;
+    const float halfH = height * 0.5f;
+    const float yApex = center.y + halfH, yBase = center.y - halfH;
+    const vec3 apex{center.x, yApex, center.z};
+    const float slope = height > 0.0f ? radius / height : 0.0f;
+    const float nlen = std::sqrt(1.0f + slope * slope);
+    for (int s = 0; s < segments; ++s) {
+        const float u0 = static_cast<float>(s) / segments, u1 = static_cast<float>(s + 1) / segments;
+        const float th0 = u0 * kTwoPi, th1 = u1 * kTwoPi;
+        const float c0 = std::cos(th0), s0 = std::sin(th0);
+        const float c1 = std::cos(th1), s1 = std::sin(th1);
+        const vec3 n0{c0 / nlen, slope / nlen, s0 / nlen};
+        const vec3 n1{c1 / nlen, slope / nlen, s1 / nlen};
+        const vec3 nApex{(n0.x + n1.x) * 0.5f, (n0.y + n1.y) * 0.5f, (n0.z + n1.z) * 0.5f};
+        const vec3 pBase0{center.x + radius * c0, yBase, center.z + radius * s0};
+        const vec3 pBase1{center.x + radius * c1, yBase, center.z + radius * s1};
+        emit(pBase0, n0, u0, 0.0f);
+        emit(pBase1, n1, u1, 0.0f);
+        emit(apex, nApex, (u0 + u1) * 0.5f, 1.0f);
+
+        const vec3 down{0.0f, -1.0f, 0.0f};
+        emit(vec3{center.x, yBase, center.z}, down, 0.5f, 0.5f);
+        emit(pBase1, down, 0.5f + c1 * 0.5f, 0.5f + s1 * 0.5f);
+        emit(pBase0, down, 0.5f + c0 * 0.5f, 0.5f + s0 * 0.5f);
+    }
+}
 } // namespace
 
 void Frame::cube(vec3 center, vec3 size, rgba color) {
-    const float hx = size.x * 0.5f, hy = size.y * 0.5f, hz = size.z * 0.5f;
-    const vec3 c[8] = {
-        {center.x - hx, center.y - hy, center.z - hz}, {center.x + hx, center.y - hy, center.z - hz},
-        {center.x + hx, center.y + hy, center.z - hz}, {center.x - hx, center.y + hy, center.z - hz},
-        {center.x - hx, center.y - hy, center.z + hz}, {center.x + hx, center.y - hy, center.z + hz},
-        {center.x + hx, center.y + hy, center.z + hz}, {center.x - hx, center.y + hy, center.z + hz},
-    };
-    struct Face { int a, b, c, d; float nx, ny, nz; };
-    static const Face faces[6] = {
-        {0, 1, 2, 3,  0.0f,  0.0f, -1.0f}, // back
-        {5, 4, 7, 6,  0.0f,  0.0f,  1.0f}, // front
-        {4, 0, 3, 7, -1.0f,  0.0f,  0.0f}, // left
-        {1, 5, 6, 2,  1.0f,  0.0f,  0.0f}, // right
-        {3, 2, 6, 7,  0.0f,  1.0f,  0.0f}, // top
-        {4, 5, 1, 0,  0.0f, -1.0f,  0.0f}, // bottom
-    };
+    vec3 c[8];
+    cube_corners(center, size, c);
     sgl_disable_texture();
     sgl_begin_triangles();
-    for (const Face& fc : faces) {
+    for (const CubeFace& fc : kCubeFaces) {
         const rgba sc = shade_face(color, fc.nx, fc.ny, fc.nz);
         const vec3& v0 = c[fc.a]; const vec3& v1 = c[fc.b]; const vec3& v2 = c[fc.c]; const vec3& v3 = c[fc.d];
         sgl_v3f_c4f(v0.x, v0.y, v0.z, sc.r, sc.g, sc.b, sc.a);
@@ -2938,6 +3055,24 @@ void Frame::cube(vec3 center, vec3 size, rgba color) {
     }
     sgl_end();
     sgl_enable_texture();
+}
+
+void Frame::cube(vec3 center, vec3 size, Texture tex, rgba tint) {
+    if (!bind_texture3d(tex)) { cube(center, size, tint); return; }
+    vec3 c[8];
+    cube_corners(center, size, c);
+    sgl_begin_triangles();
+    for (const CubeFace& fc : kCubeFaces) {
+        const rgba sc = shade_face(tint, fc.nx, fc.ny, fc.nz);
+        const vec3& v0 = c[fc.a]; const vec3& v1 = c[fc.b]; const vec3& v2 = c[fc.c]; const vec3& v3 = c[fc.d];
+        sgl_v3f_t2f_c4f(v0.x, v0.y, v0.z, 0.0f, 0.0f, sc.r, sc.g, sc.b, sc.a);
+        sgl_v3f_t2f_c4f(v1.x, v1.y, v1.z, 1.0f, 0.0f, sc.r, sc.g, sc.b, sc.a);
+        sgl_v3f_t2f_c4f(v2.x, v2.y, v2.z, 1.0f, 1.0f, sc.r, sc.g, sc.b, sc.a);
+        sgl_v3f_t2f_c4f(v0.x, v0.y, v0.z, 0.0f, 0.0f, sc.r, sc.g, sc.b, sc.a);
+        sgl_v3f_t2f_c4f(v2.x, v2.y, v2.z, 1.0f, 1.0f, sc.r, sc.g, sc.b, sc.a);
+        sgl_v3f_t2f_c4f(v3.x, v3.y, v3.z, 0.0f, 1.0f, sc.r, sc.g, sc.b, sc.a);
+    }
+    sgl_end();
 }
 
 void Frame::plane3d(vec3 center, float width_, float depth_, rgba color) {
@@ -2957,6 +3092,22 @@ void Frame::plane3d(vec3 center, float width_, float depth_, rgba color) {
     sgl_enable_texture();
 }
 
+void Frame::plane3d(vec3 center, float width_, float depth_, Texture tex, rgba tint) {
+    if (!bind_texture3d(tex)) { plane3d(center, width_, depth_, tint); return; }
+    const float hw = width_ * 0.5f, hd = depth_ * 0.5f;
+    const rgba sc = shade_face(tint, 0.0f, 1.0f, 0.0f);
+    const vec3 v0{center.x - hw, center.y, center.z - hd}, v1{center.x + hw, center.y, center.z - hd},
+               v2{center.x + hw, center.y, center.z + hd}, v3{center.x - hw, center.y, center.z + hd};
+    sgl_begin_triangles();
+    sgl_v3f_t2f_c4f(v0.x, v0.y, v0.z, 0.0f, 0.0f, sc.r, sc.g, sc.b, sc.a);
+    sgl_v3f_t2f_c4f(v1.x, v1.y, v1.z, 1.0f, 0.0f, sc.r, sc.g, sc.b, sc.a);
+    sgl_v3f_t2f_c4f(v2.x, v2.y, v2.z, 1.0f, 1.0f, sc.r, sc.g, sc.b, sc.a);
+    sgl_v3f_t2f_c4f(v0.x, v0.y, v0.z, 0.0f, 0.0f, sc.r, sc.g, sc.b, sc.a);
+    sgl_v3f_t2f_c4f(v2.x, v2.y, v2.z, 1.0f, 1.0f, sc.r, sc.g, sc.b, sc.a);
+    sgl_v3f_t2f_c4f(v3.x, v3.y, v3.z, 0.0f, 1.0f, sc.r, sc.g, sc.b, sc.a);
+    sgl_end();
+}
+
 void Frame::line3d(vec3 a, vec3 b, rgba color) {
     sgl_disable_texture();
     sgl_begin_lines();
@@ -2964,6 +3115,69 @@ void Frame::line3d(vec3 a, vec3 b, rgba color) {
     sgl_v3f_c4f(b.x, b.y, b.z, color.r, color.g, color.b, color.a);
     sgl_end();
     sgl_enable_texture();
+}
+
+void Frame::sphere3d(vec3 center, float radius, rgba color, int rings, int segments) {
+    sgl_disable_texture();
+    sgl_begin_triangles();
+    gen_sphere(center, radius, rings, segments, [&](vec3 p, vec3 n, float, float) {
+        const rgba sc = shade_face(color, n.x, n.y, n.z);
+        sgl_v3f_c4f(p.x, p.y, p.z, sc.r, sc.g, sc.b, sc.a);
+    });
+    sgl_end();
+    sgl_enable_texture();
+}
+
+void Frame::sphere3d(vec3 center, float radius, Texture tex, rgba tint, int rings, int segments) {
+    if (!bind_texture3d(tex)) { sphere3d(center, radius, tint, rings, segments); return; }
+    sgl_begin_triangles();
+    gen_sphere(center, radius, rings, segments, [&](vec3 p, vec3 n, float u, float v) {
+        const rgba sc = shade_face(tint, n.x, n.y, n.z);
+        sgl_v3f_t2f_c4f(p.x, p.y, p.z, u, v, sc.r, sc.g, sc.b, sc.a);
+    });
+    sgl_end();
+}
+
+void Frame::cylinder3d(vec3 center, float radius, float height, rgba color, int segments) {
+    sgl_disable_texture();
+    sgl_begin_triangles();
+    gen_cylinder(center, radius, height, segments, [&](vec3 p, vec3 n, float, float) {
+        const rgba sc = shade_face(color, n.x, n.y, n.z);
+        sgl_v3f_c4f(p.x, p.y, p.z, sc.r, sc.g, sc.b, sc.a);
+    });
+    sgl_end();
+    sgl_enable_texture();
+}
+
+void Frame::cylinder3d(vec3 center, float radius, float height, Texture tex, rgba tint, int segments) {
+    if (!bind_texture3d(tex)) { cylinder3d(center, radius, height, tint, segments); return; }
+    sgl_begin_triangles();
+    gen_cylinder(center, radius, height, segments, [&](vec3 p, vec3 n, float u, float v) {
+        const rgba sc = shade_face(tint, n.x, n.y, n.z);
+        sgl_v3f_t2f_c4f(p.x, p.y, p.z, u, v, sc.r, sc.g, sc.b, sc.a);
+    });
+    sgl_end();
+}
+
+void Frame::cone3d(vec3 center, float radius, float height, rgba color, int segments) {
+    sgl_disable_texture();
+    sgl_begin_triangles();
+    gen_cone(center, radius, height, segments, [&](vec3 p, vec3 n, float, float) {
+        const rgba sc = shade_face(color, n.x, n.y, n.z);
+        sgl_v3f_c4f(p.x, p.y, p.z, sc.r, sc.g, sc.b, sc.a);
+    });
+    sgl_end();
+    sgl_enable_texture();
+}
+
+void Frame::cone3d(vec3 center, float radius, float height, Texture tex, rgba tint, int segments) {
+    if (!bind_texture3d(tex)) { cone3d(center, radius, height, tint, segments); return; }
+    sgl_begin_triangles();
+    gen_cone(center, radius, height, segments, [&](vec3 p, vec3 n, float u, float v) {
+        const rgba sc = shade_face(tint, n.x, n.y, n.z);
+        sgl_v3f_t2f_c4f(p.x, p.y, p.z, u, v, sc.r, sc.g, sc.b, sc.a);
+    });
+    sgl_end();
 }
 
 Font load_font(const std::string& path) {

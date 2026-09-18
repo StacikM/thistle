@@ -30,15 +30,18 @@ int main() {
     app.update([&](Frame f) {
         f.clear(rgb(0.08f, 0.10f, 0.16f));
 
-        // Minor-3D check: a spinning cube + a ground plane + an axis line,
-        // depth-tested against each other.
+        // Minor-3D check: a spinning cube + sphere/cylinder/cone + a ground
+        // plane + an axis line, depth-tested against each other.
         Camera3D cam;
         const float t = static_cast<float>(f.time);
-        cam.eye = {3.0f * std::cos(t), 2.0f, 3.0f * std::sin(t)};
+        cam.eye = {6.0f * std::cos(t * 0.5f), 3.0f, 6.0f * std::sin(t * 0.5f)};
         cam.target = {0.0f, 0.0f, 0.0f};
         f.camera3d(cam);
-        f.plane3d({0, -1, 0}, 6.0f, 6.0f, rgb(0.3f, 0.5f, 0.3f));
-        f.cube({0, 0, 0}, {1, 1, 1}, rgb(0.85f, 0.35f, 0.3f));
+        f.plane3d({0, -1, 0}, 10.0f, 10.0f, rgb(0.3f, 0.5f, 0.3f));
+        f.cube({-2.4f, 0, 0}, {1, 1, 1}, rgb(0.85f, 0.35f, 0.3f));
+        f.sphere3d({-0.8f, 0, 0}, 0.6f, rgb(0.9f, 0.8f, 0.2f));
+        f.cylinder3d({0.8f, 0, 0}, 0.5f, 1.2f, rgb(0.4f, 0.7f, 0.9f));
+        f.cone3d({2.4f, 0, 0}, 0.6f, 1.2f, rgb(0.8f, 0.4f, 0.8f));
         f.line3d({0, -1, 0}, {0, 2, 0}, rgb(1, 1, 0.3f));
 
         f.camera({0, 0});   // back to 2D for the HUD rect below
