@@ -3343,8 +3343,12 @@ Mesh load_mesh(const std::string& path) {
             vec3 n; ls >> n.x >> n.y >> n.z;
             normals.push_back(normalize_or(n, vec3{0.0f, 1.0f, 0.0f}));
         } else if (tag == "vt") {
+            // OBJ's v is bottom-up (0 = bottom of the image); every texture
+            // sample elsewhere in this engine treats v=0 as the top row (the
+            // first row stb_image decodes), so flip here once at load time
+            // rather than making every caller remember to do it.
             float u = 0.0f, v = 0.0f; ls >> u >> v;
-            uvs.emplace_back(u, v);
+            uvs.emplace_back(u, 1.0f - v);
         } else if (tag == "f") {
             std::vector<ObjFaceIndex> face;
             std::string tok;
