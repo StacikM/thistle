@@ -36,6 +36,10 @@ cmake --build build --target thistle
 
 Requires a consumer project (game) that adds this as a subdirectory and links against the `thistle` target — see [docs/building.md](docs/building.md) if you're not going through the CLI. `-DTHISTLE_BUILD_SMOKETEST=ON` builds a minimal example executable (`examples/smoketest.cpp`) that opens a window and exercises 2D + minor-3D drawing and HTTP.
 
+## Thistle Editor
+
+A small GUI tool for placing minor-3D props (`.obj` meshes) and saving/loading the layout — see [tools/thistle-editor](tools/thistle-editor/README.md). Not a level compiler; it's a placement tool on top of `Node`'s save/load, nothing more.
+
 ## Contributing
 
 See [AGENTS.md](AGENTS.md) — repo layout, conventions, and the one rule that matters most here: don't claim something works unless you actually ran it.

@@ -941,6 +941,19 @@ public:
     Node* child(std::size_t i) const { return children_[i].get(); }
     Node* parent() const { return parent_; }
 
+    // Removes and destroys one direct child, found by pointer identity.
+    // Returns false if `child` isn't actually a direct child of this node
+    // (nothing removed). `child` itself is destroyed and must not be used
+    // afterward; pointers to *other* children stay valid, since each Node is
+    // its own heap allocation — erasing one from `children_` only moves
+    // `unique_ptr` handles around, not the Node objects they point to.
+    bool remove_child(Node* child) {
+        for (auto it = children_.begin(); it != children_.end(); ++it) {
+            if (it->get() == child) { children_.erase(it); return true; }
+        }
+        return false;
+    }
+
     // Actions queue and run in order (chainable): a.move_to(...).scale_to(...).
     Node& move_to(vec2 to, float dur, Ease e = Ease::OutCubic) { return push({Action::Kind::MoveTo, to, {}, 0, 0, dur, 0, e, {}, false}); }
     Node& move_by(vec2 delta, float dur, Ease e = Ease::OutCubic) { return push({Action::Kind::MoveBy, delta, {}, 0, 0, dur, 0, e, {}, false}); }
