@@ -912,6 +912,25 @@ public:
     // load_scene(); save_scene() has no other way to know where it came from.
     std::string sprite_path;
 
+    // Optional mesh placed independently of this node's own 2D pos/rotation/
+    // scale above (those drive `sprite` through draw()'s 2D affine
+    // transform — a 2D transform has no meaningful way to drive a 3D
+    // placement, so the mesh gets its own vec3 fields instead of trying to
+    // reuse the 2D ones). draw()/draw_rec() never touches these; call
+    // draw_meshes() yourself, after f.camera3d(...), the same manual
+    // sequencing any other minor-3D drawing needs.
+    Mesh mesh{};
+    vec3 mesh_pos{0, 0, 0};
+    vec3 mesh_rotation{0, 0, 0}; // Euler radians, same order as Frame::mesh3d
+    vec3 mesh_scale{1, 1, 1};
+    rgba mesh_tint = white;
+    Texture mesh_texture{};      // invalid = flat mesh_tint, no texture
+    // Paths mesh/mesh_texture were loaded from, if any — save_scene()'s only
+    // reason to exist, same as sprite_path above. Set these yourself if you
+    // assign mesh/mesh_texture directly instead of through load_scene().
+    std::string mesh_path;
+    std::string mesh_texture_path;
+
     Node* add_child(std::unique_ptr<Node> c) {
         c->parent_ = this;
         children_.push_back(std::move(c));
@@ -937,6 +956,12 @@ public:
     void draw(Frame& f);         // draws this subtree with composed transforms
     vec2 world_pos() const;      // this node's origin in world space
 
+    // Draws every mesh in this subtree via Frame::mesh3d(). Separate from
+    // draw() on purpose: draw() is purely 2D (orthographic camera, sprites),
+    // so drawing a mesh has to happen in its own pass, after f.camera3d(...)
+    // and before switching back with f.camera({0, 0}).
+    void draw_meshes(Frame& f) const;
+
 private:
     Node* parent_ = nullptr;
     std::vector<std::unique_ptr<Node>> children_;
@@ -945,16 +970,17 @@ private:
     void draw_rec(Frame& f, float inherited_alpha);
 };
 
-// Snapshots (or restores) a Node subtree's pose/sprite/hierarchy as JSON — a
-// save-game or checkpoint, not a level-authoring format; nobody is meant to
-// hand-edit the file. Captures whatever pos/rotation/alpha/etc. actually are
-// at the moment you call it, live gameplay values included, not just however
-// the tree was originally built. Queued actions (move_to, call, ...) are NOT
-// saved — only the static pose survives a round trip, same as a snapshot of
-// a struct wouldn't include "and it's 60% of the way through animating."
-// load_scene() calls load_texture() for every sprite_path it finds (once per
-// unique path, even if many nodes share one) and returns the new root, or
-// nullptr if the file couldn't be read/parsed.
+// Snapshots (or restores) a Node subtree's pose/sprite/mesh/hierarchy as
+// JSON — a save-game or checkpoint, not a level-authoring format; nobody is
+// meant to hand-edit the file. Captures whatever pos/rotation/alpha/mesh_pos/
+// etc. actually are at the moment you call it, live gameplay values
+// included, not just however the tree was originally built. Queued actions
+// (move_to, call, ...) are NOT saved — only the static pose survives a round
+// trip, same as a snapshot of a struct wouldn't include "and it's 60% of the
+// way through animating." load_scene() calls load_texture()/load_mesh() for
+// every sprite_path/mesh_path/mesh_texture_path it finds (once per unique
+// path, even if many nodes share one) and returns the new root, or nullptr
+// if the file couldn't be read/parsed.
 bool save_scene(const Node& root, const std::string& path);
 std::unique_ptr<Node> load_scene(const std::string& path);
 

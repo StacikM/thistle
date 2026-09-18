@@ -1415,6 +1415,15 @@ void Node::draw_rec(Frame& f, float inherited_alpha) {
     f.pop_transform();
 }
 
+void Node::draw_meshes(Frame& f) const {
+    if (!visible) return;
+    if (mesh.valid()) {
+        if (mesh_texture.valid()) f.mesh3d(mesh, mesh_pos, mesh_rotation, mesh_scale, mesh_texture, mesh_tint);
+        else f.mesh3d(mesh, mesh_pos, mesh_rotation, mesh_scale, mesh_tint);
+    }
+    for (const auto& c : children_) c->draw_meshes(f);
+}
+
 vec2 Node::world_pos() const {
     vec2 p = pos; // this node's origin in its parent's space
     for (const Node* n = parent_; n; n = n->parent_) {
@@ -1442,15 +1451,24 @@ nlohmann::json node_to_json(const Node& n) {
     j["sprite_size"] = n.sprite_size;
     j["sprite_tint"] = n.sprite_tint;
     j["sprite_src"] = n.sprite_src;
+    j["mesh_path"] = n.mesh_path;
+    j["mesh_pos"] = n.mesh_pos;
+    j["mesh_rotation"] = n.mesh_rotation;
+    j["mesh_scale"] = n.mesh_scale;
+    j["mesh_tint"] = n.mesh_tint;
+    j["mesh_texture_path"] = n.mesh_texture_path;
     auto children = nlohmann::json::array();
     for (std::size_t i = 0; i < n.child_count(); ++i) children.push_back(node_to_json(*n.child(i)));
     j["children"] = std::move(children);
     return j;
 }
 
-// tex_cache avoids reloading (and re-uploading to the GPU) the same PNG once
-// per node when many nodes share a sprite_path.
-std::unique_ptr<Node> node_from_json(const nlohmann::json& j, std::unordered_map<std::string, Texture>& tex_cache) {
+// tex_cache/mesh_cache avoid reloading (and re-uploading to the GPU) the same
+// file once per node when many nodes share a sprite_path/mesh_path/
+// mesh_texture_path — tex_cache is shared between sprite and mesh textures
+// since both just key off the same path -> Texture mapping.
+std::unique_ptr<Node> node_from_json(const nlohmann::json& j, std::unordered_map<std::string, Texture>& tex_cache,
+                                      std::unordered_map<std::string, Mesh>& mesh_cache) {
     auto n = std::make_unique<Node>();
     if (j.contains("pos")) j.at("pos").get_to(n->pos);
     if (j.contains("scale")) j.at("scale").get_to(n->scale);
@@ -1461,14 +1479,30 @@ std::unique_ptr<Node> node_from_json(const nlohmann::json& j, std::unordered_map
     if (j.contains("sprite_size")) j.at("sprite_size").get_to(n->sprite_size);
     if (j.contains("sprite_tint")) j.at("sprite_tint").get_to(n->sprite_tint);
     if (j.contains("sprite_src")) j.at("sprite_src").get_to(n->sprite_src);
+    n->mesh_path = j.value("mesh_path", std::string());
+    if (j.contains("mesh_pos")) j.at("mesh_pos").get_to(n->mesh_pos);
+    if (j.contains("mesh_rotation")) j.at("mesh_rotation").get_to(n->mesh_rotation);
+    if (j.contains("mesh_scale")) j.at("mesh_scale").get_to(n->mesh_scale);
+    if (j.contains("mesh_tint")) j.at("mesh_tint").get_to(n->mesh_tint);
+    n->mesh_texture_path = j.value("mesh_texture_path", std::string());
 
     if (!n->sprite_path.empty()) {
         auto it = tex_cache.find(n->sprite_path);
         if (it == tex_cache.end()) it = tex_cache.emplace(n->sprite_path, load_texture(n->sprite_path)).first;
         n->sprite = it->second;
     }
+    if (!n->mesh_path.empty()) {
+        auto it = mesh_cache.find(n->mesh_path);
+        if (it == mesh_cache.end()) it = mesh_cache.emplace(n->mesh_path, load_mesh(n->mesh_path)).first;
+        n->mesh = it->second;
+    }
+    if (!n->mesh_texture_path.empty()) {
+        auto it = tex_cache.find(n->mesh_texture_path);
+        if (it == tex_cache.end()) it = tex_cache.emplace(n->mesh_texture_path, load_texture(n->mesh_texture_path)).first;
+        n->mesh_texture = it->second;
+    }
     if (j.contains("children")) {
-        for (const auto& cj : j.at("children")) n->add_child(node_from_json(cj, tex_cache));
+        for (const auto& cj : j.at("children")) n->add_child(node_from_json(cj, tex_cache, mesh_cache));
     }
     return n;
 }
@@ -1487,7 +1521,8 @@ std::unique_ptr<Node> load_scene(const std::string& path) {
     nlohmann::json j;
     try { j = nlohmann::json::parse(in); } catch (...) { log_warn("load_scene: invalid JSON " + path); return nullptr; }
     std::unordered_map<std::string, Texture> tex_cache;
-    return node_from_json(j, tex_cache);
+    std::unordered_map<std::string, Mesh> mesh_cache;
+    return node_from_json(j, tex_cache, mesh_cache);
 }
 
 // --- tilemap -----------------------------------------------------------

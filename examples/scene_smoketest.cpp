@@ -27,6 +27,10 @@ int main() {
     root.visible = false;
     root.sprite_tint = rgb(0.2f, 0.4f, 0.6f);
     root.sprite_src = Rect{{1, 2}, {3, 4}};
+    root.mesh_pos = {1, 2, 3};
+    root.mesh_rotation = {0.1f, 0.2f, 0.3f};
+    root.mesh_scale = {2, 2, 2};
+    root.mesh_tint = rgb(0.9f, 0.1f, 0.5f);
     Node* child = root.add_child();
     child->pos = {5, 6};
     child->scale = {2, 2};
@@ -51,6 +55,10 @@ int main() {
     check(loaded->visible == false, "root visible round-tripped");
     check(near_eq(loaded->sprite_tint.g, 0.4f), "root sprite_tint round-tripped");
     check(near_eq(loaded->sprite_src.size.x, 3) && near_eq(loaded->sprite_src.size.y, 4), "root sprite_src round-tripped");
+    check(near_eq(loaded->mesh_pos.x, 1) && near_eq(loaded->mesh_pos.y, 2) && near_eq(loaded->mesh_pos.z, 3), "root mesh_pos round-tripped");
+    check(near_eq(loaded->mesh_rotation.y, 0.2f), "root mesh_rotation round-tripped");
+    check(near_eq(loaded->mesh_scale.x, 2), "root mesh_scale round-tripped");
+    check(near_eq(loaded->mesh_tint.g, 0.1f), "root mesh_tint round-tripped");
     check(loaded->child_count() == 1, "root has one child");
     if (loaded->child_count() == 1) {
         Node* c = loaded->child(0);

@@ -97,6 +97,26 @@ This is a checkpoint/save-game mechanism, not a level-authoring format — nobod
 
 Queued actions (`move_to`, `delay`, `call`, ...) are **not** saved — only the static pose. A `call()` action holds a `std::function`, which fundamentally can't be written to JSON, and "this node is 60% through a move_to" isn't something a level snapshot needs anyway. If you save mid-animation, the loaded node just has wherever that animation had gotten to as its resting pose — the motion itself doesn't resume.
 
+### Placing minor-3D props on a `Node`
+
+```cpp
+Node* prop = root.add_child();
+prop->mesh_path = "assets/chest.obj";           // load_scene() calls load_mesh() for you
+prop->mesh_texture_path = "assets/atlas.png";   // optional — omit for a flat mesh_tint
+prop->mesh_pos = {2, 0, -3};
+prop->mesh_rotation = {0, 1.2f, 0};             // Euler radians, same order as Frame::mesh3d
+prop->mesh_scale = {1, 1, 1};
+
+// every frame, in your own 3D pass:
+f.camera3d(cam);
+root.draw_meshes(f);   // walks the subtree, calling f.mesh3d() for every node with a mesh
+f.camera({0, 0});
+```
+
+This is deliberately a second, separate draw pass from `draw()` — `draw()` composes each node's `pos`/`rotation`/`scale` as a 2D affine transform for `sprite`, and there's no sane way to reuse that same 2D transform to place a 3D mesh (a 2D rotation isn't a 3D rotation, a 2D position doesn't have a Z). So `mesh_pos`/`mesh_rotation`/`mesh_scale` are their own independent `vec3` fields, untouched by the node's 2D `pos`/`rotation`/`scale`, and `draw_meshes()` is a call you make yourself, after `f.camera3d(...)`, exactly like any other minor-3D drawing. A node can carry both a `sprite` and a `mesh` if you genuinely want that (they're drawn in separate passes either way), but the common case is one or the other.
+
+Same `save_scene()`/`load_scene()` round trip as sprites: `mesh`/`mesh_texture` are runtime ids that don't survive a restart, so `mesh_path`/`mesh_texture_path` are what actually get saved, and `load_scene()` resolves them back through `load_mesh()`/`load_texture()` for you (once per unique path). This is the actual prerequisite for anything like a level-placement tool — a way to describe "these props, at these positions" that survives a save/load round trip — not a level-authoring format on its own; nothing here helps you *build* a layout, only persist one.
+
 ## `App::scene` — named states, if a giant lambda stops being enough
 
 ```cpp
