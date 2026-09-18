@@ -1,8 +1,9 @@
 # Thistle Editor
 
-A minimal prop-placement tool for Thistle's minor-3D drawing mode: browse `.obj`
-files, click one to drop it into the scene, nudge it around with the keyboard,
-save/load the layout as a `Node` tree.
+A minimal prop-placement tool for Thistle's minor-3D drawing mode: spawn a
+built-in primitive (cube/sphere/cylinder/cone/plane) or browse `.obj` files,
+nudge props around with the keyboard, group them into real parent/child
+hierarchies, save/load the layout as a `Node` tree.
 
 **This is not a level compiler.** There's no BSP, no lighting bake, none of what
 actually makes something like Hammer valuable for a real FPS level. It's the
@@ -25,9 +26,17 @@ own engine two directories up instead of a copy.
 
 ## Running
 
-The editor scans `./assets` (relative to wherever you run it from) for `.obj`
-files, recursively. For each one it resolves a texture by convention, since
-`load_mesh()` doesn't read `.mtl`:
+Just open the built app/executable — it finds its own `assets/`/`editor_assets/`
+folders relative to itself, not relative to whatever directory it happened to
+be launched from (double-clicking a `.app` in Finder starts it with an
+unrelated working directory, so this matters).
+
+**Primitives** (cube/sphere/cylinder/cone/plane) are always available, no
+assets required — click one in the sidebar to spawn it.
+
+**Models**: the editor also scans `./assets` (relative to the built
+executable) for `.obj` files, recursively. For each one it resolves a texture
+by convention, since `load_mesh()` doesn't read `.mtl`:
 
 1. A same-basename `.png` next to the `.obj` (`chest.obj` → `chest.png`), else
 2. a shared `atlas.png` or `colormap.png` in that same folder (the common case
@@ -46,20 +55,32 @@ copied next to the executable at build time) is **Kenney Future** by Kenney
 on purpose — the tool's own resources and your project's props should never
 collide over a shared folder name.
 
+## Hierarchy
+
+Select a prop, then **Shift+click** a palette entry to spawn the new prop as
+a *child* of the selected one instead of at the scene root. Moving, rotating,
+or scaling a parent moves everything nested under it too — real grouping, not
+just a visual nesting in a list. See `Node::draw_meshes()`'s doc comment in
+`include/thistle.hpp` for exactly how the transform composes (short version:
+per-axis rotation addition, not a true rotation-matrix multiply — exact for
+the common case of everything sharing one rotation axis, an approximation
+once nested nodes rotate around different axes at once).
+
 ## Keybindings
 
 | Key | Action |
 |---|---|
-| Click a palette entry | Spawn that prop into the scene, select it |
+| Click a palette entry | Spawn into the scene, select it |
+| Shift+click a palette entry | Spawn as a child of the current selection |
 | Left / Right | Orbit camera |
 | Up / Down | Zoom camera |
-| W / A / S / D | Move selected prop on the ground plane |
+| W / A / S / D | Move selected prop (relative to its own parent) |
 | R / F | Move selected prop up / down |
 | Q / E | Rotate selected prop (Y axis) |
 | Z / X | Scale selected prop down / up |
-| Tab | Select next prop |
+| Tab | Select next prop (whole tree, not just root-level) |
 | Escape | Deselect |
-| Backspace | Delete selected prop |
+| Backspace | Delete selected prop (and everything nested under it) |
 | Ctrl+S | Save the scene |
 | Ctrl+O | Load the scene |
 

@@ -1361,6 +1361,15 @@ void Frame::pop_transform() { sgl_pop_matrix(); }
 
 // --- scene graph -------------------------------------------------------
 
+namespace {
+// Defined later, next to the other minor-3D helpers (shade_face, cube_corners,
+// etc.) — forward-declared here since Node::draw_meshes_rec() needs it before
+// that point in the file. Despite the name (it exists for rotating a face
+// normal by the mesh3d() Euler-angle convention), it's just a generic vec3
+// rotation and Node::draw_meshes_rec() reuses it for position offsets too.
+vec3 rotate_normal(vec3 n, vec3 rot);
+} // namespace
+
 void Node::update(float dt) {
     while (!actions_.empty()) {
         Action& a = actions_.front();
@@ -1416,12 +1425,24 @@ void Node::draw_rec(Frame& f, float inherited_alpha) {
 }
 
 void Node::draw_meshes(Frame& f) const {
+    draw_meshes_rec(f, vec3{0.0f, 0.0f, 0.0f}, vec3{0.0f, 0.0f, 0.0f}, vec3{1.0f, 1.0f, 1.0f});
+}
+
+void Node::draw_meshes_rec(Frame& f, vec3 parent_pos, vec3 parent_rot, vec3 parent_scale) const {
     if (!visible) return;
+    // rotate_normal() is a generic Euler-angle vector rotation despite its
+    // name (defined further down next to the other minor-3D helpers) —
+    // reused here to rotate a position offset, not just a normal.
+    const vec3 scaled_local{mesh_pos.x * parent_scale.x, mesh_pos.y * parent_scale.y, mesh_pos.z * parent_scale.z};
+    const vec3 world_pos = parent_pos + rotate_normal(scaled_local, parent_rot);
+    const vec3 world_rot = parent_rot + mesh_rotation;
+    const vec3 world_scale{parent_scale.x * mesh_scale.x, parent_scale.y * mesh_scale.y, parent_scale.z * mesh_scale.z};
+
     if (mesh.valid()) {
-        if (mesh_texture.valid()) f.mesh3d(mesh, mesh_pos, mesh_rotation, mesh_scale, mesh_texture, mesh_tint);
-        else f.mesh3d(mesh, mesh_pos, mesh_rotation, mesh_scale, mesh_tint);
+        if (mesh_texture.valid()) f.mesh3d(mesh, world_pos, world_rot, world_scale, mesh_texture, mesh_tint);
+        else f.mesh3d(mesh, world_pos, world_rot, world_scale, mesh_tint);
     }
-    for (const auto& c : children_) c->draw_meshes(f);
+    for (const auto& c : children_) c->draw_meshes_rec(f, world_pos, world_rot, world_scale);
 }
 
 vec2 Node::world_pos() const {
@@ -1457,6 +1478,7 @@ nlohmann::json node_to_json(const Node& n) {
     j["mesh_scale"] = n.mesh_scale;
     j["mesh_tint"] = n.mesh_tint;
     j["mesh_texture_path"] = n.mesh_texture_path;
+    j["mesh_prim"] = static_cast<int>(n.mesh_prim);
     auto children = nlohmann::json::array();
     for (std::size_t i = 0; i < n.child_count(); ++i) children.push_back(node_to_json(*n.child(i)));
     j["children"] = std::move(children);
@@ -1485,13 +1507,27 @@ std::unique_ptr<Node> node_from_json(const nlohmann::json& j, std::unordered_map
     if (j.contains("mesh_scale")) j.at("mesh_scale").get_to(n->mesh_scale);
     if (j.contains("mesh_tint")) j.at("mesh_tint").get_to(n->mesh_tint);
     n->mesh_texture_path = j.value("mesh_texture_path", std::string());
+    n->mesh_prim = static_cast<Prim>(j.value("mesh_prim", 0));
 
     if (!n->sprite_path.empty()) {
         auto it = tex_cache.find(n->sprite_path);
         if (it == tex_cache.end()) it = tex_cache.emplace(n->sprite_path, load_texture(n->sprite_path)).first;
         n->sprite = it->second;
     }
-    if (!n->mesh_path.empty()) {
+    if (n->mesh_prim != Prim::None) {
+        // Not cached (unlike mesh_path/mesh_texture_path below) — these are
+        // generated, not loaded from a file, so there's no path to key a
+        // cache on; each primitive node gets its own fresh Mesh, same as
+        // calling make_cube_mesh() directly would.
+        switch (n->mesh_prim) {
+            case Prim::Cube:     n->mesh = make_cube_mesh(); break;
+            case Prim::Sphere:   n->mesh = make_sphere_mesh(); break;
+            case Prim::Cylinder: n->mesh = make_cylinder_mesh(); break;
+            case Prim::Cone:     n->mesh = make_cone_mesh(); break;
+            case Prim::Plane:    n->mesh = make_plane_mesh(); break;
+            case Prim::None:     break;
+        }
+    } else if (!n->mesh_path.empty()) {
         auto it = mesh_cache.find(n->mesh_path);
         if (it == mesh_cache.end()) it = mesh_cache.emplace(n->mesh_path, load_mesh(n->mesh_path)).first;
         n->mesh = it->second;
@@ -3433,6 +3469,69 @@ void unload_mesh(Mesh& mesh) {
         g_state->meshes[mesh.id] = MeshRecord{};
     }
     mesh = Mesh{};
+}
+
+namespace {
+Mesh register_mesh(MeshRecord rec) {
+    const int id = static_cast<int>(g_state->meshes.size());
+    g_state->meshes.push_back(std::move(rec));
+    return Mesh{id};
+}
+} // namespace
+
+Mesh make_cube_mesh() {
+    vec3 c[8];
+    cube_corners(vec3{0.0f, 0.0f, 0.0f}, vec3{1.0f, 1.0f, 1.0f}, c);
+    MeshRecord rec;
+    for (const CubeFace& fc : kCubeFaces) {
+        const vec3 n{fc.nx, fc.ny, fc.nz};
+        const vec3& v0 = c[fc.a]; const vec3& v1 = c[fc.b]; const vec3& v2 = c[fc.c]; const vec3& v3 = c[fc.d];
+        rec.tris.push_back({v0, n, 0.0f, 0.0f});
+        rec.tris.push_back({v1, n, 1.0f, 0.0f});
+        rec.tris.push_back({v2, n, 1.0f, 1.0f});
+        rec.tris.push_back({v0, n, 0.0f, 0.0f});
+        rec.tris.push_back({v2, n, 1.0f, 1.0f});
+        rec.tris.push_back({v3, n, 0.0f, 1.0f});
+    }
+    return register_mesh(std::move(rec));
+}
+
+Mesh make_sphere_mesh() {
+    MeshRecord rec;
+    gen_sphere(vec3{0.0f, 0.0f, 0.0f}, 0.5f, 12, 16, [&](vec3 p, vec3 n, float u, float v) {
+        rec.tris.push_back({p, n, u, v});
+    });
+    return register_mesh(std::move(rec));
+}
+
+Mesh make_cylinder_mesh() {
+    MeshRecord rec;
+    gen_cylinder(vec3{0.0f, 0.0f, 0.0f}, 0.5f, 1.0f, 16, [&](vec3 p, vec3 n, float u, float v) {
+        rec.tris.push_back({p, n, u, v});
+    });
+    return register_mesh(std::move(rec));
+}
+
+Mesh make_cone_mesh() {
+    MeshRecord rec;
+    gen_cone(vec3{0.0f, 0.0f, 0.0f}, 0.5f, 1.0f, 16, [&](vec3 p, vec3 n, float u, float v) {
+        rec.tris.push_back({p, n, u, v});
+    });
+    return register_mesh(std::move(rec));
+}
+
+Mesh make_plane_mesh() {
+    const float hw = 0.5f, hd = 0.5f;
+    const vec3 n{0.0f, 1.0f, 0.0f};
+    const vec3 v0{-hw, 0.0f, -hd}, v1{hw, 0.0f, -hd}, v2{hw, 0.0f, hd}, v3{-hw, 0.0f, hd};
+    MeshRecord rec;
+    rec.tris.push_back({v0, n, 0.0f, 0.0f});
+    rec.tris.push_back({v1, n, 1.0f, 0.0f});
+    rec.tris.push_back({v2, n, 1.0f, 1.0f});
+    rec.tris.push_back({v0, n, 0.0f, 0.0f});
+    rec.tris.push_back({v2, n, 1.0f, 1.0f});
+    rec.tris.push_back({v3, n, 0.0f, 1.0f});
+    return register_mesh(std::move(rec));
 }
 
 void unload_texture(Texture& tex) {

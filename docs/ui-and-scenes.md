@@ -115,7 +115,20 @@ f.camera({0, 0});
 
 This is deliberately a second, separate draw pass from `draw()` — `draw()` composes each node's `pos`/`rotation`/`scale` as a 2D affine transform for `sprite`, and there's no sane way to reuse that same 2D transform to place a 3D mesh (a 2D rotation isn't a 3D rotation, a 2D position doesn't have a Z). So `mesh_pos`/`mesh_rotation`/`mesh_scale` are their own independent `vec3` fields, untouched by the node's 2D `pos`/`rotation`/`scale`, and `draw_meshes()` is a call you make yourself, after `f.camera3d(...)`, exactly like any other minor-3D drawing. A node can carry both a `sprite` and a `mesh` if you genuinely want that (they're drawn in separate passes either way), but the common case is one or the other.
 
-Same `save_scene()`/`load_scene()` round trip as sprites: `mesh`/`mesh_texture` are runtime ids that don't survive a restart, so `mesh_path`/`mesh_texture_path` are what actually get saved, and `load_scene()` resolves them back through `load_mesh()`/`load_texture()` for you (once per unique path). This is the actual prerequisite for anything like a level-placement tool — a way to describe "these props, at these positions" that survives a save/load round trip — not a level-authoring format on its own; nothing here helps you *build* a layout, only persist one.
+**`mesh_pos`/`mesh_rotation`/`mesh_scale` are relative to the parent's own composed mesh transform, not world space** — real hierarchy, the same way `pos`/`rotation`/`scale` compose down the tree in `draw()`. Move/rotate/scale a parent node and everything nested under it follows, even a parent with no mesh of its own (a pure grouping/anchor node):
+
+```cpp
+Node* group = root.add_child();
+group->mesh_pos = {5, 0, 0};       // the group's own position
+
+Node* wheel = group->add_child();
+wheel->mesh_path = "assets/wheel.obj";
+wheel->mesh_pos = {0.6f, 0, 0};    // 0.6 units from the GROUP's position, not world origin
+```
+
+Rotation composes by simple per-axis addition, not a real rotation-matrix multiply — exact when everything shares one rotation axis (the common case: `mesh_rotation.y` for a turntable spin), an approximation once nested nodes rotate around different axes at once. Fine for grouping a handful of props; not a general character-rig kind of hierarchy.
+
+Same `save_scene()`/`load_scene()` round trip as sprites: `mesh`/`mesh_texture` are runtime ids that don't survive a restart, so `mesh_path`/`mesh_texture_path` are what actually get saved, and `load_scene()` resolves them back through `load_mesh()`/`load_texture()` for you (once per unique path). A `mesh` built from `make_cube_mesh()`/`make_sphere_mesh()`/etc. instead of a file round-trips the same way — set `mesh_prim` (a `Prim` enum) alongside `mesh` instead of `mesh_path`, and `load_scene()` calls the matching `make_*_mesh()` for you. This is the actual prerequisite for anything like a level-placement tool — a way to describe "these props, at these positions, in this hierarchy" that survives a save/load round trip — not a level-authoring format on its own; nothing here helps you *build* a layout, only persist one. (`tools/thistle-editor` is exactly that GUI, if you want one instead of hand-writing the JSON.)
 
 ## `App::scene` — named states, if a giant lambda stops being enough
 

@@ -31,9 +31,12 @@ int main() {
     root.mesh_rotation = {0.1f, 0.2f, 0.3f};
     root.mesh_scale = {2, 2, 2};
     root.mesh_tint = rgb(0.9f, 0.1f, 0.5f);
+    root.mesh_prim = Prim::Cube;
     Node* child = root.add_child();
     child->pos = {5, 6};
     child->scale = {2, 2};
+    child->mesh_pos = {0.4f, 0, 0};
+    child->mesh_prim = Prim::Sphere;
     Node* grandchild = child->add_child();
     grandchild->pos = {-1, -2};
 
@@ -59,11 +62,16 @@ int main() {
     check(near_eq(loaded->mesh_rotation.y, 0.2f), "root mesh_rotation round-tripped");
     check(near_eq(loaded->mesh_scale.x, 2), "root mesh_scale round-tripped");
     check(near_eq(loaded->mesh_tint.g, 0.1f), "root mesh_tint round-tripped");
+    check(loaded->mesh_prim == Prim::Cube, "root mesh_prim round-tripped");
+    check(loaded->mesh.valid(), "root mesh_prim rebuilt a real Mesh on load");
     check(loaded->child_count() == 1, "root has one child");
     if (loaded->child_count() == 1) {
         Node* c = loaded->child(0);
         check(near_eq(c->pos.x, 5) && near_eq(c->pos.y, 6), "child pos round-tripped");
         check(near_eq(c->scale.x, 2), "child scale round-tripped");
+        check(near_eq(c->mesh_pos.x, 0.4f), "child mesh_pos (parent-relative) round-tripped");
+        check(c->mesh_prim == Prim::Sphere, "child mesh_prim round-tripped");
+        check(c->mesh.valid(), "child mesh_prim rebuilt a real Mesh on load");
         check(c->child_count() == 1, "child has one grandchild");
         if (c->child_count() == 1) {
             check(near_eq(c->child(0)->pos.x, -1), "grandchild pos round-tripped");

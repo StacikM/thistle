@@ -173,6 +173,29 @@ Mesh load_mesh(const std::string& path);
 // Frees a mesh's triangle data and invalidates the handle.
 void unload_mesh(Mesh& mesh);
 
+// Built-in primitive shapes as real Mesh handles — unit-sized (a 1x1x1 cube,
+// radius-0.5 sphere, radius-0.5/height-1 cylinder and cone, a 1x1 plane),
+// scale them via mesh3d()'s own `scale` (or Node::mesh_scale) rather than
+// passing a size in here. The point of these over calling cube()/sphere3d()/
+// etc. directly: those have no rotation parameter at all (there's nowhere to
+// put one — they're single immediate-mode draw calls), while a Mesh drawn
+// through mesh3d() gets full rotation support, correctly-rotated shading
+// included. Each call generates a fresh Mesh — same as calling load_mesh()
+// twice on one file would — so cache the handle yourself if you're spawning
+// many of the same shape.
+Mesh make_cube_mesh();
+Mesh make_sphere_mesh();
+Mesh make_cylinder_mesh();
+Mesh make_cone_mesh();
+Mesh make_plane_mesh();
+
+// Which built-in primitive (if any) a Node's `mesh` was built from — set
+// Node::mesh_prim alongside `mesh` if you assigned it from make_cube_mesh()
+// etc. directly, the same reason mesh_path exists for a load_mesh()'d file:
+// load_scene() needs to know how to rebuild `mesh` after a restart, since a
+// Mesh handle is just a runtime id.
+enum class Prim { None, Cube, Sphere, Cylinder, Cone, Plane };
+
 // Optional per-sprite draw settings. Use designated initializers:
 //   f.sprite(tex, pos, { .size = {64, 64}, .tint = coral, .rotation = 0.5f });
 struct SpriteOpts {
@@ -918,16 +941,22 @@ public:
     // placement, so the mesh gets its own vec3 fields instead of trying to
     // reuse the 2D ones). draw()/draw_rec() never touches these; call
     // draw_meshes() yourself, after f.camera3d(...), the same manual
-    // sequencing any other minor-3D drawing needs.
+    // sequencing any other minor-3D drawing needs. mesh_pos/rotation/scale
+    // are relative to the PARENT's own composed mesh transform, not world
+    // space — see draw_meshes()'s doc comment for exactly what that means.
     Mesh mesh{};
     vec3 mesh_pos{0, 0, 0};
     vec3 mesh_rotation{0, 0, 0}; // Euler radians, same order as Frame::mesh3d
     vec3 mesh_scale{1, 1, 1};
     rgba mesh_tint = white;
     Texture mesh_texture{};      // invalid = flat mesh_tint, no texture
+    // Set alongside `mesh` if it came from make_cube_mesh() etc. instead of
+    // load_mesh() — load_scene() needs this to know how to rebuild `mesh`.
+    Prim mesh_prim = Prim::None;
     // Paths mesh/mesh_texture were loaded from, if any — save_scene()'s only
     // reason to exist, same as sprite_path above. Set these yourself if you
     // assign mesh/mesh_texture directly instead of through load_scene().
+    // Unused (leave empty) when mesh_prim is set instead.
     std::string mesh_path;
     std::string mesh_texture_path;
 
@@ -973,6 +1002,18 @@ public:
     // draw() on purpose: draw() is purely 2D (orthographic camera, sprites),
     // so drawing a mesh has to happen in its own pass, after f.camera3d(...)
     // and before switching back with f.camera({0, 0}).
+    //
+    // mesh_pos/mesh_rotation/mesh_scale are relative to the PARENT's already-
+    // composed mesh transform, not absolute world space — a child inherits
+    // its parent's position, rotation, and scale the same way sprite's 2D
+    // pos/rotation/scale inherit down the tree in draw()/draw_rec(). A node
+    // with no mesh of its own still composes its transform down to its
+    // children, so it works as a pure grouping/anchor node. Rotation composes
+    // by simple addition per axis, not a real rotation-matrix multiply — this
+    // is only exactly right for rotation around one shared axis (the common
+    // case: everything here uses Y-axis "turntable" rotation), and becomes
+    // an approximation once nested nodes rotate around different axes. Good
+    // enough for grouping a handful of props together, not a general rig.
     void draw_meshes(Frame& f) const;
 
 private:
@@ -981,6 +1022,7 @@ private:
     std::vector<Action> actions_;
     Node& push(const Action& a) { actions_.push_back(a); return *this; }
     void draw_rec(Frame& f, float inherited_alpha);
+    void draw_meshes_rec(Frame& f, vec3 parent_pos, vec3 parent_rot, vec3 parent_scale) const;
 };
 
 // Snapshots (or restores) a Node subtree's pose/sprite/mesh/hierarchy as
