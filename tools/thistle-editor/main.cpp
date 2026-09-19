@@ -28,10 +28,12 @@
 // actual value proposition rests on) — see docs/ui-and-scenes.md's "Placing
 // minor-3D props on a Node" section for what save_scene() actually captures.
 // The Trigger primitive is the same story as a Hammer brush on its own: it's
-// geometry (a position + size) and a name, nothing more — Thistle has no 3D
-// collision system at all, so there's no overlap test and nothing fires
-// when something enters it. Your own game code reads mesh_pos/mesh_scale
-// off a mesh_prim == Prim::Trigger node and does its own overlap check,
+// geometry (a position + size) and a name, nothing more. Thistle does have
+// basic 3D overlap tests now (Box3D/Sphere3D, box3d_sphere3d_overlap(), etc.
+// — see docs/drawing.md's "3D collision" section), but nothing calls them
+// automatically — no "on enter" callback, no event. Your own game code
+// builds a Box3D from a mesh_prim == Prim::Trigger node's
+// world_mesh_transform() and calls the overlap test itself, every frame,
 // exactly the way Source (not Hammer) is what actually processes a trigger
 // brush at runtime.
 #include <thistle.hpp>
@@ -208,32 +210,16 @@ vec3 rotate_euler_inverse(vec3 v, vec3 rot) {
     return after_x;
 }
 
-struct WorldTransform { vec3 pos{0, 0, 0}, rot{0, 0, 0}, scale{1, 1, 1}; };
-
-WorldTransform world_mesh_transform(Node* n) {
-    std::vector<Node*> chain;
-    for (Node* cur = n; cur; cur = cur->parent()) chain.push_back(cur);
-    WorldTransform t;
-    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
-        Node* cur = *it;
-        const vec3 scaled_local{cur->mesh_pos.x * t.scale.x, cur->mesh_pos.y * t.scale.y, cur->mesh_pos.z * t.scale.z};
-        t.pos = t.pos + rotate_euler(scaled_local, t.rot);
-        t.rot = t.rot + cur->mesh_rotation;
-        t.scale = {t.scale.x * cur->mesh_scale.x, t.scale.y * cur->mesh_scale.y, t.scale.z * cur->mesh_scale.z};
-    }
-    return t;
-}
-
-// Inverse of the composition world_mesh_transform() performs one level at a
+// Inverse of the composition Node::world_mesh_transform() performs one level at a
 // time: given a WORLD point and a parent's already-known world transform,
 // finds the parent-relative mesh_pos that would produce it. Used for both
 // mouse-dragging (convert a ground-plane hit back into the selected node's
 // own mesh_pos) and reparenting (keep an object's world position stable
 // across a parent change). Verified via rotate_euler_inverse()'s own
 // round-trip test — this is just that plus un-scaling.
-vec3 world_to_local(vec3 world_point, const WorldTransform& parent) {
+vec3 world_to_local(vec3 world_point, const WorldMeshTransform& parent) {
     const vec3 rotated = world_point - parent.pos;
-    const vec3 scaled_local = rotate_euler_inverse(rotated, parent.rot);
+    const vec3 scaled_local = rotate_euler_inverse(rotated, parent.rotation);
     return {
         parent.scale.x != 0.0f ? scaled_local.x / parent.scale.x : scaled_local.x,
         parent.scale.y != 0.0f ? scaled_local.y / parent.scale.y : scaled_local.y,
@@ -444,12 +430,12 @@ int main() {
     // common one — reparenting under a plain, unrotated/unscaled group node
     // works exactly as expected).
     auto reparent = [&](Node* child, Node* new_parent) {
-        const WorldTransform child_world = world_mesh_transform(child);
+        const WorldMeshTransform child_world = child->world_mesh_transform();
         Node* old_parent = child->parent();
         std::unique_ptr<Node> detached = old_parent->detach_child(child);
         if (!detached) return;
         Node* raw = new_parent->add_child(std::move(detached));
-        const WorldTransform new_parent_world = world_mesh_transform(new_parent);
+        const WorldMeshTransform new_parent_world = new_parent->world_mesh_transform();
         raw->mesh_pos = world_to_local(child_world.pos, new_parent_world);
         selected = raw;
     };
@@ -547,7 +533,7 @@ int main() {
                 Node* best = nullptr;
                 float best_dist = 40.0f; // px
                 for (auto& [node, depth] : all) {
-                    const WorldTransform wt = world_mesh_transform(node);
+                    const WorldMeshTransform wt = node->world_mesh_transform();
                     vec2 screen;
                     if (!world_to_screen(basis, wt.pos, win_w, win_h, screen)) continue;
                     const float dx = screen.x - f.mouse().x, dy = screen.y - f.mouse().y;
@@ -557,7 +543,7 @@ int main() {
                 selected = best;
                 dragging_object = false;
                 if (selected) {
-                    const WorldTransform wt = world_mesh_transform(selected);
+                    const WorldMeshTransform wt = selected->world_mesh_transform();
                     drag_plane_y = wt.pos.y;
                     const Ray ray = screen_to_ray(basis, f.mouse().x, f.mouse().y, win_w, win_h);
                     vec3 hit;
@@ -573,7 +559,7 @@ int main() {
                 vec3 hit;
                 if (ray_plane_y(ray, drag_plane_y, hit)) {
                     const vec3 new_world_pos = hit + drag_offset;
-                    const WorldTransform parent_wt = world_mesh_transform(selected->parent());
+                    const WorldMeshTransform parent_wt = selected->parent()->world_mesh_transform();
                     const vec3 local = world_to_local(new_world_pos, parent_wt);
                     selected->mesh_pos.x = local.x;
                     selected->mesh_pos.z = local.z;
@@ -625,14 +611,14 @@ int main() {
         scene->draw_meshes(f);
         for (auto& [node, depth] : all) {
             if (node->mesh_prim != Prim::Trigger) continue;
-            const WorldTransform wt = world_mesh_transform(node);
+            const WorldMeshTransform wt = node->world_mesh_transform();
             const vec3 half{0.5f * wt.scale.x, 0.5f * wt.scale.y, 0.5f * wt.scale.z};
-            draw_wire_box(f, wt.pos, wt.rot, half, node->mesh_tint);
+            draw_wire_box(f, wt.pos, wt.rotation, half, node->mesh_tint);
         }
         if (selected) {
-            const WorldTransform wt = world_mesh_transform(selected);
+            const WorldMeshTransform wt = selected->world_mesh_transform();
             const vec3 half{0.55f * wt.scale.x, 0.55f * wt.scale.y, 0.55f * wt.scale.z};
-            draw_wire_box(f, wt.pos, wt.rot, half, theme::accent);
+            draw_wire_box(f, wt.pos, wt.rotation, half, theme::accent);
         }
         f.camera({0, 0}); // MANDATORY before any 2D drawing below
 

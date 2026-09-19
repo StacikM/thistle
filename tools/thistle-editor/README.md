@@ -133,15 +133,17 @@ node, the common case.
 The **Trigger** primitive is pure data: a named position + size, drawn as a
 cyan wireframe box in the editor (rotation-aware — a rotated trigger visibly
 looks rotated) and **never** drawn as a solid mesh by `Node::draw_meshes()`,
-in the editor or in your own game. Thistle has no 3D collision system
-whatsoever (see docs/drawing.md) — there's no overlap test and nothing fires
-when something enters it. This is exactly what a brush in a level editor
-like Hammer actually is on its own: geometry and a name, with the *engine*
-(Source, in Hammer's case — your own game code, here) responsible for
-actually testing overlap and doing something about it. Load the scene, walk
-the tree for `mesh_prim == Prim::Trigger` nodes, and write your own AABB
-check against `mesh_pos`/`mesh_scale` (both parent-composed the same way as
-any other node — see `Node::draw_meshes()`'s doc comment).
+in the editor or in your own game. This is exactly what a brush in a level
+editor like Hammer actually is on its own: geometry and a name, with the
+*engine* (Source, in Hammer's case — your own game code, here) responsible
+for actually testing overlap and doing something about it — Thistle now has
+basic 3D overlap tests (`Box3D`/`Sphere3D`, `box3d_sphere3d_overlap()`, etc.,
+see docs/drawing.md's "3D collision" section) but nothing calls them
+automatically; there's still no "on enter" callback, no event, nothing that
+fires on its own. Load the scene, walk the tree for `mesh_prim ==
+Prim::Trigger` nodes, build a `Box3D` from `node->world_mesh_transform()`
+(parent-composed the same way as any other node — see `Node::draw_meshes()`'s
+doc comment), and call the overlap test yourself, every frame.
 
 ## Keybindings
 

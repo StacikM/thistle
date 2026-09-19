@@ -216,6 +216,12 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_scene_smoketest examples/scene_smoketest.cpp)
     target_link_libraries(thistle_scene_smoketest PRIVATE thistle)
 
+    # Checks the 3D collision overlap/intersection math against hand-computed
+    # expected results. Even more headless than net_smoketest — pure geometry
+    # functions, no App/window/GPU touched at all.
+    add_executable(thistle_collision_smoketest examples/collision_smoketest.cpp)
+    target_link_libraries(thistle_collision_smoketest PRIVATE thistle)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -236,4 +242,6 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(net_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME scene_smoketest COMMAND thistle_scene_smoketest)
     set_tests_properties(scene_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME collision_smoketest COMMAND thistle_collision_smoketest)
+    set_tests_properties(collision_smoketest PROPERTIES TIMEOUT 30)
 endif()

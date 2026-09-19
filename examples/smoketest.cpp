@@ -38,8 +38,18 @@ int main() {
         cam.target = {0.0f, 0.0f, 0.0f};
         f.camera3d(cam);
         f.plane3d({0, -1, 0}, 10.0f, 10.0f, rgb(0.3f, 0.5f, 0.3f));
-        f.cube({-2.4f, 0, 0}, {1, 1, 1}, rgb(0.85f, 0.35f, 0.3f));
-        f.sphere3d({-0.8f, 0, 0}, 0.6f, rgb(0.9f, 0.8f, 0.2f));
+
+        // 3D collision check: a sphere orbits through a static box — real
+        // box3d_sphere3d_overlap() calls every frame, not just drawn to look
+        // like they might touch. The box actually changes color on overlap,
+        // so a wrong result (or one that never fires, or fires constantly)
+        // is immediately visible instead of silently wrong.
+        const Box3D box{{-2.4f, 0, 0}, {0.5f, 0.5f, 0.5f}};
+        const Sphere3D orbiter{{-2.4f + std::cos(t) * 1.3f, 0, std::sin(t) * 1.3f}, 0.4f};
+        const bool colliding = box3d_sphere3d_overlap(box, orbiter);
+        f.cube(box.center, {1, 1, 1}, colliding ? rgb(0.95f, 0.2f, 0.2f) : rgb(0.85f, 0.35f, 0.3f));
+        f.sphere3d(orbiter.center, orbiter.radius, colliding ? rgb(0.95f, 0.2f, 0.2f) : rgb(0.9f, 0.8f, 0.2f));
+
         f.cylinder3d({0.8f, 0, 0}, 0.5f, 1.2f, rgb(0.4f, 0.7f, 0.9f));
         f.cone3d({2.4f, 0, 0}, 0.6f, 1.2f, rgb(0.8f, 0.4f, 0.8f));
         f.line3d({0, -1, 0}, {0, 2, 0}, rgb(1, 1, 0.3f));

@@ -929,6 +929,19 @@ struct Action {
     bool started = false;
 };
 
+// A Node's mesh_pos/mesh_rotation/mesh_scale composed down through its whole
+// parent chain — the actual world-space placement Node::draw_meshes() ends
+// up drawing at, since those fields are each parent-relative (see
+// Node::draw_meshes()'s doc comment). Get one via Node::world_mesh_transform().
+// The obvious use: build a Box3D/Sphere3D from a Prim::Trigger node's world
+// pos/scale to actually test whether something is inside it — see "3D
+// collision" below.
+struct WorldMeshTransform {
+    vec3 pos{0, 0, 0};
+    vec3 rotation{0, 0, 0}; // Euler radians, same order as Frame::mesh3d
+    vec3 scale{1, 1, 1};
+};
+
 // A node in a transform hierarchy. Origin is the node's center; children inherit
 // position, rotation, scale, and alpha. Optionally draws one sprite.
 class Node {
@@ -1054,6 +1067,13 @@ public:
     // enough for grouping a handful of props together, not a general rig.
     void draw_meshes(Frame& f) const;
 
+    // This node's mesh_pos/mesh_rotation/mesh_scale composed through its
+    // whole parent chain — the same composition draw_meshes() does
+    // internally, exposed so your own game code can get a node's actual
+    // world-space placement (to test against a Prim::Trigger volume, say)
+    // instead of only ever seeing the parent-relative raw fields.
+    WorldMeshTransform world_mesh_transform() const;
+
 private:
     Node* parent_ = nullptr;
     std::vector<std::unique_ptr<Node>> children_;
@@ -1076,6 +1096,48 @@ private:
 // if the file couldn't be read/parsed.
 bool save_scene(const Node& root, const std::string& path);
 std::unique_ptr<Node> load_scene(const std::string& path);
+
+// --- 3D collision (not physics) ------------------------------------------
+// Overlap/intersection tests, and nothing else: no velocities, no forces, no
+// resolution, no broad-phase, no continuous collision, no rigid bodies. This
+// is the "minor 3D" equivalent of what `Physics` below gives you in 2D via a
+// real engine (Box2D) — except there's no 3D physics engine underneath this
+// at all, just the raw geometry math, because a real one is a genuinely
+// different, much bigger project (see docs/drawing.md's "3D physics" note).
+// What this actually exists for: making a Prim::Trigger volume (or any other
+// node) usable — build a Box3D/Sphere3D from Node::world_mesh_transform(),
+// call one of these every frame, and you have a working trigger check.
+//
+// Box3D is always axis-aligned — it ignores any rotation a
+// WorldMeshTransform might carry, even though the editor draws a Trigger's
+// wireframe rotated (see tools/thistle-editor). A rotated Box3D-vs-Box3D
+// test (oriented bounding boxes, via the separating axis theorem) is real
+// extra math for a case most trigger volumes don't actually need — placing
+// an axis-aligned volume is the common case in practice, including in
+// Source's own trigger brushes. If you rotate a trigger, these tests won't
+// account for that; keep triggers unrotated if you rely on them.
+struct Box3D {
+    vec3 center{0, 0, 0};
+    vec3 half_extent{0.5f, 0.5f, 0.5f};
+};
+
+struct Sphere3D {
+    vec3 center{0, 0, 0};
+    float radius = 0.5f;
+};
+
+bool box3d_overlap(const Box3D& a, const Box3D& b);
+bool box3d_contains_point(const Box3D& box, vec3 point);
+bool sphere3d_overlap(const Sphere3D& a, const Sphere3D& b);
+bool box3d_sphere3d_overlap(const Box3D& box, const Sphere3D& sphere);
+
+// Ray-box intersection — the actual math behind real 3D picking (as opposed
+// to the screen-space-nearest-point picking tools/thistle-editor uses, which
+// doesn't need this since it never tests against real bounds). `out_t` is
+// how far along the ray (in `ray_dir` units, so pass a normalized direction
+// if you want `out_t` in world units) the hit is, only meaningful when this
+// returns true.
+bool ray_box3d(vec3 ray_origin, vec3 ray_dir, const Box3D& box, float& out_t);
 
 // --- physics (Box2D) ----------------------------------------------------
 

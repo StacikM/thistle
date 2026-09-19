@@ -150,6 +150,20 @@ What you do **not** get, and what it would actually take to get it:
 
 - **Lighting.** There's no shader stage here at all — sokol_gl's pipeline is fixed-function. A real lighting model (even flat Phong, forget PBR) means writing actual vertex/fragment shaders and a real `sg_pipeline`-based renderer that bypasses sokol_gl entirely for anything lit. That's a from-scratch mini-renderer, one set of shaders per backend (Metal MSL / D3D11 HLSL / GL GLSL, or one GLSL source cross-compiled with sokol-shdc). Weeks, not an afternoon.
 - **Materials, skeletal animation, normal maps, tiling UVs.** `load_mesh()` reads geometry and nothing else — no `.mtl`, no rigging, no per-face materials. Loading a `.gltf`/`.glb` instead would get you PBR materials and skinning in the *file format*, but none of it would render any differently here — there's still no shader stage to use a material or a skeleton with, so it wasn't worth the much bigger parser for zero rendering payoff.
-- **3D physics or 3D collision.** `Physics` below is Box2D. Box2D is 2D. There is zero relationship between the minor-3D drawing calls (primitives or meshes) and any physics simulation — nothing here even knows a mesh's bounding box, let alone collides against its triangles.
+- **3D physics.** `Physics` below is Box2D. Box2D is 2D. There is zero relationship between the minor-3D drawing calls (primitives or meshes) and any physics simulation — no forces, no velocities, no rigid bodies, nothing resolves a collision by pushing anything anywhere. What you *do* get is basic 3D collision **detection** — see below — which is a much smaller thing than physics and doesn't change this.
 
-Use this for: a spinning icon on a menu, a background scene behind 2D gameplay (this is what Fling does — see its `draw_background3d`), a debug visualization, a title-screen flourish. Do not use this as the foundation for an actual 3D game and then be surprised when "add lighting" turns into a multi-week project. You were warned in this file.
+## 3D collision — overlap tests, not physics
+
+```cpp
+Box3D box{node.world_mesh_transform().pos, {0.5f, 0.5f, 0.5f}};
+Sphere3D player_bounds{player_pos, 0.4f};
+if (box3d_sphere3d_overlap(box, player_bounds)) { /* ... */ }
+```
+
+`Box3D` (center + half-extent) and `Sphere3D` (center + radius), plus `box3d_overlap()`, `box3d_contains_point()`, `sphere3d_overlap()`, `box3d_sphere3d_overlap()`, and `ray_box3d()` — real geometry math (verified with a standalone test: overlapping/separated/touching cases for every pair, ray-hit distance checked against a hand-computed value), not a shortcut. This is the actual overlap-test layer a `Prim::Trigger` node needs to be useful (see docs/ui-and-scenes.md) — `Node::world_mesh_transform()` gives you a node's real world-space position/rotation/scale (composed through its whole parent chain) to build a `Box3D`/`Sphere3D` from.
+
+What this is **not**: there's no broad-phase (checking N objects against each other is your own O(n²) loop, or your own spatial partitioning if N gets large), no continuous collision detection (a fast-moving object can tunnel through a thin box between frames, same as any discrete check), and `Box3D` is always axis-aligned — it ignores rotation entirely, even though `Node::world_mesh_transform()` gives you one. A rotated-box-vs-box test (oriented bounding boxes, via the separating axis theorem) is real extra math for a case most trigger volumes don't actually need; keep triggers unrotated if you rely on these tests. `examples/smoketest.cpp` exercises `box3d_sphere3d_overlap()` for real every frame (an orbiting sphere against a static box, both changing color on overlap) — not just called once and assumed correct.
+
+Use this for: trigger volumes, "is the player near this thing," simple pickup radii — checks, not simulation. Do not expect an object to stop or bounce off anything; that's what "no forces, no resolution" above means. If you need real 3D physics (rigid bodies that actually push each other apart, friction, restitution), that's a genuinely different, much bigger project — integrating a real 3D physics library (Jolt, Bullet, PhysX), not something to grow out of these overlap tests.
+
+Use minor 3D drawing itself for: a spinning icon on a menu, a background scene behind 2D gameplay (this is what Fling does — see its `draw_background3d`), a debug visualization, a title-screen flourish. Do not use this as the foundation for an actual 3D game and then be surprised when "add lighting" turns into a multi-week project. You were warned in this file.
