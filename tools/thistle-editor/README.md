@@ -17,13 +17,15 @@ more — see "Trigger volumes" below.
 ## Layout
 
 Outliner (hierarchy tree) on the left, Inspector (selected prop's name +
-transform) on the right, spawn palette along the bottom, a real viewport grid
-with colored X/Z axis lines instead of a flat ground plane, a wireframe cage
-around whatever's selected instead of a floating marker cube. This is a
-deliberate redesign toward how Blender/Unity actually lay their tools out — a
-real screenshot of Blender's default window (docs.blender.org's Window
-System Introduction page) was checked before writing it, not worked from
-memory.
+transform) on the right, both running the full height of the window below
+the top bar — there's no spawn palette taking up bottom-of-window space
+anymore, since spawning now happens through the Outliner's right-click menu
+(see "Adding and deleting" below). A real viewport grid with colored X/Z
+axis lines instead of a flat ground plane, a wireframe cage around whatever's
+selected instead of a floating marker cube. This is a deliberate redesign
+toward how Blender/Unity actually lay their tools out — a real screenshot of
+Blender's default window (docs.blender.org's Window System Introduction
+page) was checked before writing it, not worked from memory.
 
 There's still no orbiting 3D gizmo ball (no way to draw a fixed screen-space
 overlay independent of the main camera) — just the axis-colored grid lines
@@ -60,12 +62,13 @@ be launched from (double-clicking a `.app` in Finder starts it with an
 unrelated working directory, so this matters).
 
 **Primitives** (cube/sphere/cylinder/cone/plane/trigger) are always
-available, no assets required — click one in the bottom bar to spawn it.
+available, no assets required — right-click the Outliner to spawn one (see
+"Adding and deleting" below).
 
 **Models**: the editor also scans `./assets` (relative to the built
-executable) for `.obj` files, recursively, shown in that same bottom bar next
-to the primitives. For each one it resolves a texture by convention, since
-`load_mesh()` doesn't read `.mtl`:
+executable) for `.obj` files, recursively, and lists them in that same
+right-click menu alongside the primitives. For each one it resolves a
+texture by convention, since `load_mesh()` doesn't read `.mtl`:
 
 1. A same-basename `.png` next to the `.obj` (`chest.obj` → `chest.png`), else
 2. a shared `atlas.png` or `colormap.png` in that same folder (the common case
@@ -109,9 +112,12 @@ since this is exactly the kind of math that's easy to get subtly backwards.
 
 ## Hierarchy
 
-**Spawn as a child**: select a prop, then **Shift+click** a palette entry to
-spawn the new prop as a *child* of the selection instead of at the scene
-root. Moving, rotating, or scaling a parent moves everything nested under it
+**Adding and deleting**: right-click empty space in the Outliner for an
+"Add: X" menu that spawns a new prop at the scene root; right-click an
+existing row instead for "Add child: X" (spawns as a *child* of that row)
+plus a "Delete" entry (removes that row and everything nested under it).
+There's no more bottom palette bar or Shift+click-to-spawn — this replaced
+both. Moving, rotating, or scaling a parent moves everything nested under it
 too — real grouping, not just a visual nesting in a list.
 
 **Re-parent an existing prop**: select it, then **Ctrl+click** a *different*
@@ -155,8 +161,8 @@ doc comment), and call the overlap test yourself, every frame.
 | Right-drag | Orbit camera |
 | Scroll / Up / Down | Zoom camera |
 | Left / Right | Orbit camera (yaw) |
-| Click a palette entry | Spawn into the scene, select it |
-| Shift+click a palette entry | Spawn as a child of the current selection |
+| Right-click empty Outliner space | Open the "Add" menu (spawns at scene root) |
+| Right-click an Outliner row | Open the "Add child" / "Delete" menu for that row |
 | Ctrl+click a different Outliner row | Re-parent the current selection onto it |
 | W / A / S / D | Move selected prop (relative to its own parent) |
 | R / F | Move selected prop up / down |

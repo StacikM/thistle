@@ -1,12 +1,13 @@
-// Thistle Editor — a prop-placement tool: spawn a built-in primitive
-// (including an invisible Trigger volume) or an .obj file under assets/,
-// move/select things with the mouse (click to select+drag along the ground,
-// right-drag to orbit the camera, scroll to zoom) or the keyboard (WASD/R/F/
-// Q/E/Z/X, still there for precise nudging), group props into real
-// parent/child hierarchies (Shift+click a palette entry to spawn as a child
-// of the selection, Ctrl+click a different Outliner row to re-parent an
-// EXISTING selection onto it), save/load the layout as a Node tree via
-// save_scene()/load_scene().
+// Thistle Editor — a prop-placement tool: right-click the Outliner (empty
+// space to add at the scene root, an existing row to add a child of it or
+// delete it) to spawn a built-in primitive (including an invisible Trigger
+// volume) or an .obj file under assets/, move/select things with the mouse
+// (click to select+drag along the ground, right-drag empty viewport space to
+// orbit the camera, scroll to zoom) or the keyboard (WASD/R/F/Q/E/Z/X, still
+// there for precise nudging), group props into real parent/child
+// hierarchies, save/load the layout as a Node tree via save_scene()/
+// load_scene(). Ctrl+click a different Outliner row re-parents the current
+// selection onto it.
 //
 // Layout takes real inspiration from Blender's default window (an actual
 // screenshot of it — docs.blender.org's Window System Introduction page —
@@ -358,6 +359,10 @@ int main() {
 
     const std::vector<PaletteEntry> file_palette = scan_palette("assets");
     const std::vector<PaletteEntry> primitives = primitive_palette();
+    // What the right-click context menu offers to spawn — primitives first,
+    // then whatever real models were found under assets/.
+    std::vector<PaletteEntry> spawnable = primitives;
+    spawnable.insert(spawnable.end(), file_palette.begin(), file_palette.end());
 
     // Dedups GPU uploads across repeated spawns of the same palette entry —
     // load_scene() keeps its own separate caches internally, so a loaded
@@ -385,8 +390,7 @@ int main() {
     const std::string save_file = save::path();
     const std::string scene_path = save_file.substr(0, save_file.find_last_of("/\\")) + "/thistle_editor_scene.json";
 
-    auto spawn = [&](const PaletteEntry& pe, bool as_child_of_selection) {
-        Node* parent = (as_child_of_selection && selected) ? selected : scene.get();
+    auto spawn = [&](const PaletteEntry& pe, Node* parent) {
         Node* n = parent->add_child();
         if (pe.prim != Prim::None) {
             n->mesh_prim = pe.prim;
@@ -462,11 +466,20 @@ int main() {
     float drag_plane_y = 0.0f;
     bool editing_name = false; // begin_text_input() is active for selected->name
 
+    // Right-click context menu state (Outliner only). AddAtRoot: right-
+    // clicked empty Outliner space, menu offers every spawnable entry,
+    // spawning at the scene root. NodeContext: right-clicked an existing
+    // row, menu offers Delete plus every spawnable entry as a child of
+    // that row specifically (not necessarily the current selection).
+    enum class MenuKind { None, AddAtRoot, NodeContext };
+    MenuKind menu_kind = MenuKind::None;
+    vec2 menu_pos{};
+    Node* menu_target = nullptr;
+
     // Layout constants — sized for the 1280x800 default window; everything
     // below is computed off f.width/f.height so it still lays out sanely if
     // the window is resized.
     constexpr float TOP_H = 42.0f;
-    constexpr float BOTTOM_H = 92.0f;
     constexpr float LEFT_W = 230.0f;
     constexpr float RIGHT_W = 260.0f;
 
@@ -474,7 +487,7 @@ int main() {
         const float win_w = static_cast<float>(f.width);
         const float win_h = static_cast<float>(f.height);
         const auto in_viewport = [&](vec2 p) {
-            return p.x > LEFT_W && p.x < win_w - RIGHT_W && p.y > TOP_H && p.y < win_h - BOTTOM_H;
+            return p.x > LEFT_W && p.x < win_w - RIGHT_W && p.y > TOP_H;
         };
 
         f.clear(theme::viewport_clear);
@@ -500,7 +513,6 @@ int main() {
         const CameraBasis basis = compute_camera_basis(cam, aspect);
 
         const bool ctrl = f.key_down(Key::LeftControl);
-        const bool shift = f.key_down(Key::LeftShift);
 
         // A text field (the Inspector's Name box) is capturing keystrokes —
         // suppress every other keyboard/mouse shortcut below so typing a
@@ -597,7 +609,7 @@ int main() {
                 }
                 selected = all[next].first;
             }
-            if (f.key_pressed(Key::Escape)) selected = nullptr;
+            if (f.key_pressed(Key::Escape) && menu_kind == MenuKind::None) selected = nullptr;
             if (ctrl && f.key_pressed(Key::S)) do_save();
             if (ctrl && f.key_pressed(Key::O)) do_load();
         }
@@ -637,17 +649,18 @@ int main() {
         // ---- left panel: Outliner (hierarchy tree). Ctrl+click a row while
         // something else is selected re-parents the selection onto that row
         // (preserving its world position) instead of selecting it. ----
-        f.rect({0, TOP_H}, {LEFT_W, win_h - TOP_H - BOTTOM_H}, theme::panel);
+        f.rect({0, TOP_H}, {LEFT_W, win_h - TOP_H}, theme::panel);
         f.text("Outliner", {12, TOP_H + 8}, {.size = 16, .color = theme::text_dim});
         {
             float y = TOP_H + 34.0f;
             const float row_h = 26.0f;
+            bool right_click_consumed = false;
             if (all.empty()) {
                 f.text("Nothing in the scene yet —", {12, y}, {.size = 13, .color = theme::text_dim2});
-                f.text("spawn something below.", {12, y + 16}, {.size = 13, .color = theme::text_dim2});
+                f.text("right-click to add something.", {12, y + 16}, {.size = 13, .color = theme::text_dim2});
             }
             for (const auto& [node, depth] : all) {
-                if (y > win_h - BOTTOM_H - row_h) break; // no scrolling — just stop, rather than draw off-panel
+                if (y > win_h - row_h) break; // no scrolling — just stop, rather than draw off-panel
                 const bool is_selected = (node == selected);
                 if (is_selected) f.rect({0, y}, {LEFT_W, row_h}, rgba{theme::accent.r, theme::accent.g, theme::accent.b, 0.35f});
                 const std::string shown = node_label(node);
@@ -661,19 +674,37 @@ int main() {
                 row_style.text_size = 15.0f;
                 const vec2 measured = f.measure_text(shown, {.size = row_style.text_size});
                 if (measured.x > row_w - 8.0f) row_style.text_size *= (row_w - 8.0f) / measured.x;
-                if (f.button(shown, Rect{{indent, y}, {row_w, row_h}}, row_style) && !editing_name) {
+                const Rect row_rect{{indent, y}, {row_w, row_h}};
+                if (f.button(shown, row_rect, row_style) && !editing_name) {
                     if (ctrl && selected && selected != node && !is_ancestor_of(selected, node)) {
                         reparent(selected, node);
                     } else {
                         selected = node;
                     }
                 }
+                // Right-click a row: context menu for THAT row specifically
+                // (add a child of it, or delete it) — independent of
+                // whatever's currently selected.
+                if (!editing_name && f.mouse_pressed(Mouse::Right) && row_rect.contains(f.mouse())) {
+                    menu_kind = MenuKind::NodeContext;
+                    menu_pos = f.mouse();
+                    menu_target = node;
+                    right_click_consumed = true;
+                }
                 y += row_h;
+            }
+            // Right-click anywhere else in the panel (not on a row): add at
+            // the scene root.
+            if (!editing_name && !right_click_consumed && f.mouse_pressed(Mouse::Right) &&
+                f.mouse().x >= 0.0f && f.mouse().x <= LEFT_W && f.mouse().y >= TOP_H) {
+                menu_kind = MenuKind::AddAtRoot;
+                menu_pos = f.mouse();
+                menu_target = nullptr;
             }
         }
 
         // ---- right panel: Inspector (selected node's name + transform) ----
-        f.rect({win_w - RIGHT_W, TOP_H}, {RIGHT_W, win_h - TOP_H - BOTTOM_H}, theme::panel);
+        f.rect({win_w - RIGHT_W, TOP_H}, {RIGHT_W, win_h - TOP_H}, theme::panel);
         {
             const float px = win_w - RIGHT_W + 12.0f;
             const float pw = RIGHT_W - 24.0f;
@@ -779,51 +810,68 @@ int main() {
             }
         }
 
-        // ---- bottom bar: spawnable palette (primitives + models) ----
-        f.rect({0, win_h - BOTTOM_H}, {win_w, BOTTOM_H}, theme::chrome);
-        {
-            const float item_w = 100.0f, item_h = 32.0f, gap = 8.0f;
-            const float label_y = win_h - BOTTOM_H + 6.0f;
-            const float row_y = label_y + 16.0f;
-            float x = 12.0f;
+        // ---- compact keybinding hint, bottom-right corner of the viewport ----
+        f.text("Right-click Outliner: add/delete   Click: select+drag   Right-drag: orbit   Scroll: zoom   WASD/R/F/Q/E/Z/X: nudge",
+               {LEFT_W + 12, win_h - 24}, {.size = 12, .color = rgba{1, 1, 1, 0.5f}});
 
-            // f.button() doesn't wrap or clip text (no layout system, see
-            // docs/drawing.md) — a label longer than the button just draws
-            // past both edges, which is exactly the overlapping-text bug an
-            // earlier version of this redesign shipped with (Cylinder/
-            // Character-orc bled into their neighbors). Shrink to fit,
-            // starting from a sane base size instead of ButtonStyle's
-            // default 28 (much too large for a 100px-wide palette slot).
-            auto palette_button = [&](const PaletteEntry& pe, float bx, ButtonStyle style = {}) {
-                style.text_size = 15.0f;
-                const vec2 measured = f.measure_text(pe.label, {.size = style.text_size});
-                if (measured.x > item_w - 12.0f) style.text_size *= (item_w - 12.0f) / measured.x;
-                return f.button(pe.label, Rect{{bx, row_y}, {item_w, item_h}}, style);
-            };
+        // ---- right-click context menu (Outliner only): drawn last so it's
+        // always on top of every panel, regardless of where it's positioned.
+        // AddAtRoot: right-clicked empty Outliner space, every spawnable
+        // entry spawns at the scene root. NodeContext: right-clicked an
+        // existing row, offers Delete plus every spawnable entry as a CHILD
+        // of that row specifically (not necessarily the current selection —
+        // this is the actual replacement for the old Shift+click-to-spawn-
+        // as-child palette workflow, and more flexible: it works on any row,
+        // selected or not).
+        if (menu_kind != MenuKind::None) {
+            const float item_h = 26.0f;
+            const float menu_w = 190.0f;
+            int n_items = static_cast<int>(spawnable.size());
+            if (menu_kind == MenuKind::NodeContext) n_items += 1; // Delete
+            const float menu_h = static_cast<float>(n_items) * item_h;
+            const float mx = std::min(menu_pos.x, win_w - menu_w - 4.0f);
+            const float my = std::min(menu_pos.y, win_h - menu_h - 4.0f);
+            const Rect menu_rect{{mx, my}, {menu_w, menu_h}};
 
-            f.text("PRIMITIVES", {x, label_y}, {.size = 11, .color = theme::text_dim});
-            for (const PaletteEntry& pe : primitives) {
-                ButtonStyle style;
-                style.bg_press = pe.tint;
-                if (palette_button(pe, x, style) && !editing_name) spawn(pe, shift);
-                x += item_w + gap;
+            f.rect(menu_rect.pos, menu_rect.size, theme::chrome);
+            float iy = my;
+            if (menu_kind == MenuKind::NodeContext && menu_target) {
+                ButtonStyle del_style;
+                del_style.text = rgb(0.95f, 0.5f, 0.5f);
+                del_style.text_size = 14.0f;
+                if (f.button("Delete", Rect{{mx, iy}, {menu_w, item_h}}, del_style)) {
+                    if (selected == menu_target) selected = nullptr;
+                    menu_target->parent()->remove_child(menu_target);
+                    menu_kind = MenuKind::None;
+                }
+                iy += item_h;
             }
-
-            x += 20.0f;
-            f.text("MODELS (assets/)", {x, label_y}, {.size = 11, .color = theme::text_dim});
-            if (file_palette.empty()) {
-                f.text("none found", {x, row_y + 8}, {.size = 13, .color = theme::text_dim2});
-            } else {
-                for (const PaletteEntry& pe : file_palette) {
-                    if (palette_button(pe, x) && !editing_name) spawn(pe, shift);
-                    x += item_w + gap;
+            if (menu_kind != MenuKind::None) { // Delete above may have just closed it
+                for (const PaletteEntry& pe : spawnable) {
+                    const std::string label = (menu_kind == MenuKind::NodeContext ? "Add child: " : "Add: ") + pe.label;
+                    ButtonStyle style;
+                    style.text_size = 14.0f;
+                    const vec2 measured = f.measure_text(label, {.size = style.text_size});
+                    if (measured.x > menu_w - 12.0f) style.text_size *= (menu_w - 12.0f) / measured.x;
+                    if (f.button(label, Rect{{mx, iy}, {menu_w, item_h}}, style)) {
+                        spawn(pe, (menu_kind == MenuKind::NodeContext && menu_target) ? menu_target : scene.get());
+                        menu_kind = MenuKind::None;
+                    }
+                    iy += item_h;
                 }
             }
-        }
 
-        // ---- compact keybinding hint, bottom-right corner of the viewport ----
-        f.text("Click: select+drag   Right-drag: orbit   Scroll: zoom   WASD/R/F/Q/E/Z/X: nudge   Tab: select next",
-               {LEFT_W + 12, win_h - BOTTOM_H - 20}, {.size = 12, .color = rgba{1, 1, 1, 0.5f}});
+            // Click anywhere outside the menu (either mouse button) closes
+            // it without acting. The click still falls through to whatever
+            // it landed on underneath in the same frame (e.g. an Outliner
+            // row also gets selected) — properly swallowing a click needs
+            // more input-pipeline plumbing than this immediate-mode UI has;
+            // this is the honest simplification, not a bug nobody noticed.
+            if (menu_kind != MenuKind::None) {
+                const bool clicked_outside = (f.mouse_pressed(Mouse::Left) || f.mouse_pressed(Mouse::Right)) && !menu_rect.contains(f.mouse());
+                if (clicked_outside || f.key_pressed(Key::Escape)) menu_kind = MenuKind::None;
+            }
+        }
     });
 
     return app.run();
