@@ -194,7 +194,18 @@ Mesh make_plane_mesh();
 // etc. directly, the same reason mesh_path exists for a load_mesh()'d file:
 // load_scene() needs to know how to rebuild `mesh` after a restart, since a
 // Mesh handle is just a runtime id.
-enum class Prim { None, Cube, Sphere, Cylinder, Cone, Plane };
+//
+// Trigger is different from the rest: it's pure data, not a shape. A node
+// with mesh_prim == Trigger never gets a real `mesh` and Node::draw_meshes()
+// never draws it — mesh_pos/mesh_scale describe an invisible volume's
+// center/half-extent, mesh_tint and name (below) are just for identifying it
+// while editing. Thistle has no 3D collision system at all (see docs/
+// drawing.md) — there's no overlap test, no callback, nothing that fires
+// when something enters this volume. A trigger here is exactly what a brush
+// in a level editor like Hammer actually is on its own: geometry and a name,
+// with the *engine* (Source, in Hammer's case — your own game code, here)
+// responsible for actually testing overlap against it and doing something.
+enum class Prim { None, Cube, Sphere, Cylinder, Cone, Plane, Trigger };
 
 // Optional per-sprite draw settings. Use designated initializers:
 //   f.sprite(tex, pos, { .size = {64, 64}, .tint = coral, .rotation = 0.5f });
@@ -438,6 +449,11 @@ public:
     vec2 mouse() const; // cursor position in pixels
     bool mouse_down(Mouse b) const;
     bool mouse_pressed(Mouse b) const;
+    // Vertical scroll wheel/trackpad delta accumulated this frame (positive =
+    // scroll up/away from you on most platforms/mice — sign varies by OS and
+    // device, so treat it as "some scroll happened this frame," not a
+    // guaranteed direction, the same caveat any cross-platform scroll API has).
+    float mouse_scroll() const;
 
     // Touch. On phones a tap is also delivered as a left-mouse click, so mouse_*
     // code works as-is; these are just clearer names for the primary finger.
@@ -923,6 +939,11 @@ public:
     float alpha = 1.0f;    // multiplied down the tree
     bool visible = true;
 
+    // Purely for your own identification (an editor's Outliner, a lookup by
+    // name in your own game code, a trigger volume's label) — Node itself
+    // never reads this. Empty by default; nothing requires setting it.
+    std::string name;
+
     // Optional sprite drawn centered on the node's origin.
     Texture sprite{};
     vec2 sprite_size{0, 0};   // {0,0} = texture's native size
@@ -981,6 +1002,23 @@ public:
             if (it->get() == child) { children_.erase(it); return true; }
         }
         return false;
+    }
+
+    // Like remove_child(), but hands the child back instead of destroying
+    // it — for reparenting (add_child(node.detach_child(x))'ing it onto a
+    // different node) rather than deleting. Returns nullptr if `child` isn't
+    // actually a direct child of this node. The returned Node's parent() is
+    // reset to nullptr until you add_child() it somewhere.
+    std::unique_ptr<Node> detach_child(Node* child) {
+        for (auto it = children_.begin(); it != children_.end(); ++it) {
+            if (it->get() == child) {
+                std::unique_ptr<Node> detached = std::move(*it);
+                children_.erase(it);
+                detached->parent_ = nullptr;
+                return detached;
+            }
+        }
+        return nullptr;
     }
 
     // Actions queue and run in order (chainable): a.move_to(...).scale_to(...).

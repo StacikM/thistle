@@ -18,8 +18,9 @@ endif()
 
 target_link_libraries(thistle_editor PRIVATE thistle)
 
-# The editor's own UI font (Kenney Future, CC0 — https://kenney.nl/assets/kenney-fonts),
-# copied next to the built executable as its own `editor_assets/` folder —
+# The editor's own UI font (Inter Regular, OFL — https://github.com/rsms/inter;
+# same font Blender's own UI uses), copied next to the built executable as its
+# own `editor_assets/` folder —
 # deliberately NOT using the engine's thistle_bundle_assets() helper, since
 # that always copies into a destination folder literally named `assets/`,
 # which is where the user's own .obj props live for the palette to scan.

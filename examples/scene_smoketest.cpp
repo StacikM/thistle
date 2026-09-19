@@ -32,6 +32,7 @@ int main() {
     root.mesh_scale = {2, 2, 2};
     root.mesh_tint = rgb(0.9f, 0.1f, 0.5f);
     root.mesh_prim = Prim::Cube;
+    root.name = "RootNode";
     Node* child = root.add_child();
     child->pos = {5, 6};
     child->scale = {2, 2};
@@ -64,6 +65,7 @@ int main() {
     check(near_eq(loaded->mesh_tint.g, 0.1f), "root mesh_tint round-tripped");
     check(loaded->mesh_prim == Prim::Cube, "root mesh_prim round-tripped");
     check(loaded->mesh.valid(), "root mesh_prim rebuilt a real Mesh on load");
+    check(loaded->name == "RootNode", "root name round-tripped");
     check(loaded->child_count() == 1, "root has one child");
     if (loaded->child_count() == 1) {
         Node* c = loaded->child(0);

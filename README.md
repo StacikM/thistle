@@ -40,7 +40,7 @@ Requires a consumer project (game) that adds this as a subdirectory and links ag
 
 ## Thistle Editor
 
-A small GUI tool for placing minor-3D props (built-in primitives or `.obj` meshes), grouping them into real parent/child hierarchies, and saving/loading the layout — see [tools/thistle-editor](tools/thistle-editor/README.md). Not a level compiler; it's a placement tool on top of `Node`'s save/load, nothing more.
+A GUI tool for placing minor-3D props (built-in primitives, invisible Trigger volumes, or `.obj` meshes) with the mouse or keyboard, grouping them into real parent/child hierarchies, and saving/loading the layout — see [tools/thistle-editor](tools/thistle-editor/README.md). Not a level compiler; it's a placement tool on top of `Node`'s save/load, nothing more.
 
 ```bash
 thistle editor install   # build it and put `thistle-editor` on your PATH

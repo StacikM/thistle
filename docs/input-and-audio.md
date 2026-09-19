@@ -14,6 +14,26 @@ if (f.mouse_pressed(Mouse::Left)) startDrag(m);
 
 `Key` values match GLFW/sokol keycodes on purpose, so there's no translation table hiding a bug — what you pass is what the platform reports. It's not a complete keyboard (no function keys, no numpad-specific codes, no punctuation beyond what's listed) because nothing in the games built on this needed them. Add to the enum in `thistle.hpp` and wire the value through if you need more; don't work around a missing key with something hacky, just add it, it's a one-line enum entry.
 
+```cpp
+const float scroll = f.mouse_scroll();   // vertical wheel/trackpad delta this frame, 0 most frames
+if (scroll != 0.0f) zoom -= scroll * 0.1f;
+```
+
+`mouse_scroll()` is the accumulated vertical scroll delta for the current frame only (like `*_pressed`, it resets every frame) — there's no horizontal scroll exposed, and which way is "positive" varies by OS/device the same way it does in every cross-platform scroll API, so treat it as "some scrolling happened," not a guaranteed sign.
+
+### Text input
+
+```cpp
+begin_text_input(current_name);            // shows the soft keyboard on mobile, starts capturing
+// every frame while active:
+std::string typed = text_input();          // live buffer — Backspace already applied
+if (f.key_pressed(Key::Enter)) { current_name = typed; end_text_input(); }
+```
+
+Real keystroke capture, not a fake — `begin_text_input()` starts accumulating printable ASCII characters (Backspace edits the buffer) into an internal string you read back with `text_input()` every frame, and `end_text_input()` stops it (hides the soft keyboard on mobile too). There's no visual text-box widget anywhere in the engine — no cursor, no selection, no click-to-position — you draw whatever box/highlight you want around the live `text_input()` value yourself with `f.rect()`/`f.text()`, the same "you compute your own positions" philosophy as everything else in `docs/ui-and-scenes.md`. `tools/thistle-editor`'s Inspector Name field is a real, if minimal, example: a `f.button()` showing the current name, click to `begin_text_input()`, `text_input() + "_"` drawn as a stand-in cursor while active, Enter to commit, Escape to cancel.
+
+While capturing, your own keyboard shortcuts still fire from the same physical keys — `begin_text_input()` doesn't suppress `key_pressed()`/`key_down()` for you. If a shortcut and typing share a key (WASD movement and someone typing the letter "s" into a name, say), gate your shortcut handling behind whatever "am I currently capturing text" flag your own code is tracking; the engine has no such flag itself, since it doesn't know which of your fields (if any) is "focused."
+
 ### Touch
 
 ```cpp

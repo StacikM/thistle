@@ -302,6 +302,7 @@ struct EngineState {
     bool mouse_pressed[3] = {};
     float mouse_x = 0.0f;
     float mouse_y = 0.0f;
+    float scroll_y = 0.0f; // accumulated this frame, reset after each frame like key_pressed
 
     bool text_capturing = false;   // on-screen keyboard active, accumulating chars
     std::string text_buffer;
@@ -836,6 +837,7 @@ void frame_cb() {
     // Edge-triggered input is only true for the frame it happened.
     for (bool& p : g_state->key_pressed) p = false;
     for (bool& p : g_state->mouse_pressed) p = false;
+    g_state->scroll_y = 0.0f;
 }
 
 void cleanup_cb() {
@@ -894,6 +896,9 @@ void event_cb(const sapp_event* e) {
         case SAPP_EVENTTYPE_MOUSE_MOVE:
             g_state->mouse_x = e->mouse_x;
             g_state->mouse_y = e->mouse_y;
+            break;
+        case SAPP_EVENTTYPE_MOUSE_SCROLL:
+            g_state->scroll_y += e->scroll_y;
             break;
 
         // Touch maps onto the primary pointer (mouse button 0) so games written
@@ -1190,6 +1195,10 @@ bool Frame::mouse_pressed(Mouse b) const {
     return i >= 0 && i < 3 && g_state->mouse_pressed[i];
 }
 
+float Frame::mouse_scroll() const {
+    return g_state->scroll_y;
+}
+
 bool Frame::touching() const {
     return g_state->mouse_held[0];
 }
@@ -1468,6 +1477,7 @@ nlohmann::json node_to_json(const Node& n) {
     j["rotation"] = n.rotation;
     j["alpha"] = n.alpha;
     j["visible"] = n.visible;
+    j["name"] = n.name;
     j["sprite_path"] = n.sprite_path;
     j["sprite_size"] = n.sprite_size;
     j["sprite_tint"] = n.sprite_tint;
@@ -1497,6 +1507,7 @@ std::unique_ptr<Node> node_from_json(const nlohmann::json& j, std::unordered_map
     n->rotation = j.value("rotation", 0.0f);
     n->alpha = j.value("alpha", 1.0f);
     n->visible = j.value("visible", true);
+    n->name = j.value("name", std::string());
     n->sprite_path = j.value("sprite_path", std::string());
     if (j.contains("sprite_size")) j.at("sprite_size").get_to(n->sprite_size);
     if (j.contains("sprite_tint")) j.at("sprite_tint").get_to(n->sprite_tint);
@@ -1525,6 +1536,7 @@ std::unique_ptr<Node> node_from_json(const nlohmann::json& j, std::unordered_map
             case Prim::Cylinder: n->mesh = make_cylinder_mesh(); break;
             case Prim::Cone:     n->mesh = make_cone_mesh(); break;
             case Prim::Plane:    n->mesh = make_plane_mesh(); break;
+            case Prim::Trigger:  break; // pure data — no geometry, ever
             case Prim::None:     break;
         }
     } else if (!n->mesh_path.empty()) {

@@ -1,32 +1,39 @@
 # Thistle Editor
 
-A minimal prop-placement tool for Thistle's minor-3D drawing mode: spawn a
-built-in primitive (cube/sphere/cylinder/cone/plane) or browse `.obj` files,
-nudge props around with the keyboard, group them into real parent/child
-hierarchies, save/load the layout as a `Node` tree.
+A prop-placement tool for Thistle's minor-3D drawing mode: spawn a built-in
+primitive (cube/sphere/cylinder/cone/plane/trigger) or browse `.obj` files,
+move things with the mouse or keyboard, name them, group them into real
+parent/child hierarchies, save/load the layout as a `Node` tree.
 
 **This is not a level compiler.** There's no BSP, no lighting bake, none of what
 actually makes something like Hammer valuable for a real FPS level. It's the
 thinnest real GUI on top of `save_scene()`/`load_scene()` — see
 [docs/ui-and-scenes.md](../../docs/ui-and-scenes.md)'s "Placing minor-3D props
 on a `Node`" section for exactly what that captures (and doesn't). Use this for
-laying out props in a small 3D scene, not for building a shippable level.
+laying out props in a small 3D scene, not for building a shippable level. The
+**Trigger** primitive is the same story: it's a named position + size, nothing
+more — see "Trigger volumes" below.
 
 ## Layout
 
-Outliner (hierarchy tree) on the left, Inspector (selected prop's transform)
-on the right, spawn palette along the bottom, a real viewport grid with
-colored X/Z axis lines instead of a flat ground plane, a wireframe cage
+Outliner (hierarchy tree) on the left, Inspector (selected prop's name +
+transform) on the right, spawn palette along the bottom, a real viewport grid
+with colored X/Z axis lines instead of a flat ground plane, a wireframe cage
 around whatever's selected instead of a floating marker cube. This is a
-deliberate redesign toward how Blender/Unity actually lay their tools out —
-an real screenshot of Blender's default window (docs.blender.org's Window
+deliberate redesign toward how Blender/Unity actually lay their tools out — a
+real screenshot of Blender's default window (docs.blender.org's Window
 System Introduction page) was checked before writing it, not worked from
-memory. Adapted to what Thistle's immediate-mode UI actually has, though:
-there's no text-input widget anywhere in the engine, so the Inspector's
-Position/Rotation/Scale fields are a read-only number plus +/- stepper
-buttons rather than click-to-type boxes, and there's no orbiting 3D gizmo
-ball (no way to draw a fixed screen-space overlay independent of the main
-camera) — just the axis-colored grid lines for orientation instead.
+memory.
+
+There's still no orbiting 3D gizmo ball (no way to draw a fixed screen-space
+overlay independent of the main camera) — just the axis-colored grid lines
+for orientation. The Inspector's Position/Rotation/Scale fields stay
+read-only-number-plus-steppers rather than click-to-type — a mouse-drag
+already covers coarse repositioning (see below), and steppers are enough for
+fine nudges. The Name field, though, **is** a real click-to-type box: it uses
+Thistle's actual `begin_text_input()`/`text_input()` capture (the engine does
+have text input, it just has no built-in visual widget for it anywhere — this
+is that widget, built for exactly one field).
 
 ## Building
 
@@ -52,8 +59,8 @@ folders relative to itself, not relative to whatever directory it happened to
 be launched from (double-clicking a `.app` in Finder starts it with an
 unrelated working directory, so this matters).
 
-**Primitives** (cube/sphere/cylinder/cone/plane) are always available, no
-assets required — click one in the bottom bar to spawn it.
+**Primitives** (cube/sphere/cylinder/cone/plane/trigger) are always
+available, no assets required — click one in the bottom bar to spawn it.
 
 **Models**: the editor also scans `./assets` (relative to the built
 executable) for `.obj` files, recursively, shown in that same bottom bar next
@@ -71,40 +78,94 @@ It was verified during development against Kenney's CC0 "Mini Dungeon" pack
 (kenney.nl), which is exactly the atlas-sharing layout convention #2 above is
 for.
 
-The editor's own UI font (`editor_assets/kenney-future.ttf`, bundled and
-copied next to the executable at build time) is **Kenney Future** by Kenney
-(kenney.nl/assets/kenney-fonts), CC0. That's a separate folder from `assets/`
-on purpose — the tool's own resources and your project's props should never
-collide over a shared folder name.
+The editor's own UI font (`editor_assets/inter-regular.ttf`, bundled and
+copied next to the executable at build time) is **Inter** by the Inter
+Project Authors (github.com/rsms/inter), OFL — the same font Blender's own
+UI has used since ~2.9, picked for the same reason. License text travels
+with it (`editor_assets/inter-OFL-LICENSE.txt`), as OFL requires. That's a
+separate folder from `assets/` on purpose — the tool's own resources and
+your project's props should never collide over a shared folder name.
+
+## Mouse control
+
+- **Left-click** a prop (in the viewport, or a row in the Outliner) to select
+  it. Clicking empty viewport space deselects — matches Blender's/Unity's own
+  convention. Picking works by projecting every node's position to screen
+  space and taking the nearest one within ~40px of the click, not real
+  ray-mesh intersection (there's no such thing in Thistle to hit-test
+  against) — good enough at editor prop-counts, but two overlapping objects
+  can be hard to tell apart by click alone (Tab-cycle or the Outliner instead).
+- **Left-click-drag** a selected prop to slide it along the ground plane at
+  its current height, preserving the offset between where you clicked and its
+  center (it doesn't snap its center to the cursor). Height still needs R/F.
+- **Right-click-drag** anywhere to orbit the camera (yaw + pitch).
+- **Scroll** to zoom. Up/Down keys also zoom, Left/Right keys also orbit yaw.
+
+All of this is built on real camera-ray math (screen position → world ray →
+intersect the ground plane), not a shortcut — verified with a standalone
+round-trip test (project a known world point to screen, unproject it back,
+confirm you land on the same point) before being wired into the editor,
+since this is exactly the kind of math that's easy to get subtly backwards.
 
 ## Hierarchy
 
-Select a prop, then **Shift+click** a palette entry to spawn the new prop as
-a *child* of the selected one instead of at the scene root. Moving, rotating,
-or scaling a parent moves everything nested under it too — real grouping, not
-just a visual nesting in a list. See `Node::draw_meshes()`'s doc comment in
-`include/thistle.hpp` for exactly how the transform composes (short version:
-per-axis rotation addition, not a true rotation-matrix multiply — exact for
-the common case of everything sharing one rotation axis, an approximation
-once nested nodes rotate around different axes at once).
+**Spawn as a child**: select a prop, then **Shift+click** a palette entry to
+spawn the new prop as a *child* of the selection instead of at the scene
+root. Moving, rotating, or scaling a parent moves everything nested under it
+too — real grouping, not just a visual nesting in a list.
+
+**Re-parent an existing prop**: select it, then **Ctrl+click** a *different*
+row in the Outliner to move the selection under that row instead, preserving
+its world position (it won't visually jump). Refuses to create a cycle (you
+can't re-parent something onto its own descendant).
+
+See `Node::draw_meshes()`'s doc comment in `include/thistle.hpp` for exactly
+how the transform composes (short version: per-axis rotation addition, not a
+true rotation-matrix multiply — exact for the common case of everything
+sharing one rotation axis, an approximation once nested nodes rotate around
+different axes at once). Re-parenting keeps the child's own rotation/scale
+values as-is, so its world rotation/scale can visibly shift if the new
+parent has a non-identity one — fine under a plain unrotated/unscaled group
+node, the common case.
+
+## Trigger volumes
+
+The **Trigger** primitive is pure data: a named position + size, drawn as a
+cyan wireframe box in the editor (rotation-aware — a rotated trigger visibly
+looks rotated) and **never** drawn as a solid mesh by `Node::draw_meshes()`,
+in the editor or in your own game. Thistle has no 3D collision system
+whatsoever (see docs/drawing.md) — there's no overlap test and nothing fires
+when something enters it. This is exactly what a brush in a level editor
+like Hammer actually is on its own: geometry and a name, with the *engine*
+(Source, in Hammer's case — your own game code, here) responsible for
+actually testing overlap and doing something about it. Load the scene, walk
+the tree for `mesh_prim == Prim::Trigger` nodes, and write your own AABB
+check against `mesh_pos`/`mesh_scale` (both parent-composed the same way as
+any other node — see `Node::draw_meshes()`'s doc comment).
 
 ## Keybindings
 
 | Key | Action |
 |---|---|
+| Click a prop / Outliner row | Select it |
+| Click empty viewport | Deselect |
+| Click-drag a selected prop | Move it along the ground at its current height |
+| Right-drag | Orbit camera |
+| Scroll / Up / Down | Zoom camera |
+| Left / Right | Orbit camera (yaw) |
 | Click a palette entry | Spawn into the scene, select it |
 | Shift+click a palette entry | Spawn as a child of the current selection |
-| Left / Right | Orbit camera |
-| Up / Down | Zoom camera |
+| Ctrl+click a different Outliner row | Re-parent the current selection onto it |
 | W / A / S / D | Move selected prop (relative to its own parent) |
 | R / F | Move selected prop up / down |
 | Q / E | Rotate selected prop (Y axis) |
 | Z / X | Scale selected prop down / up |
 | Tab | Select next prop (whole tree, not just root-level) |
-| Escape | Deselect |
+| Escape | Deselect (or cancel a Name edit in progress) |
 | Backspace | Delete selected prop (and everything nested under it) |
 | Ctrl+S | Save the scene |
 | Ctrl+O | Load the scene |
+| Enter (while naming) | Save the Name field |
 
 Save/load always uses one fixed file next to your save data
 (`thistle_editor_scene.json`, in the same directory `save::path()` returns) —
