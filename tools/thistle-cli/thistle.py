@@ -13,6 +13,9 @@ Commands:
     thistle version show             print the current version
     thistle version set X.Y.Z        set an exact version
     thistle version bump PART        bump major/minor/patch by one
+    thistle editor install           build tools/thistle-editor, put `thistle-editor` on PATH
+    thistle editor update            pull the latest engine source, then rebuild+reinstall the editor
+    thistle editor run               build (if needed) and run the editor without installing it
 """
 import argparse
 import json
@@ -138,6 +141,82 @@ def cmd_run(args) -> None:
     os.execv(str(exe), [str(exe)])
 
 
+# --- editor --------------------------------------------------------------
+# `thistle editor` operates on the engine checkout itself (ENGINE_ROOT), not
+# a scaffolded game project — so, unlike new/build/run/version, it works
+# from any directory, not just inside a project with a thistle.json.
+
+def _editor_dir() -> Path:
+    return ENGINE_ROOT / "tools" / "thistle-editor"
+
+
+def _default_bin_dir() -> Path:
+    # Same default (and same env var) install.sh/install.bat use for the
+    # `thistle` command itself, so a launcher installed here lands somewhere
+    # already on PATH for anyone who installed thistle the normal way.
+    env = os.environ.get("THISTLE_BIN_DIR")
+    return Path(env) if env else Path.home() / ".local" / "bin"
+
+
+def _build_editor() -> Path:
+    editor_dir = _editor_dir()
+    build_dir = editor_dir / "build"
+    if not (build_dir / "CMakeCache.txt").exists():
+        run(["cmake", "-S", str(editor_dir), "-B", str(build_dir)])
+    run(["cmake", "--build", str(build_dir)])
+    # "Debug" matches what a multi-config generator (Visual Studio, Xcode)
+    # produces when no --config is passed to the build step above.
+    exe = _find_executable(build_dir, "thistle_editor", "Debug")
+    if not exe:
+        die("built, but couldn't find thistle_editor's executable — check the build output above")
+    return exe
+
+
+def _install_launcher(bin_dir: Path, name: str, target: Path) -> Path:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        # No symlinks on Windows without Developer Mode or an elevated
+        # prompt — a one-line wrapper needs neither. It calls the real
+        # binary by absolute path, so it stays correct across rebuilds (the
+        # build output path doesn't change, only its contents do).
+        path = bin_dir / f"{name}.bat"
+        path.write_text(f'@echo off\n"{target}" %*\n')
+    else:
+        path = bin_dir / name
+        if path.exists() or path.is_symlink():
+            path.unlink()
+        path.symlink_to(target)
+        path.chmod(0o755)
+    return path
+
+
+def _print_path_hint(bin_dir: Path, command: str) -> None:
+    if str(bin_dir) in os.environ.get("PATH", "").split(os.pathsep):
+        print(f"Try: {command}")
+    else:
+        print(f"{bin_dir} isn't on your PATH yet — add it the same way install.sh/install.bat told you to when")
+        print(f"you installed `thistle` itself, then: {command}")
+
+
+def cmd_editor(args) -> None:
+    if args.editor_cmd == "update":
+        run(["git", "-C", str(ENGINE_ROOT), "pull", "--ff-only"])
+
+    if args.editor_cmd == "run":
+        exe = _build_editor()
+        print("$ " + str(exe))
+        os.execv(str(exe), [str(exe)])
+
+    # install, or update falling through to reinstall with the fresh build
+    exe = _build_editor()
+    bin_dir = _default_bin_dir()
+    launcher = _install_launcher(bin_dir, "thistle-editor", exe)
+    print(f"==> Editor built: {exe}")
+    print(f"==> Launcher:     {launcher}")
+    print()
+    _print_path_hint(bin_dir, "thistle-editor")
+
+
 # --- version ---------------------------------------------------------------
 
 def cmd_version(args) -> None:
@@ -194,6 +273,12 @@ def main() -> None:
     p_bump = vsub.add_parser("bump")
     p_bump.add_argument("part", choices=["major", "minor", "patch"])
     p_bump.set_defaults(func=cmd_version)
+
+    p_editor = sub.add_parser("editor", help="install/update/run the Thistle Editor (tools/thistle-editor)")
+    esub = p_editor.add_subparsers(dest="editor_cmd", required=True)
+    esub.add_parser("install", help="build the editor and put `thistle-editor` on your PATH").set_defaults(func=cmd_editor)
+    esub.add_parser("update", help="pull the latest engine source, then rebuild+reinstall the editor").set_defaults(func=cmd_editor)
+    esub.add_parser("run", help="build (if needed) and run the editor without installing it").set_defaults(func=cmd_editor)
 
     args = parser.parse_args()
     args.func(args)

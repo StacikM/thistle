@@ -25,6 +25,8 @@ curl -fsSL https://raw.githubusercontent.com/StacikM/thistle/main/install.sh | b
 thistle new mygame && cd mygame && thistle run
 ```
 
+On Windows, download [`install.bat`](install.bat) and run it locally (same defaults, no one-liner published yet).
+
 Installs the engine and the `thistle` CLI (see [docs/cli.md](docs/cli.md)) — no dependencies to fight, standard library only.
 
 ## Building the engine directly
@@ -38,7 +40,13 @@ Requires a consumer project (game) that adds this as a subdirectory and links ag
 
 ## Thistle Editor
 
-A small GUI tool for placing minor-3D props (`.obj` meshes) and saving/loading the layout — see [tools/thistle-editor](tools/thistle-editor/README.md). Not a level compiler; it's a placement tool on top of `Node`'s save/load, nothing more.
+A small GUI tool for placing minor-3D props (built-in primitives or `.obj` meshes), grouping them into real parent/child hierarchies, and saving/loading the layout — see [tools/thistle-editor](tools/thistle-editor/README.md). Not a level compiler; it's a placement tool on top of `Node`'s save/load, nothing more.
+
+```bash
+thistle editor install   # build it and put `thistle-editor` on your PATH
+thistle editor update    # pull the latest engine source, rebuild, reinstall
+thistle editor run       # build (if needed) and run it without installing
+```
 
 ## Contributing
 

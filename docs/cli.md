@@ -20,6 +20,14 @@ chmod +x ~/.thistle/tools/thistle-cli/thistle.py
 
 Then it's `thistle new`/`thistle build`/`thistle run` from anywhere.
 
+### Windows
+
+```bat
+install.bat
+```
+
+Same defaults, same env var names (`THISTLE_HOME`, `THISTLE_BIN_DIR`), same idea — clone/pull to `%USERPROFILE%\.thistle`, then a `thistle` command on your `PATH` (`%USERPROFILE%\.local\bin` by default). It writes a one-line `thistle.bat` wrapper (`python "<engine>\tools\thistle-cli\thistle.py" %*`) instead of a symlink — creating a real symlink on Windows needs Developer Mode or an elevated prompt, and this needs neither. Requires `git` and `python` (or the `py` launcher) on `PATH`; there's no `curl | bash`-equivalent one-liner published yet, download `install.bat` from the repo and run it locally.
+
 ## What `new` actually generates
 
 A complete, ordinary CMake project — nothing about it depends on the CLI continuing to exist. If you never touch this tool again after scaffolding, `cmake -S . -B build && cmake --build build` still works, because that's literally what `thistle build` runs under the hood. The CLI is a convenience layer over a real project, not a black box you're locked into.
@@ -44,6 +52,11 @@ The starter `main.cpp` deliberately draws shapes, not text — text needs a `.tt
 - **`thistle build [--release]`** — configures on first run (creates `build/`), then just builds on every call after. Debug by default.
 - **`thistle run [--release]`** — builds, then execs the resulting binary. Finds it under whatever your platform's generator actually produced (`.app` bundle on macOS, `Debug/`/`Release/` subfolder on Windows' multi-config generator, a plain binary on Linux) so you never have to know that path yourself.
 - **`thistle version show`** / **`set X.Y.Z`** / **`bump major|minor|patch`** — reads/writes `thistle.json`. No network behavior of any kind — this is metadata, not an updater (see below).
+- **`thistle editor install`** — builds `tools/thistle-editor` and puts a `thistle-editor` launcher on your `PATH` (same default/override as the `thistle` command itself: `~/.local/bin`, or `THISTLE_BIN_DIR`). A symlink on Unix, a one-line wrapper `.bat` on Windows (same reasoning as `install.bat` above).
+- **`thistle editor update`** — `git pull --ff-only` on the engine checkout (the editor's source lives in the same repo, so this is the same update mechanism as the engine itself), then rebuilds and reinstalls.
+- **`thistle editor run`** — builds (if needed) and execs the editor directly, without touching your `PATH` — for trying a change without installing it.
+
+Unlike `new`/`build`/`run`/`version`, `thistle editor` doesn't need a `thistle.json` project in your current directory — it operates on the engine checkout itself, so it works from anywhere.
 
 ## How the version actually gets into your code
 
@@ -55,4 +68,4 @@ Every generated project calls this once, in its `CMakeLists.txt`. It's not part 
 
 ## What this deliberately doesn't do (yet)
 
-No interactive prompts, no project templates for different game genres, no dependency/package management, no editor integration. It scaffolds one project shape and gets out of the way. If that shape stops fitting as more games get built on this engine, extend the templates — don't build a second, fancier tool before the first one has proven itself on a real project.
+No interactive prompts, no project templates for different game genres, no dependency/package management. It scaffolds one project shape and gets out of the way. If that shape stops fitting as more games get built on this engine, extend the templates — don't build a second, fancier tool before the first one has proven itself on a real project. (Editor integration exists now — `thistle editor install`/`update`/`run` — see above; that's the one thing this section used to list as deliberately missing.)

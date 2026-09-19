@@ -1,11 +1,24 @@
-// Thistle Editor — a minimal prop-placement tool: browse .obj files (or use
-// a built-in primitive) under assets/, click one to drop it into the scene,
-// nudge it around with the keyboard, save/load the layout as a Node tree via
-// save_scene()/load_scene(). Shift+click a palette entry while something's
-// selected to spawn it as a CHILD of the selection instead of at the scene
-// root — Node::draw_meshes() composes a child's mesh_pos/rotation/scale onto
-// its parent's, so this is real grouping: move/rotate/scale the parent and
-// its children follow.
+// Thistle Editor — a minimal prop-placement tool: spawn a built-in primitive
+// or an .obj file under assets/, nudge it around (keyboard or the Inspector's
+// stepper buttons), group props into real parent/child hierarchies, save/load
+// the layout as a Node tree via save_scene()/load_scene(). Shift+click a
+// palette entry while something's selected to spawn it as a CHILD of the
+// selection instead of at the scene root — Node::draw_meshes() composes a
+// child's mesh_pos/rotation/scale onto its parent's, so this is real
+// grouping: move/rotate/scale the parent and its children follow.
+//
+// Layout takes real inspiration from Blender's default window (an actual
+// screenshot of it — docs.blender.org's Window System Introduction page —
+// was checked before writing this, not worked from memory): a dark
+// neutral-gray theme, a viewport grid with colored X/Z axis lines instead of
+// a flat-shaded ground plane, an Outliner-style indented hierarchy tree on
+// the left, and a Properties-style Transform panel with per-axis numeric
+// fields on the right. Adapted to what Thistle's immediate-mode UI actually
+// has, though: no text input anywhere in the engine, so numeric fields are
+// read-only text plus +/- stepper buttons rather than click-to-type boxes,
+// and there's no orbiting 3D gizmo ball (no way to draw a fixed screen-space
+// overlay independent of the main camera) — just axis-colored lines through
+// the origin instead.
 //
 // This is NOT a level compiler (no BSP, no lighting bake, nothing Hammer's
 // actual value proposition rests on) — see docs/ui-and-scenes.md's "Placing
@@ -15,8 +28,10 @@
 #include <thistle.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -116,23 +131,22 @@ std::vector<PaletteEntry> primitive_palette() {
 }
 
 // Flattens a tree into visitation order (depth-first, children after their
-// parent) — needed because Tab-cycling and the "Props: N" count have to
-// cover the WHOLE tree now that spawning-as-child makes real nesting
-// possible, not just scene's direct children.
-void flatten(Node* n, std::vector<Node*>& out) {
+// parent), recording each node's depth for the Outliner's indentation.
+void flatten(Node* n, int depth, std::vector<std::pair<Node*, int>>& out) {
     for (std::size_t i = 0; i < n->child_count(); ++i) {
         Node* c = n->child(i);
-        out.push_back(c);
-        flatten(c, out);
+        out.emplace_back(c, depth);
+        flatten(c, depth + 1, out);
     }
 }
 
 // Node::draw_meshes() composes a child's mesh_pos/rotation/scale onto its
 // parent's (see its doc comment in thistle.hpp) — this mirrors that exact
-// math to find a selected node's actual WORLD position, purely so the
-// selection gizmo is drawn where the node actually rendered, not at its
-// parent-relative mesh_pos. Duplicated rather than exposed from the engine:
-// it's a one-off need for a gizmo, not something worth new public API for.
+// math to find a selected node's actual WORLD transform, purely so the
+// selection cage and Inspector are drawn/computed relative to what actually
+// rendered, not the node's own parent-relative fields. Duplicated rather
+// than exposed from the engine: it's a one-off editor need, not something
+// worth new public API for.
 vec3 rotate_euler(vec3 v, vec3 rot) {
     const float cx = std::cos(rot.x), sx = std::sin(rot.x);
     const float cy = std::cos(rot.y), sy = std::sin(rot.y);
@@ -143,19 +157,72 @@ vec3 rotate_euler(vec3 v, vec3 rot) {
     return after_z;
 }
 
-vec3 world_mesh_pos(Node* n) {
+struct WorldTransform { vec3 pos{0, 0, 0}, rot{0, 0, 0}, scale{1, 1, 1}; };
+
+WorldTransform world_mesh_transform(Node* n) {
     std::vector<Node*> chain;
     for (Node* cur = n; cur; cur = cur->parent()) chain.push_back(cur);
-    vec3 pos{0, 0, 0}, rot{0, 0, 0}, scale{1, 1, 1};
+    WorldTransform t;
     for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
         Node* cur = *it;
-        const vec3 scaled_local{cur->mesh_pos.x * scale.x, cur->mesh_pos.y * scale.y, cur->mesh_pos.z * scale.z};
-        pos = pos + rotate_euler(scaled_local, rot);
-        rot = rot + cur->mesh_rotation;
-        scale = {scale.x * cur->mesh_scale.x, scale.y * cur->mesh_scale.y, scale.z * cur->mesh_scale.z};
+        const vec3 scaled_local{cur->mesh_pos.x * t.scale.x, cur->mesh_pos.y * t.scale.y, cur->mesh_pos.z * t.scale.z};
+        t.pos = t.pos + rotate_euler(scaled_local, t.rot);
+        t.rot = t.rot + cur->mesh_rotation;
+        t.scale = {t.scale.x * cur->mesh_scale.x, t.scale.y * cur->mesh_scale.y, t.scale.z * cur->mesh_scale.z};
     }
-    return pos;
+    return t;
 }
+
+// A viewport grid instead of a flat-shaded ground plane — closer to how
+// Blender's/Unity's viewports actually read at a glance. X is red, Z is
+// blue (this engine is Y-up, so the ground plane is XZ, not Blender's XY —
+// colors otherwise follow the same red/green/blue = X/Y/Z convention every
+// one of these tools uses). The short green stub at the origin stands in
+// for Y, which has no ground line of its own.
+void draw_grid(Frame& f, float half_size, float step) {
+    const rgba line_color = rgb(0.32f, 0.32f, 0.35f);
+    for (float v = -half_size; v <= half_size + 0.001f; v += step) {
+        if (std::fabs(v) < 0.001f) continue; // the two axis lines are drawn separately, in color
+        f.line3d({v, 0, -half_size}, {v, 0, half_size}, line_color);
+        f.line3d({-half_size, 0, v}, {half_size, 0, v}, line_color);
+    }
+    f.line3d({-half_size, 0, 0}, {half_size, 0, 0}, rgb(0.75f, 0.28f, 0.28f)); // X
+    f.line3d({0, 0, -half_size}, {0, 0, half_size}, rgb(0.3f, 0.45f, 0.85f)); // Z
+    f.line3d({0, 0, 0}, {0, half_size * 0.1f, 0}, rgb(0.35f, 0.75f, 0.4f));   // Y stub
+}
+
+// A wireframe box around a world-space center/half-extent — stands in for
+// Blender's orange selection outline (there's no outline-shader equivalent
+// here, no shader stage at all actually, so a drawn cage is the honest
+// substitute). Sized off the node's own scale, not a real computed mesh
+// bounding box (mesh triangle data isn't exposed to draw a real AABB from) —
+// approximate, not exact, for anything that isn't unit-sized to begin with.
+void draw_selection_cage(Frame& f, vec3 center, vec3 half_extent, rgba color) {
+    const float hx = half_extent.x, hy = half_extent.y, hz = half_extent.z;
+    const vec3 c[8] = {
+        {center.x - hx, center.y - hy, center.z - hz}, {center.x + hx, center.y - hy, center.z - hz},
+        {center.x + hx, center.y + hy, center.z - hz}, {center.x - hx, center.y + hy, center.z - hz},
+        {center.x - hx, center.y - hy, center.z + hz}, {center.x + hx, center.y - hy, center.z + hz},
+        {center.x + hx, center.y + hy, center.z + hz}, {center.x - hx, center.y + hy, center.z + hz},
+    };
+    static constexpr int edges[12][2] = {
+        {0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6}, {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7},
+    };
+    for (const auto& e : edges) f.line3d(c[e[0]], c[e[1]], color);
+}
+
+// Dark neutral-gray palette (sampled from an actual Blender screenshot, not
+// guessed from memory) plus one warm accent color for selection/primary
+// actions — Blender's own selection color is closer to orange, used here too.
+namespace theme {
+const rgba chrome   = rgb(0.09f, 0.09f, 0.10f);  // top bar, outer panel background
+const rgba panel    = rgb(0.15f, 0.15f, 0.16f);  // hierarchy/inspector body
+const rgba panel_alt = rgb(0.19f, 0.19f, 0.21f); // alternating row background
+const rgba viewport_clear = rgb(0.14f, 0.15f, 0.17f);
+const rgba text_dim = rgb(0.6f, 0.6f, 0.65f);
+const rgba text_dim2 = rgb(0.5f, 0.5f, 0.5f);
+const rgba accent   = rgb(0.85f, 0.5f, 0.18f);   // Blender-orange selection accent
+} // namespace theme
 
 } // namespace
 
@@ -250,23 +317,42 @@ int main() {
     float cam_yaw = 0.6f;
     float cam_dist = 9.0f;
 
-    app.update([&](Frame f) {
-        f.clear(rgb(0.07f, 0.08f, 0.11f));
+    // Layout constants — sized for the 1280x800 default window; everything
+    // below is computed off f.width/f.height so it still lays out sanely if
+    // the window is resized.
+    constexpr float TOP_H = 42.0f;
+    constexpr float BOTTOM_H = 92.0f;
+    constexpr float LEFT_W = 230.0f;
+    constexpr float RIGHT_W = 260.0f;
 
-        // ---- 3D viewport (whole window; the sidebar draws on top after) ----
+    app.update([&](Frame f) {
+        const float win_w = static_cast<float>(f.width);
+        const float win_h = static_cast<float>(f.height);
+
+        f.clear(theme::viewport_clear);
+
+        // ---- 3D viewport (fills the whole window; UI chrome draws on top
+        // after, covering the edges — there's no viewport/scissor rect to
+        // clip 3D drawing to a sub-region, so this is the same technique the
+        // very first version of this editor already used) ----
         Camera3D cam;
         cam.eye = {cam_dist * std::sin(cam_yaw), 4.5f, cam_dist * std::cos(cam_yaw)};
         cam.target = {0.0f, 0.0f, 0.0f};
         f.camera3d(cam);
-        f.plane3d({0, 0, 0}, 24.0f, 24.0f, rgb(0.2f, 0.22f, 0.28f));
+        draw_grid(f, 12.0f, 1.0f);
         scene->draw_meshes(f);
-        if (selected) f.cube(world_mesh_pos(selected), {0.12f, 0.12f, 0.12f}, coral); // selection gizmo
+        WorldTransform sel_world;
+        if (selected) {
+            sel_world = world_mesh_transform(selected);
+            const vec3 half{0.55f * sel_world.scale.x, 0.55f * sel_world.scale.y, 0.55f * sel_world.scale.z};
+            draw_selection_cage(f, sel_world.pos, half, theme::accent);
+        }
         f.camera({0, 0}); // MANDATORY before any 2D drawing below
 
-        // Whole-tree flatten, once per frame — cheap at editor-scale prop
-        // counts, and needed for both Tab-cycling and the props count below.
-        std::vector<Node*> all;
-        flatten(scene.get(), all);
+        // Whole-tree flatten (with depth, for the Outliner's indentation) —
+        // once per frame, cheap at editor-scale prop counts.
+        std::vector<std::pair<Node*, int>> all;
+        flatten(scene.get(), 0, all);
 
         // ---- input: camera orbit/zoom (always active) ----
         if (f.key_down(Key::Left))  cam_yaw -= f.dt * 1.5f;
@@ -305,9 +391,9 @@ int main() {
         if (f.key_pressed(Key::Tab) && !all.empty()) {
             std::size_t next = 0;
             for (std::size_t i = 0; i < all.size(); ++i) {
-                if (all[i] == selected) { next = (i + 1) % all.size(); break; }
+                if (all[i].first == selected) { next = (i + 1) % all.size(); break; }
             }
-            selected = all[next];
+            selected = all[next].first;
         }
         if (f.key_pressed(Key::Escape)) selected = nullptr;
         const bool ctrl = f.key_down(Key::LeftControl);
@@ -315,64 +401,173 @@ int main() {
         if (ctrl && f.key_pressed(Key::S)) do_save();
         if (ctrl && f.key_pressed(Key::O)) do_load();
 
-        // ---- sidebar ----
-        const float sidebar_w = 220.0f;
-        const float button_w = sidebar_w - 28.0f;
-        const float pad = 16.0f;
-        f.rect({0, 0}, {sidebar_w, static_cast<float>(f.height)}, rgb(0.11f, 0.12f, 0.16f));
-        f.text("Thistle Editor", {14, 12}, {.size = 22});
+        // ================= UI chrome =================
 
-        // f.button() doesn't wrap or clip text (no layout system, see
-        // docs/drawing.md) — a label longer than the button just draws past
-        // both edges. Shrink the font to fit instead of letting that happen,
-        // the same technique measure_text() exists for.
-        auto fitted_button = [&](const std::string& label, float y, ButtonStyle style = {}) {
-            const vec2 measured = f.measure_text(label, {.size = style.text_size});
-            if (measured.x > button_w - pad) style.text_size *= (button_w - pad) / measured.x;
-            return f.button(label, Rect{{14, y}, {button_w, 36}}, style);
-        };
-
-        float y = 46.0f;
-        f.text("Primitives", {14, y}, {.size = 14, .color = rgb(0.6f, 0.6f, 0.65f)});
-        y += 20.0f;
-        for (const PaletteEntry& pe : primitives) {
-            ButtonStyle style;
-            style.bg_press = pe.tint;
-            if (fitted_button(pe.label, y, style)) spawn(pe, shift);
-            y += 40.0f;
+        // ---- top bar ----
+        f.rect({0, 0}, {win_w, TOP_H}, theme::chrome);
+        f.text("Thistle Editor", {14, 10}, {.size = 20});
+        {
+            ButtonStyle save_style;
+            save_style.bg_press = theme::accent;
+            if (f.button("Save", Rect{{win_w - 190, 6}, {84, 30}}, save_style)) do_save();
+            if (f.button("Load", Rect{{win_w - 100, 6}, {84, 30}})) do_load();
         }
 
-        y += 10.0f;
-        f.text("Models (assets/)", {14, y}, {.size = 14, .color = rgb(0.6f, 0.6f, 0.65f)});
-        y += 20.0f;
-        if (file_palette.empty()) {
-            f.text("None found under", {14, y}, {.size = 14, .color = rgb(0.5f, 0.5f, 0.5f)});
-            f.text("./assets", {14, y + 18}, {.size = 14, .color = rgb(0.5f, 0.5f, 0.5f)});
-            y += 40.0f;
-        } else {
-            for (const PaletteEntry& pe : file_palette) {
-                if (fitted_button(pe.label, y)) spawn(pe, shift);
-                y += 40.0f;
+        // ---- left panel: Outliner (hierarchy tree) ----
+        f.rect({0, TOP_H}, {LEFT_W, win_h - TOP_H - BOTTOM_H}, theme::panel);
+        f.text("Outliner", {12, TOP_H + 8}, {.size = 16, .color = theme::text_dim});
+        {
+            float y = TOP_H + 34.0f;
+            const float row_h = 26.0f;
+            if (all.empty()) {
+                f.text("Nothing in the scene yet —", {12, y}, {.size = 13, .color = theme::text_dim2});
+                f.text("spawn something below.", {12, y + 16}, {.size = 13, .color = theme::text_dim2});
+            }
+            for (const auto& [node, depth] : all) {
+                if (y > win_h - BOTTOM_H - row_h) break; // no scrolling — just stop, rather than draw off-panel
+                const bool is_selected = (node == selected);
+                if (is_selected) f.rect({0, y}, {LEFT_W, row_h}, rgba{theme::accent.r, theme::accent.g, theme::accent.b, 0.35f});
+                const std::string label = node->mesh_prim != Prim::None
+                    ? std::string(node->mesh.valid() ? "" : "(invalid) ") +
+                          (node->mesh_prim == Prim::Cube ? "Cube" : node->mesh_prim == Prim::Sphere ? "Sphere"
+                           : node->mesh_prim == Prim::Cylinder ? "Cylinder" : node->mesh_prim == Prim::Cone ? "Cone" : "Plane")
+                    : fs::path(node->mesh_path).stem().string();
+                const float indent = 12.0f + static_cast<float>(depth) * 16.0f;
+                const float row_w = LEFT_W - indent - 8.0f;
+                const std::string shown = label.empty() ? "(unnamed)" : label;
+                // The whole row is a click target (an invisible-background
+                // button spanning the panel width), so clicking anywhere on
+                // the row selects it, not just the label text itself.
+                ButtonStyle row_style;
+                row_style.bg = rgba{0, 0, 0, 0};
+                row_style.bg_hover = rgba{1, 1, 1, 0.06f};
+                row_style.bg_press = rgba{1, 1, 1, 0.1f};
+                row_style.text = is_selected ? white : rgb(0.82f, 0.82f, 0.82f);
+                row_style.text_size = 15.0f;
+                const vec2 measured = f.measure_text(shown, {.size = row_style.text_size});
+                if (measured.x > row_w - 8.0f) row_style.text_size *= (row_w - 8.0f) / measured.x;
+                if (f.button(shown, Rect{{indent, y}, {row_w, row_h}}, row_style)) {
+                    selected = node;
+                }
+                y += row_h;
             }
         }
 
-        // ---- sidebar: help + status, bottom-anchored ----
-        float hy = static_cast<float>(f.height) - 210.0f;
-        f.text("Left/Right: orbit   Up/Down: zoom", {14, hy}, {.size = 14});
-        f.text("WASD: move   R/F: height", {14, hy + 18}, {.size = 14});
-        f.text("Q/E: rotate   Z/X: scale", {14, hy + 36}, {.size = 14});
-        f.text("Tab: select next   Backspace: delete", {14, hy + 54}, {.size = 14});
-        f.text("Shift+click: spawn as child of selection", {14, hy + 72}, {.size = 14});
-        f.text("Ctrl+S: save   Ctrl+O: load", {14, hy + 90}, {.size = 14});
-        f.text("Props: " + std::to_string(all.size()), {14, hy + 118}, {.size = 14, .color = rgb(0.6f, 0.8f, 0.6f)});
-        if (selected) {
-            const std::string label = selected->mesh_prim != Prim::None
-                ? "primitive"
-                : fs::path(selected->mesh_path).stem().string();
-            std::string status = "Selected: " + label;
-            if (selected->child_count() > 0) status += " (+" + std::to_string(selected->child_count()) + " child)";
-            f.text(status, {14, hy + 136}, {.size = 14, .color = coral});
+        // ---- right panel: Inspector (selected node's transform) ----
+        f.rect({win_w - RIGHT_W, TOP_H}, {RIGHT_W, win_h - TOP_H - BOTTOM_H}, theme::panel);
+        {
+            const float px = win_w - RIGHT_W + 12.0f;
+            const float pw = RIGHT_W - 24.0f;
+            float y = TOP_H + 8.0f;
+            f.text("Inspector", {px, y}, {.size = 16, .color = theme::text_dim});
+            y += 26.0f;
+            if (!selected) {
+                f.text("Nothing selected.", {px, y}, {.size = 14, .color = theme::text_dim2});
+                f.text("Click a row in the Outliner,", {px, y + 20}, {.size = 13, .color = theme::text_dim2});
+                f.text("or a prop in the viewport's", {px, y + 36}, {.size = 13, .color = theme::text_dim2});
+                f.text("Tab-cycle order.", {px, y + 52}, {.size = 13, .color = theme::text_dim2});
+            } else {
+                const std::string kind = selected->mesh_prim != Prim::None ? "Primitive" : "Model";
+                f.text(kind, {px, y}, {.size = 13, .color = theme::accent});
+                y += 22.0f;
+
+                // A labeled X/Y/Z row with a live value readout and +/-
+                // steppers — Thistle has no text-input widget at all (see
+                // docs/ui-and-scenes.md), so this is the closest honest
+                // equivalent to Blender's/Unity's click-to-type number
+                // fields: precise, discoverable, no keyboard focus needed.
+                auto axis_row = [&](const char* label, float y_pos, float& value, float step, float min_value) {
+                    f.text(label, {px, y_pos + 6}, {.size = 13});
+                    f.text([&]{ char buf[32]; std::snprintf(buf, sizeof(buf), "%.2f", static_cast<double>(value)); return std::string(buf); }(),
+                           {px + 22, y_pos + 6}, {.size = 13, .color = rgb(0.85f, 0.85f, 0.85f)});
+                    ButtonStyle step_style;
+                    step_style.text_size = 16.0f;
+                    if (f.button("-", Rect{{px + pw - 64, y_pos}, {28, 24}}, step_style)) value = std::max(min_value, value - step);
+                    if (f.button("+", Rect{{px + pw - 30, y_pos}, {28, 24}}, step_style)) value += step;
+                };
+
+                f.text("Position", {px, y}, {.size = 13, .color = theme::text_dim});
+                y += 18.0f;
+                axis_row("X", y, selected->mesh_pos.x, 0.1f, -1000.0f); y += 28.0f;
+                axis_row("Y", y, selected->mesh_pos.y, 0.1f, -1000.0f); y += 28.0f;
+                axis_row("Z", y, selected->mesh_pos.z, 0.1f, -1000.0f); y += 34.0f;
+
+                f.text("Rotation (Y)", {px, y}, {.size = 13, .color = theme::text_dim});
+                y += 18.0f;
+                axis_row("Y", y, selected->mesh_rotation.y, 0.1745f, -1000.0f); y += 34.0f;
+
+                f.text("Scale", {px, y}, {.size = 13, .color = theme::text_dim});
+                y += 18.0f;
+                axis_row("X", y, selected->mesh_scale.x, 0.1f, 0.05f); y += 28.0f;
+                axis_row("Y", y, selected->mesh_scale.y, 0.1f, 0.05f); y += 28.0f;
+                axis_row("Z", y, selected->mesh_scale.z, 0.1f, 0.05f); y += 34.0f;
+
+                f.rect({px, y}, {24, 24}, selected->mesh_tint);
+                f.text("Tint", {px + 32, y + 4}, {.size = 13, .color = theme::text_dim});
+                y += 36.0f;
+
+                if (selected->child_count() > 0) {
+                    f.text("Children: " + std::to_string(selected->child_count()), {px, y}, {.size = 13, .color = theme::text_dim});
+                    y += 24.0f;
+                }
+
+                ButtonStyle delete_style;
+                delete_style.bg = rgb(0.35f, 0.16f, 0.14f);
+                delete_style.bg_hover = rgb(0.45f, 0.2f, 0.17f);
+                delete_style.bg_press = rgb(0.6f, 0.25f, 0.2f);
+                if (f.button("Delete", Rect{{px, y}, {pw, 30}}, delete_style)) {
+                    Node* parent = selected->parent() ? selected->parent() : scene.get();
+                    parent->remove_child(selected);
+                    selected = nullptr;
+                }
+            }
         }
+
+        // ---- bottom bar: spawnable palette (primitives + models) ----
+        f.rect({0, win_h - BOTTOM_H}, {win_w, BOTTOM_H}, theme::chrome);
+        {
+            const float item_w = 100.0f, item_h = 32.0f, gap = 8.0f;
+            const float label_y = win_h - BOTTOM_H + 6.0f;
+            const float row_y = label_y + 16.0f;
+            float x = 12.0f;
+
+            // f.button() doesn't wrap or clip text (no layout system, see
+            // docs/drawing.md) — a label longer than the button just draws
+            // past both edges, which is exactly the overlapping-text bug an
+            // earlier version of this redesign shipped with (Cylinder/
+            // Character-orc bled into their neighbors). Shrink to fit,
+            // starting from a sane base size instead of ButtonStyle's
+            // default 28 (much too large for a 100px-wide palette slot).
+            auto palette_button = [&](const PaletteEntry& pe, float bx, ButtonStyle style = {}) {
+                style.text_size = 15.0f;
+                const vec2 measured = f.measure_text(pe.label, {.size = style.text_size});
+                if (measured.x > item_w - 12.0f) style.text_size *= (item_w - 12.0f) / measured.x;
+                return f.button(pe.label, Rect{{bx, row_y}, {item_w, item_h}}, style);
+            };
+
+            f.text("PRIMITIVES", {x, label_y}, {.size = 11, .color = theme::text_dim});
+            for (const PaletteEntry& pe : primitives) {
+                ButtonStyle style;
+                style.bg_press = pe.tint;
+                if (palette_button(pe, x, style)) spawn(pe, shift);
+                x += item_w + gap;
+            }
+
+            x += 20.0f;
+            f.text("MODELS (assets/)", {x, label_y}, {.size = 11, .color = theme::text_dim});
+            if (file_palette.empty()) {
+                f.text("none found", {x, row_y + 8}, {.size = 13, .color = theme::text_dim2});
+            } else {
+                for (const PaletteEntry& pe : file_palette) {
+                    if (palette_button(pe, x)) spawn(pe, shift);
+                    x += item_w + gap;
+                }
+            }
+        }
+
+        // ---- compact keybinding hint, bottom-right corner of the viewport ----
+        f.text("WASD/R/F move   Q/E rotate   Z/X scale   Tab select   Shift+click: child of selection",
+               {LEFT_W + 12, win_h - BOTTOM_H - 20}, {.size = 12, .color = rgba{1, 1, 1, 0.5f}});
     });
 
     return app.run();

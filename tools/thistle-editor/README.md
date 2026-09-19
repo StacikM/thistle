@@ -12,17 +12,38 @@ thinnest real GUI on top of `save_scene()`/`load_scene()` — see
 on a `Node`" section for exactly what that captures (and doesn't). Use this for
 laying out props in a small 3D scene, not for building a shippable level.
 
+## Layout
+
+Outliner (hierarchy tree) on the left, Inspector (selected prop's transform)
+on the right, spawn palette along the bottom, a real viewport grid with
+colored X/Z axis lines instead of a flat ground plane, a wireframe cage
+around whatever's selected instead of a floating marker cube. This is a
+deliberate redesign toward how Blender/Unity actually lay their tools out —
+an real screenshot of Blender's default window (docs.blender.org's Window
+System Introduction page) was checked before writing it, not worked from
+memory. Adapted to what Thistle's immediate-mode UI actually has, though:
+there's no text-input widget anywhere in the engine, so the Inspector's
+Position/Rotation/Scale fields are a read-only number plus +/- stepper
+buttons rather than click-to-type boxes, and there's no orbiting 3D gizmo
+ball (no way to draw a fixed screen-space overlay independent of the main
+camera) — just the axis-colored grid lines for orientation instead.
+
 ## Building
+
+```bash
+thistle editor install   # build it and put `thistle-editor` on your PATH
+thistle editor run       # or just build+run it once, without installing
+```
+
+Or by hand, since it's a real Thistle project — it links the engine the same
+way a scaffolded game would (see the comment in `CMakeLists.txt`), just
+pointed at this repo's own engine two directories up instead of a copy:
 
 ```bash
 cd tools/thistle-editor
 cmake -S . -B build
 cmake --build build
 ```
-
-It's a real Thistle project — it links the engine the same way a scaffolded
-game would (see the comment in `CMakeLists.txt`), just pointed at this repo's
-own engine two directories up instead of a copy.
 
 ## Running
 
@@ -32,11 +53,12 @@ be launched from (double-clicking a `.app` in Finder starts it with an
 unrelated working directory, so this matters).
 
 **Primitives** (cube/sphere/cylinder/cone/plane) are always available, no
-assets required — click one in the sidebar to spawn it.
+assets required — click one in the bottom bar to spawn it.
 
 **Models**: the editor also scans `./assets` (relative to the built
-executable) for `.obj` files, recursively. For each one it resolves a texture
-by convention, since `load_mesh()` doesn't read `.mtl`:
+executable) for `.obj` files, recursively, shown in that same bottom bar next
+to the primitives. For each one it resolves a texture by convention, since
+`load_mesh()` doesn't read `.mtl`:
 
 1. A same-basename `.png` next to the `.obj` (`chest.obj` → `chest.png`), else
 2. a shared `atlas.png` or `colormap.png` in that same folder (the common case
