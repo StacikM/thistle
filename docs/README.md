@@ -7,6 +7,7 @@ You want to make a game, not read a novel. Here's the map:
 - [ui-and-scenes.md](ui-and-scenes.md) — immediate-mode widgets, `Menu`, the `Node` scene graph, particles, tilemaps, `App::scene`, and the optional Dear ImGui debug UI.
 - [input-and-audio.md](input-and-audio.md) — keyboard, mouse, touch, gamepad, sound, music, and 3D positional sound.
 - [physics.md](physics.md) — the Box2D wrapper. 2D only. Read the caveats before you build something that needs them.
+- [animation.md](animation.md) — skeletal animation: animated glTF characters, crossfades, attaching things to joints, and skeletons built in code.
 - [physics3d.md](physics3d.md) — opt-in 3D rigid bodies on Jolt (`three::Physics3D`) and Teardown-style voxel destruction (`VoxelDestruction`): turning it on, colliders, triggers, what falls and why, and exactly what's been verified where.
 - [platform-and-networking.md](platform-and-networking.md) — save data, HTTP, clipboard, haptics, text input, logging, platform queries.
 - [networking.md](networking.md) — realtime client/server (Mirror-flavored `NetVar`/Command/ClientRpc over TCP), multiplayer block worlds (`VoxelSync`) and smoothing remote movement. Read the scope section before you plan a game around it.

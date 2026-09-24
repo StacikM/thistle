@@ -1491,6 +1491,10 @@ struct Vertex {
     vec3 normal{0.0f, 1.0f, 0.0f};
     vec2 uv;
     rgba color = white; // multiplied into the material color: this is how vertex-colored low-poly models get their colors
+    // Skinning (from glTF): up to 4 skeleton joints (indices, as floats) and
+    // how much each one moves this vertex. All-zero weights: not skinned.
+    vec4 joints;
+    vec4 weights;
 };
 
 // Geometry on the CPU side: build or edit it however you like, then turn it
@@ -1563,6 +1567,37 @@ Model make_model(const MeshData& mesh, const Material& material = {});
 
 // What a model file contains, parsed but not yet on the GPU: edit it (recolor
 // a part, merge parts, bake it into something else) and then make_model() it.
+// The bones of an animated model (glTF skins). Joints are listed with
+// their parents; a vertex's Vertex::joints index into this list.
+struct Skeleton {
+    struct Joint {
+        std::string name;
+        int parent = -1;   // index into joints; -1 for a root
+        Transform rest;    // relative to the parent, when nothing is animating it
+        mat4 inverse_bind; // from the model's space to the joint's, as the mesh was modeled
+        mat4 root_offset;  // roots only: where the root's parent (an armature node, say) puts it
+    };
+    std::vector<Joint> joints;
+    bool empty() const { return joints.empty(); }
+    int find(const std::string& name) const; // -1 if there's none by that name
+};
+
+// One animation (walk, run, wave): keyframes for joints' position,
+// rotation and scale over time.
+struct AnimationClip {
+    struct Channel {
+        enum class Path { Translation, Rotation, Scale };
+        int joint = -1;
+        Path path = Path::Rotation;
+        bool step = false;         // jump between keyframes instead of blending
+        std::vector<float> times;  // seconds, increasing
+        std::vector<vec4> values;  // xyz (rotations: xyzw)
+    };
+    std::string name;
+    float duration = 0.0f;
+    std::vector<Channel> channels;
+};
+
 struct ModelData {
     struct Part {
         std::string name;
@@ -1571,6 +1606,8 @@ struct ModelData {
         mat4 transform; // where the part sits in the model (from the file's node hierarchy)
     };
     std::vector<Part> parts;
+    Skeleton skeleton;                    // empty unless the model is skinned
+    std::vector<AnimationClip> animations;
     bool empty() const { return parts.empty(); }
     Bounds bounds() const;
 };
@@ -1588,6 +1625,75 @@ Bounds model_bounds(Model model);       // in the model's own space
 int model_part_count(Model model);
 Material model_material(Model model, int part = 0);
 void set_model_material(Model model, const Material& material, int part = -1); // -1 = every part
+
+// --- skeletal animation ------------------------------------------------------------
+// Animated glTF characters: a model with a skeleton and animation clips
+// (walk, run, idle, wave...), and an Animator per character that plays
+// them. Drawn without an Animator, a skinned model stands in its rest pose.
+//
+//   Model fox = load_model("assets/Fox.glb");
+//   Animator anim(fox);
+//   anim.play("Walk");
+//   // every frame:
+//   anim.update(f.dt);
+//   world.draw(fox, fox_transform, anim);
+
+const Skeleton* model_skeleton(Model model); // nullptr if it has none
+int model_animation_count(Model model);
+const AnimationClip* model_animation(Model model, int index);
+int find_animation(Model model, const std::string& name); // -1 if there's none by that name
+
+// One character's playback: which clip, how far into it, and the pose that
+// results. Cheap to make; one per character, even when they share a Model.
+class Animator {
+public:
+    float speed = 1.0f; // playback rate: 2 = double speed, negative = backwards
+
+    Animator() = default;
+    explicit Animator(Model model);
+
+    // Switch to a clip, blending from what was playing over `fade` seconds
+    // (0 = cut). Playing the clip that's already playing does nothing, so
+    // it's fine to call every frame: anim.play(moving ? "Run" : "Idle").
+    void play(const std::string& clip, float fade = 0.2f, bool loop = true);
+    void play(int clip, float fade = 0.2f, bool loop = true);
+    void stop(float fade = 0.2f); // back to the rest pose
+    void update(float dt);
+
+    int clip() const { return clip_; }      // -1: none
+    std::string clip_name() const;
+    float time() const { return time_; }    // seconds into the clip
+    void set_time(float seconds);
+    bool finished() const;                  // a non-looping clip reached its end
+
+    // Where a joint is right now, in the model's own space (multiply by the
+    // character's transform for the world): hold a sword, attach a hat.
+    int find_joint(const std::string& name) const;
+    mat4 joint_matrix(int joint) const;
+    Transform joint_transform(int joint) const;
+
+    Model model() const { return model_; }
+    // Per joint: from the rest mesh to the current pose (what skinning uses).
+    const std::vector<mat4>& skin_matrices() const { return skin_; }
+
+private:
+    struct Local {
+        vec3 t;
+        quat r;
+        vec3 s{1.0f, 1.0f, 1.0f};
+    };
+    void evaluate();
+    void sample(int clip, float time, std::vector<Local>& out) const;
+
+    Model model_;
+    int clip_ = -1, from_clip_ = -1;
+    float time_ = 0.0f, from_time_ = 0.0f;
+    bool loop_ = true, from_loop_ = true;
+    float fade_ = 0.0f, fade_length_ = 0.0f; // blending from from_clip_ while fade_ < fade_length_
+    std::vector<int> order_;                  // joints, parents before children
+    std::vector<Local> pose_, from_pose_;
+    std::vector<mat4> global_, skin_;
+};
 
 // --- rays & picking -------------------------------------------------------------
 
@@ -1902,6 +2008,8 @@ public:
     void draw(Terrain& terrain);
     // Same, but every part of the model uses `material` instead of its own.
     void draw(Model model, const Transform& transform, const Material& material);
+    // An animated model in the Animator's current pose.
+    void draw(Model model, const Transform& transform, const Animator& pose, rgba tint = white);
 
     // Quick shapes, no Model needed (they share built-in unit meshes).
     void box(vec3 center, vec3 size, rgba color = white);

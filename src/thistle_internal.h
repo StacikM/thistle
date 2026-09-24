@@ -42,6 +42,12 @@ struct VoxelWorldAccess {
     static void chunks(const three::VoxelWorld& world, std::vector<std::pair<three::ivec3, uint64_t>>& out);
 };
 
+// --- implemented in three_anim.cpp ---
+// A matrix back into translation, rotation and scale (no shear).
+void decompose(const three::mat4& m, vec3& translation, three::quat& rotation, vec3& scale);
+// The skinning matrices of a skeleton standing in its rest pose.
+void rest_skin_matrices(const three::Skeleton& skeleton, std::vector<three::mat4>& out);
+
 // --- implemented in three_collider.cpp ---
 // One chunk's solid blocks merged into boxes: block min (inclusive) and max
 // (exclusive), in the world's block coordinates. Appends to `out`.

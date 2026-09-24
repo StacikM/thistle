@@ -185,6 +185,7 @@ add_library(thistle STATIC
     src/three_destruction.cpp
     src/three_audio.cpp
     src/three_net.cpp
+    src/three_anim.cpp
     src/cgltf_impl.c
     src/sokol_impl.c
     src/stb_impl.c
@@ -398,6 +399,16 @@ if(THISTLE_BUILD_SMOKETEST)
         endif()
     endif()
 
+    # Skeletal animation: a robot crowd built in code, or any animated glTF.
+    add_executable(thistle_animation_demo examples/animation_demo.cpp)
+    target_link_libraries(thistle_animation_demo PRIVATE thistle)
+    if(WIN32)
+        set_target_properties(thistle_animation_demo PROPERTIES WIN32_EXECUTABLE ON)
+        if(MSVC)
+            target_link_options(thistle_animation_demo PRIVATE "/ENTRY:mainCRTStartup")
+        endif()
+    endif()
+
     # VoxelSync: a multiplayer block world (a dedicated server + players).
     add_executable(thistle_mp_demo examples/voxel_mp_demo.cpp)
     target_link_libraries(thistle_mp_demo PRIVATE thistle)
@@ -485,6 +496,10 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_voxelnet_smoketest examples/voxelnet_smoketest.cpp)
     target_link_libraries(thistle_voxelnet_smoketest PRIVATE thistle)
 
+    # Skeletal animation against a skinned glTF the test writes itself.
+    add_executable(thistle_animation_smoketest examples/animation_smoketest.cpp)
+    target_link_libraries(thistle_animation_smoketest PRIVATE thistle)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -529,4 +544,6 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(audio3d_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME voxelnet_smoketest COMMAND thistle_voxelnet_smoketest)
     set_tests_properties(voxelnet_smoketest PROPERTIES TIMEOUT 60)
+    add_test(NAME animation_smoketest COMMAND thistle_animation_smoketest)
+    set_tests_properties(animation_smoketest PROPERTIES TIMEOUT 30)
 endif()
