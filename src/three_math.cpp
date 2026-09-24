@@ -1,5 +1,6 @@
 #include <thistle.hpp>
 
+#include <algorithm>
 #include <cmath>
 
 namespace thistle {
@@ -262,6 +263,145 @@ mat4 inverse(const mat4& a) {
     mat4 r;
     for (int i = 0; i < 16; ++i) r.m[i] = inv[i] / det;
     return r;
+}
+
+RaycastHit raycast(const Ray& ray, const Bounds& box, float max_distance) {
+    RaycastHit hit;
+    if (!box.valid()) return hit;
+    float t_near = -no_limit, t_far = no_limit;
+    int near_axis = 0;
+    float near_sign = 1.0f;
+    const float o[3] = {ray.origin.x, ray.origin.y, ray.origin.z};
+    const float d[3] = {ray.direction.x, ray.direction.y, ray.direction.z};
+    const float lo[3] = {box.min.x, box.min.y, box.min.z};
+    const float hi[3] = {box.max.x, box.max.y, box.max.z};
+    for (int axis = 0; axis < 3; ++axis) {
+        if (std::fabs(d[axis]) < 1e-12f) {
+            if (o[axis] < lo[axis] || o[axis] > hi[axis]) return hit;
+            continue;
+        }
+        float t1 = (lo[axis] - o[axis]) / d[axis];
+        float t2 = (hi[axis] - o[axis]) / d[axis];
+        float sign = -1.0f; // entering through the min face means the normal points to -axis
+        if (t1 > t2) { std::swap(t1, t2); sign = 1.0f; }
+        if (t1 > t_near) { t_near = t1; near_axis = axis; near_sign = sign; }
+        t_far = std::fmin(t_far, t2);
+        if (t_near > t_far) return hit;
+    }
+    if (t_far < 0.0f) return hit;
+    const bool inside = t_near < 0.0f;
+    const float t = inside ? t_far : t_near;
+    if (t > max_distance) return hit;
+    hit.hit = true;
+    hit.distance = t;
+    hit.point = ray.at(t);
+    float n[3] = {0.0f, 0.0f, 0.0f};
+    n[near_axis] = near_sign;
+    hit.normal = inside ? -thistle::normalize(ray.direction) : vec3{n[0], n[1], n[2]};
+    return hit;
+}
+
+RaycastHit raycast_sphere(const Ray& ray, vec3 center, float radius, float max_distance) {
+    RaycastHit hit;
+    const vec3 oc = ray.origin - center;
+    const float b = dot(oc, ray.direction);
+    const float c = dot(oc, oc) - radius * radius;
+    const float disc = b * b - c;
+    if (disc < 0.0f) return hit;
+    const float sq = std::sqrt(disc);
+    float t = -b - sq;
+    if (t < 0.0f) t = -b + sq; // starting inside the sphere
+    if (t < 0.0f || t > max_distance) return hit;
+    hit.hit = true;
+    hit.distance = t;
+    hit.point = ray.at(t);
+    hit.normal = thistle::normalize(hit.point - center);
+    if (c < 0.0f) hit.normal = -hit.normal;
+    return hit;
+}
+
+RaycastHit raycast_plane(const Ray& ray, vec3 point_on_plane, vec3 plane_normal, float max_distance) {
+    RaycastHit hit;
+    const vec3 n = thistle::normalize(plane_normal);
+    const float denom = dot(n, ray.direction);
+    if (std::fabs(denom) < 1e-9f) return hit;
+    const float t = dot(point_on_plane - ray.origin, n) / denom;
+    if (t < 0.0f || t > max_distance) return hit;
+    hit.hit = true;
+    hit.distance = t;
+    hit.point = ray.at(t);
+    hit.normal = denom < 0.0f ? n : -n;
+    return hit;
+}
+
+RaycastHit raycast_triangle(const Ray& ray, vec3 a, vec3 b, vec3 c, float max_distance) {
+    // Moller-Trumbore.
+    RaycastHit hit;
+    const vec3 e1 = b - a, e2 = c - a;
+    const vec3 p = cross(ray.direction, e2);
+    const float det = dot(e1, p);
+    if (std::fabs(det) < 1e-12f) return hit;
+    const float inv = 1.0f / det;
+    const vec3 s = ray.origin - a;
+    const float u = dot(s, p) * inv;
+    if (u < 0.0f || u > 1.0f) return hit;
+    const vec3 q = cross(s, e1);
+    const float v = dot(ray.direction, q) * inv;
+    if (v < 0.0f || u + v > 1.0f) return hit;
+    const float t = dot(e2, q) * inv;
+    if (t < 0.0f || t > max_distance) return hit;
+    hit.hit = true;
+    hit.distance = t;
+    hit.point = ray.at(t);
+    const vec3 n = thistle::normalize(cross(e1, e2));
+    hit.normal = det > 0.0f ? n : -n;
+    return hit;
+}
+
+Frustum Frustum::from_matrix(const mat4& m) {
+    // Gribb/Hartmann: each plane is the 4th row of the matrix plus or minus
+    // one of the others, for OpenGL's -w <= x,y,z <= w clip volume.
+    auto row = [&](int r) { return vec4{m(r, 0), m(r, 1), m(r, 2), m(r, 3)}; };
+    const vec4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
+    auto add = [](vec4 a, vec4 b, float sign) { return vec4{a.x + sign * b.x, a.y + sign * b.y, a.z + sign * b.z, a.w + sign * b.w}; };
+    Frustum f;
+    f.planes[0] = add(r3, r0, 1.0f);  // left
+    f.planes[1] = add(r3, r0, -1.0f); // right
+    f.planes[2] = add(r3, r1, 1.0f);  // bottom
+    f.planes[3] = add(r3, r1, -1.0f); // top
+    f.planes[4] = add(r3, r2, 1.0f);  // near
+    f.planes[5] = add(r3, r2, -1.0f); // far
+    for (vec4& p : f.planes) {
+        const float len = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+        if (len > 1e-12f) p = {p.x / len, p.y / len, p.z / len, p.w / len};
+    }
+    return f;
+}
+
+bool Frustum::contains(vec3 p) const {
+    for (const vec4& pl : planes) {
+        if (pl.x * p.x + pl.y * p.y + pl.z * p.z + pl.w < 0.0f) return false;
+    }
+    return true;
+}
+
+bool Frustum::intersects(const Bounds& box) const {
+    if (!box.valid()) return false;
+    for (const vec4& pl : planes) {
+        // The box corner furthest along the plane's inward normal: if even
+        // that one is outside, the whole box is.
+        const vec3 far_corner{pl.x >= 0.0f ? box.max.x : box.min.x, pl.y >= 0.0f ? box.max.y : box.min.y,
+                              pl.z >= 0.0f ? box.max.z : box.min.z};
+        if (pl.x * far_corner.x + pl.y * far_corner.y + pl.z * far_corner.z + pl.w < 0.0f) return false;
+    }
+    return true;
+}
+
+bool Frustum::intersects_sphere(vec3 c, float radius) const {
+    for (const vec4& pl : planes) {
+        if (pl.x * c.x + pl.y * c.y + pl.z * c.z + pl.w < -radius) return false;
+    }
+    return true;
 }
 
 Transform operator*(const Transform& parent, const Transform& child) {

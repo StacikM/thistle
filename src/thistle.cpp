@@ -305,6 +305,8 @@ struct EngineState {
     float mouse_x = 0.0f;
     float mouse_y = 0.0f;
     float scroll_y = 0.0f; // accumulated this frame, reset after each frame like key_pressed
+    float mouse_dx = 0.0f; // same, for relative movement
+    float mouse_dy = 0.0f;
 
     bool text_capturing = false;   // on-screen keyboard active, accumulating chars
     std::string text_buffer;
@@ -887,6 +889,8 @@ void frame_cb() {
     for (bool& p : g_state->key_pressed) p = false;
     for (bool& p : g_state->mouse_pressed) p = false;
     g_state->scroll_y = 0.0f;
+    g_state->mouse_dx = 0.0f;
+    g_state->mouse_dy = 0.0f;
 }
 
 void cleanup_cb() {
@@ -946,6 +950,8 @@ void event_cb(const sapp_event* e) {
         case SAPP_EVENTTYPE_MOUSE_MOVE:
             g_state->mouse_x = e->mouse_x;
             g_state->mouse_y = e->mouse_y;
+            g_state->mouse_dx += e->mouse_dx;
+            g_state->mouse_dy += e->mouse_dy;
             break;
         case SAPP_EVENTTYPE_MOUSE_SCROLL:
             g_state->scroll_y += e->scroll_y;
@@ -1247,6 +1253,10 @@ bool Frame::mouse_pressed(Mouse b) const {
 
 float Frame::mouse_scroll() const {
     return g_state->scroll_y;
+}
+
+vec2 Frame::mouse_delta() const {
+    return vec2{g_state->mouse_dx, g_state->mouse_dy};
 }
 
 bool Frame::touching() const {
@@ -2162,6 +2172,17 @@ void push_log(const char* level, const std::string& msg) {
 void log_info(const std::string& msg)  { push_log("[info] ", msg); }
 void log_warn(const std::string& msg)  { push_log("[warn] ", msg); }
 void log_error(const std::string& msg) { push_log("[error] ", msg); }
+
+void lock_mouse(bool locked) { sapp_lock_mouse(locked); }
+bool mouse_locked() { return sapp_mouse_locked(); }
+void show_mouse(bool visible) { sapp_show_mouse(visible); }
+
+void set_fullscreen(bool fullscreen) {
+    if (sapp_is_fullscreen() != fullscreen) sapp_toggle_fullscreen();
+}
+bool is_fullscreen() { return sapp_is_fullscreen(); }
+
+void quit() { sapp_request_quit(); }
 
 void set_clipboard(const std::string& text) {
 #if defined(__APPLE__)

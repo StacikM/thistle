@@ -312,9 +312,17 @@ enum class Key {
     Num0 = 48, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9,
     A = 65, B, C, D, E, F, G, H, I, J, K, L, M,
     N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
-    Escape = 256, Enter = 257, Tab = 258, Backspace = 259,
+    Apostrophe = 39, Comma = 44, Minus = 45, Period = 46, Slash = 47,
+    Semicolon = 59, Equal = 61, LeftBracket = 91, Backslash = 92, RightBracket = 93,
+    Grave = 96, // the ` / ~ key: the traditional debug-console key
+    Escape = 256, Enter = 257, Tab = 258, Backspace = 259, Insert = 260, Delete = 261,
     Right = 262, Left = 263, Down = 264, Up = 265,
-    LeftShift = 340, LeftControl = 341, LeftAlt = 342,
+    PageUp = 266, PageDown = 267, Home = 268, End = 269, CapsLock = 280,
+    F1 = 290, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+    Keypad0 = 320, Keypad1, Keypad2, Keypad3, Keypad4, Keypad5, Keypad6, Keypad7, Keypad8, Keypad9,
+    KeypadDecimal = 330, KeypadDivide, KeypadMultiply, KeypadSubtract, KeypadAdd, KeypadEnter,
+    LeftShift = 340, LeftControl = 341, LeftAlt = 342, LeftSuper = 343,
+    RightShift = 344, RightControl = 345, RightAlt = 346, RightSuper = 347,
 };
 
 enum class Mouse { Left = 0, Right = 1, Middle = 2 };
@@ -460,6 +468,10 @@ public:
     bool key_down(Key k) const;
     bool key_pressed(Key k) const;
     vec2 mouse() const; // cursor position in pixels
+    // How far the mouse moved this frame, in pixels. Keeps working while the
+    // mouse is locked (lock_mouse()), when mouse() itself stops changing —
+    // that's what mouse-look in a first-person game reads.
+    vec2 mouse_delta() const;
     bool mouse_down(Mouse b) const;
     bool mouse_pressed(Mouse b) const;
     // Vertical scroll wheel/trackpad delta accumulated this frame (positive =
@@ -547,6 +559,20 @@ void log_error(const std::string& msg);
 
 // Copy text to the system clipboard (where the platform supports it).
 void set_clipboard(const std::string& text);
+
+// Hides the cursor and keeps it inside the window, so the mouse can turn a
+// first-person camera forever without hitting the screen edge; read
+// Frame::mouse_delta() for the movement. The OS may unlock it on its own
+// (e.g. when the window loses focus) — check mouse_locked().
+void lock_mouse(bool locked);
+bool mouse_locked();
+void show_mouse(bool visible);
+
+void set_fullscreen(bool fullscreen);
+bool is_fullscreen();
+
+// Closes the window at the end of this frame (App::run() then returns).
+void quit();
 
 // Trigger device haptic feedback (iOS only; a no-op elsewhere).
 enum class Haptic { Light, Medium, Heavy, Success };
@@ -1493,6 +1519,42 @@ int model_part_count(Model model);
 Material model_material(Model model, int part = 0);
 void set_model_material(Model model, const Material& material, int part = -1); // -1 = every part
 
+// --- rays & picking -------------------------------------------------------------
+
+struct Ray {
+    vec3 origin;
+    vec3 direction{0.0f, 0.0f, -1.0f}; // keep it normalized: hit distances are in these units
+    vec3 at(float distance) const { return origin + direction * distance; }
+};
+
+struct RaycastHit {
+    bool hit = false;
+    float distance = 0.0f; // along the ray
+    vec3 point;
+    vec3 normal;           // surface normal at the hit, facing back toward the ray
+    explicit operator bool() const { return hit; }
+};
+
+inline constexpr float no_limit = 1e30f;
+
+RaycastHit raycast(const Ray& ray, const Bounds& box, float max_distance = no_limit);
+// Exact: tests every triangle of every part (after a cheap bounds check).
+RaycastHit raycast(const Ray& ray, Model model, const Transform& transform, float max_distance = no_limit);
+RaycastHit raycast_sphere(const Ray& ray, vec3 center, float radius, float max_distance = no_limit);
+RaycastHit raycast_plane(const Ray& ray, vec3 point_on_plane, vec3 plane_normal, float max_distance = no_limit);
+RaycastHit raycast_triangle(const Ray& ray, vec3 a, vec3 b, vec3 c, float max_distance = no_limit); // both sides
+
+// The 6 planes of what a camera can see. The renderer uses it to skip
+// objects that are off-screen; you can use it for the same thing (e.g. to
+// not bother updating the animation of something nobody can see).
+struct Frustum {
+    vec4 planes[6]; // xyz = inward normal, w = distance
+    static Frustum from_matrix(const mat4& view_proj); // OpenGL-style clip space, like mat4::perspective
+    bool contains(vec3 point) const;
+    bool intersects(const Bounds& box) const;
+    bool intersects_sphere(vec3 center, float radius) const;
+};
+
 // --- camera --------------------------------------------------------------------
 
 struct Camera {
@@ -1510,6 +1572,72 @@ struct Camera {
     vec3 up() const { return rotation.up(); }
     mat4 view() const;
     mat4 projection(float aspect) const;
+    Frustum frustum(float aspect) const;
+
+    // The ray from the camera through a pixel (top-left origin, y down, same
+    // as Frame::mouse()) — this is mouse picking: raycast it at your objects.
+    Ray screen_ray(vec2 pixel, const Frame& f) const;
+    Ray screen_ray(vec2 pixel, Rect viewport) const;
+    // Where a world point lands on screen, in pixels. False (and `out` left
+    // alone) if the point is behind the camera. Health bars, nameplates.
+    bool world_to_screen(vec3 point, const Frame& f, vec2& out) const;
+    bool world_to_screen(vec3 point, Rect viewport, vec2& out) const;
+};
+
+// --- camera controllers -----------------------------------------------------------
+// Each one reads input from the Frame and moves a Camera; call update() once
+// per frame before rendering. They're plain structs: read or set any field
+// (e.g. point MouseLook's yaw at a spawn direction) whenever you like.
+
+// First-person look: mouse (while captured) and the gamepad's right stick
+// turn the camera. With capture_mouse, clicking the window captures the
+// mouse and Escape releases it; otherwise it turns while the right button is held.
+struct MouseLook {
+    float yaw = 0.0f;   // radians, positive = turned left
+    float pitch = 0.0f; // radians, positive = looking up
+    float sensitivity = 0.0025f; // radians per pixel of mouse movement
+    float stick_speed = 2.5f;    // radians per second at full right-stick
+    float max_pitch = radians(89.0f);
+    bool invert_y = false;
+    bool capture_mouse = true;
+
+    void update(Camera& camera, const Frame& f);
+    // WASD / arrow keys / left stick as a flat (y = 0) world-space direction
+    // relative to where you're facing, length 0..1 — feed it to your
+    // character's movement.
+    vec3 move_input(const Frame& f) const;
+    vec3 forward_flat() const; // facing direction with y = 0
+};
+
+// A free-flying noclip camera: MouseLook plus WASD to move, E/Space up,
+// Q/Ctrl down, Shift for speed. The debug/editor camera.
+struct FlyCamera {
+    MouseLook look;
+    float speed = 8.0f; // units per second
+    float boost = 4.0f; // speed multiplier while Shift is held
+
+    void update(Camera& camera, const Frame& f);
+};
+
+// Circles around a target point. Right-drag orbits, scroll zooms, middle-drag
+// (or Shift+right-drag) pans. For a third-person game, set `target` to the
+// player every frame and turn on capture_mouse to orbit without a button.
+struct OrbitCamera {
+    vec3 target{0.0f, 0.0f, 0.0f};
+    float distance = 8.0f;
+    float yaw = radians(25.0f);   // radians around the target, 0 = camera on the +Z side
+    float pitch = radians(25.0f); // radians above the target (negative = below)
+    float min_distance = 0.5f;
+    float max_distance = 200.0f;
+    float min_pitch = radians(-85.0f);
+    float max_pitch = radians(85.0f);
+    float sensitivity = 0.006f;   // radians per pixel
+    float zoom_speed = 0.12f;     // fraction of the distance per scroll step
+    bool allow_pan = true;
+    bool capture_mouse = false;
+
+    void update(Camera& camera, const Frame& f);
+    void apply(Camera& camera) const; // just position the camera, no input
 };
 
 // --- world -----------------------------------------------------------------------
@@ -1535,6 +1663,7 @@ struct Sky {
 struct RenderStats {
     int draw_calls = 0;
     int triangles = 0;
+    int culled = 0; // model parts skipped because they were off-screen
 };
 
 // A 3D scene. Settings (sun, sky, ambient) stay until you change them; draw
@@ -1572,6 +1701,14 @@ public:
     void cylinder(vec3 center, float radius, float height, rgba color = white);
     void cone(vec3 center, float radius, float height, rgba color = white);
     void plane(vec3 center, vec2 size, rgba color = white);
+
+    // Debug lines: 1 pixel wide, unlit. on_top draws them through everything
+    // (gizmos, selection outlines); otherwise they're hidden behind solid objects.
+    void line(vec3 a, vec3 b, rgba color = white, bool on_top = false);
+    void wire_box(const Bounds& box, rgba color = white, bool on_top = false);
+    void wire_box(const Transform& transform, rgba color = white, bool on_top = false); // a unit cube, transformed
+    void wire_sphere(vec3 center, float radius, rgba color = white, bool on_top = false);
+    void grid(vec3 center, float size, float spacing = 1.0f, rgba color = rgba{1.0f, 1.0f, 1.0f, 0.25f});
 
     void render(const Frame& f, const Camera& camera);
     void render(const Frame& f, const Camera& camera, Rect viewport); // viewport in pixels, top-left origin
