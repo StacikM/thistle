@@ -331,16 +331,19 @@ struct GltfLoader {
         return out;
     }
 
-    bool read_primitive(const cgltf_primitive& prim, MeshData& mesh) {
+    bool read_primitive(const cgltf_primitive& prim, MeshData& mesh, bool skinned) {
         if (prim.type != cgltf_primitive_type_triangles) return false;
-        const cgltf_accessor *pos = nullptr, *nrm = nullptr, *uv = nullptr, *col = nullptr;
+        const cgltf_accessor *pos = nullptr, *nrm = nullptr, *uv = nullptr, *col = nullptr, *jnt = nullptr, *wgt = nullptr;
         for (cgltf_size i = 0; i < prim.attributes_count; ++i) {
             const cgltf_attribute& a = prim.attributes[i];
             if (a.type == cgltf_attribute_type_position) pos = a.data;
             else if (a.type == cgltf_attribute_type_normal) nrm = a.data;
             else if (a.type == cgltf_attribute_type_texcoord && a.index == 0) uv = a.data;
             else if (a.type == cgltf_attribute_type_color && a.index == 0) col = a.data;
+            else if (a.type == cgltf_attribute_type_joints && a.index == 0) jnt = a.data;
+            else if (a.type == cgltf_attribute_type_weights && a.index == 0) wgt = a.data;
         }
+        if (!skinned) jnt = wgt = nullptr;
         if (!pos || pos->count == 0) return false;
         mesh.vertices.resize(pos->count);
         for (cgltf_size i = 0; i < pos->count; ++i) {
@@ -354,6 +357,13 @@ struct GltfLoader {
                 f[3] = 1.0f;
                 cgltf_accessor_read_float(col, i, f, cgltf_num_components(col->type));
                 v.color = linear_to_srgb(rgba{f[0], f[1], f[2], f[3]});
+            }
+            if (jnt && wgt) {
+                float j[4] = {0, 0, 0, 0}, w[4] = {0, 0, 0, 0};
+                cgltf_accessor_read_float(jnt, i, j, 4); // joint indices come back as their plain values
+                cgltf_accessor_read_float(wgt, i, w, 4);
+                v.joints = {j[0], j[1], j[2], j[3]};
+                v.weights = {w[0], w[1], w[2], w[3]};
             }
         }
         if (prim.indices) {
@@ -370,25 +380,108 @@ struct GltfLoader {
         return true;
     }
 
+    const cgltf_skin* skin = nullptr; // the one skin this model is animated by (the file's first)
+    bool warned_other_skin = false;
+
     void add_node(const cgltf_node* node, ModelData& data) {
         if (node->mesh) {
             float world[16];
             cgltf_node_transform_world(node, world);
             mat4 m;
             std::memcpy(m.m, world, sizeof(world));
+            const bool skinned = node->skin && node->skin == skin;
+            if (node->skin && !skinned && !warned_other_skin) {
+                warned_other_skin = true;
+                log_warn("load_model: this file has more than one skin; meshes on the others are loaded unanimated");
+            }
             for (cgltf_size p = 0; p < node->mesh->primitives_count; ++p) {
                 const cgltf_primitive& prim = node->mesh->primitives[p];
                 ModelData::Part part;
-                if (!read_primitive(prim, part.mesh)) continue;
+                if (!read_primitive(prim, part.mesh, skinned)) continue;
                 part.name = node->name ? node->name : (node->mesh->name ? node->mesh->name : "");
                 part.material = material_for(prim.material);
-                part.transform = m;
+                // glTF: a skinned mesh's own node transform doesn't apply;
+                // its joints place it. (Applying it put Fox.glb in the wrong spot.)
+                part.transform = skinned ? mat4{} : m;
                 data.parts.push_back(std::move(part));
             }
         }
         for (cgltf_size c = 0; c < node->children_count; ++c) add_node(node->children[c], data);
     }
 };
+
+mat4 node_world(const cgltf_node* node) {
+    mat4 m;
+    if (node) cgltf_node_transform_world(node, m.m);
+    return m;
+}
+
+int joint_index(const cgltf_skin& skin, const cgltf_node* node) {
+    for (cgltf_size i = 0; i < skin.joints_count; ++i) {
+        if (skin.joints[i] == node) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+void read_skeleton(const cgltf_skin& skin, Skeleton& out) {
+    out.joints.resize(skin.joints_count);
+    for (cgltf_size i = 0; i < skin.joints_count; ++i) {
+        const cgltf_node* node = skin.joints[i];
+        Skeleton::Joint& j = out.joints[i];
+        j.name = node->name ? node->name : "joint " + std::to_string(i);
+        j.parent = node->parent ? joint_index(skin, node->parent) : -1;
+        if (j.parent < 0) j.root_offset = node_world(node->parent); // armature nodes above the skeleton
+        if (node->has_matrix) {
+            mat4 m;
+            std::memcpy(m.m, node->matrix, sizeof(m.m));
+            detail::decompose(m, j.rest.position, j.rest.rotation, j.rest.scale);
+        } else {
+            if (node->has_translation) j.rest.position = {node->translation[0], node->translation[1], node->translation[2]};
+            if (node->has_rotation) j.rest.rotation = quat(node->rotation[0], node->rotation[1], node->rotation[2], node->rotation[3]);
+            if (node->has_scale) j.rest.scale = {node->scale[0], node->scale[1], node->scale[2]};
+        }
+        if (skin.inverse_bind_matrices) cgltf_accessor_read_float(skin.inverse_bind_matrices, i, j.inverse_bind.m, 16);
+    }
+}
+
+void read_animations(const cgltf_data& gltf, const cgltf_skin& skin, std::vector<AnimationClip>& out) {
+    for (cgltf_size a = 0; a < gltf.animations_count; ++a) {
+        const cgltf_animation& anim = gltf.animations[a];
+        AnimationClip clip;
+        clip.name = anim.name ? anim.name : "animation " + std::to_string(a);
+        for (cgltf_size c = 0; c < anim.channels_count; ++c) {
+            const cgltf_animation_channel& ch = anim.channels[c];
+            const int joint = joint_index(skin, ch.target_node);
+            if (joint < 0 || !ch.sampler || !ch.sampler->input || !ch.sampler->output) continue; // non-joint nodes, morph weights: not supported
+            AnimationClip::Channel out_ch;
+            out_ch.joint = joint;
+            int comps = 3;
+            switch (ch.target_path) {
+                case cgltf_animation_path_type_translation: out_ch.path = AnimationClip::Channel::Path::Translation; break;
+                case cgltf_animation_path_type_rotation: out_ch.path = AnimationClip::Channel::Path::Rotation; comps = 4; break;
+                case cgltf_animation_path_type_scale: out_ch.path = AnimationClip::Channel::Path::Scale; break;
+                default: continue;
+            }
+            const cgltf_accessor* in = ch.sampler->input;
+            const cgltf_accessor* vals = ch.sampler->output;
+            const bool cubic = ch.sampler->interpolation == cgltf_interpolation_type_cubic_spline;
+            out_ch.step = ch.sampler->interpolation == cgltf_interpolation_type_step;
+            for (cgltf_size k = 0; k < in->count; ++k) {
+                float t = 0.0f;
+                cgltf_accessor_read_float(in, k, &t, 1);
+                float v[4] = {0, 0, 0, 1};
+                // Cubic splines store (in-tangent, value, out-tangent) per key:
+                // take the values and blend them linearly (close, not exact).
+                cgltf_accessor_read_float(vals, cubic ? k * 3 + 1 : k, v, static_cast<cgltf_size>(comps));
+                out_ch.times.push_back(t);
+                out_ch.values.push_back({v[0], v[1], v[2], comps == 4 ? v[3] : 0.0f});
+                clip.duration = std::max(clip.duration, t);
+            }
+            clip.channels.push_back(std::move(out_ch));
+        }
+        out.push_back(std::move(clip));
+    }
+}
 
 ModelData load_gltf(const std::string& path) {
     ModelData data;
@@ -409,6 +502,11 @@ ModelData load_gltf(const std::string& path) {
         return data;
     }
     GltfLoader loader{directory_of(path), {}};
+    if (gltf->skins_count > 0) {
+        loader.skin = &gltf->skins[0];
+        read_skeleton(*loader.skin, data.skeleton);
+        read_animations(*gltf, *loader.skin, data.animations);
+    }
     const cgltf_scene* scene = gltf->scene ? gltf->scene : (gltf->scenes_count > 0 ? &gltf->scenes[0] : nullptr);
     if (scene) {
         for (cgltf_size i = 0; i < scene->nodes_count; ++i) loader.add_node(scene->nodes[i], data);

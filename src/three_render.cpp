@@ -23,6 +23,17 @@ struct WorldImpl {
         rgba tint = white;
         bool override_material = false;
         Material material;
+        // Posed by an Animator: its skinned parts' vertices were skinned on
+        // the CPU into `skinned` (in part order), starting here. -1: not posed.
+        int64_t skin_first = -1;
+        Bounds skin_bounds; // world space, of the posed vertices
+    };
+    // Same layout as GpuVertex (the lit shader's vertex format).
+    struct SkinVertex {
+        float px, py, pz;
+        float nx, ny, nz;
+        float u, v;
+        uint32_t color;
     };
     struct LineVertex {
         float x, y, z;
@@ -69,6 +80,7 @@ struct WorldImpl {
     std::vector<Light> lights;
     std::vector<LineVertex> lines;
     std::vector<LineVertex> lines_on_top;
+    std::vector<SkinVertex> skinned;
     uint64_t frame = ~0ull;
 };
 
@@ -97,6 +109,9 @@ struct MeshRecord {
     int index_count = 0;
     bool uploaded = false;
     Bounds bounds;
+    // Skinned meshes: the vertices as modeled (with joints/weights), which
+    // an Animator's pose is applied to. vbuf holds the rest pose.
+    std::vector<Vertex> bind;
 };
 
 struct PartRecord {
@@ -109,6 +124,8 @@ struct ModelRecord {
     std::vector<MeshRecord> meshes;
     std::vector<PartRecord> parts;
     Bounds bounds;
+    Skeleton skeleton;
+    std::vector<AnimationClip> animations;
     bool alive = true;
 };
 
@@ -144,6 +161,8 @@ struct PassRecord {
     std::vector<WorldImpl::ManyCmd> many;
     std::vector<WorldImpl::Instance> instances;
     uint32_t instance_base = 0; // this pass's first instance in the frame's shared instance buffer
+    std::vector<WorldImpl::SkinVertex> skinned;
+    uint32_t skin_base = 0;     // this pass's first vertex in the frame's shared skinned-vertex buffer
     std::vector<WorldImpl::LineVertex> lines;
     std::vector<WorldImpl::LineVertex> lines_on_top;
     int line_first = 0; // vertex offsets into this frame's shared line buffer
@@ -161,6 +180,8 @@ struct RenderState {
     sg_pipeline instanced_pipelines[PipCount] = {};
     sg_buffer instance_buffer = {};
     size_t instance_capacity = 0; // in instances
+    sg_buffer skin_buffer = {};   // posed vertices of animated models, this frame
+    size_t skin_capacity = 0;
     sg_shader billboard_shader = {};
     sg_pipeline billboard_pipeline = {};
     sg_pipeline billboard_additive_pipeline = {};
@@ -571,17 +592,24 @@ void render_shadow_map(PassRecord& pass, int index, int fb_w, int fb_h) {
     for (const WorldImpl::DrawCmd& cmd : pass.draws) {
         ModelRecord* rec = model_record(Model{cmd.model});
         if (!rec) continue;
+        int64_t skin_at = cmd.skin_first;
         for (const PartRecord& part : rec->parts) {
+            MeshRecord& mesh = rec->meshes[part.mesh];
+            const int64_t skin_first = cmd.skin_first >= 0 && !mesh.bind.empty() ? skin_at : -1;
+            if (skin_first >= 0) skin_at += static_cast<int64_t>(mesh.bind.size());
             const Material& mat = cmd.override_material ? cmd.material : part.material;
             if (!mat.casts_shadow || mat.alpha == AlphaMode::Blend) continue;
-            MeshRecord& mesh = rec->meshes[part.mesh];
             upload_mesh(mesh);
             if (mesh.index_count == 0) continue;
-            const mat4 world = cmd.world * part.local;
+            const mat4 world = skin_first >= 0 ? cmd.world : cmd.world * part.local;
             // (instanced casters are drawn after these, with their own pipeline)
-            if (!light_frustum.intersects(mesh.bounds.transformed(world))) continue;
+            if (!light_frustum.intersects(skin_first >= 0 ? cmd.skin_bounds : mesh.bounds.transformed(world))) continue;
             sg_bindings bind = {};
             bind.vertex_buffers[0] = mesh.vbuf;
+            if (skin_first >= 0) {
+                bind.vertex_buffers[0] = s.skin_buffer;
+                bind.vertex_buffer_offsets[0] = static_cast<int>((pass.skin_base + skin_first) * sizeof(WorldImpl::SkinVertex));
+            }
             bind.index_buffer = mesh.ibuf;
             const bool cutout = mat.alpha == AlphaMode::Cutout;
             sg_view tex = cutout && mat.texture.valid() ? detail::texture_view(mat.texture) : sg_view{};
@@ -646,6 +674,7 @@ struct DrawItem {
     PipelineKind pipeline;
     uint32_t inst_first = 0; // instanced items: offset into the frame's instance buffer
     uint32_t inst_count = 0; // 0 = a plain single draw
+    int64_t skin_first = -1; // posed items: first vertex in the frame's skinned-vertex buffer
 };
 
 void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
@@ -699,21 +728,28 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
     for (const WorldImpl::DrawCmd& cmd : pass.draws) {
         ModelRecord* rec = model_record(Model{cmd.model});
         if (!rec) continue;
+        int64_t skin_at = cmd.skin_first;
         for (const PartRecord& part : rec->parts) {
             MeshRecord& mesh = rec->meshes[part.mesh];
+            // Posed parts: their vertices are already in the model's space
+            // (the pose placed them), so only the draw's transform applies.
+            const int64_t skin_first = cmd.skin_first >= 0 && !mesh.bind.empty() ? skin_at : -1;
+            if (skin_first >= 0) skin_at += static_cast<int64_t>(mesh.bind.size());
             upload_mesh(mesh);
             if (mesh.index_count == 0) continue;
             const Material* mat = cmd.override_material ? &cmd.material : &part.material;
             const bool blend = mat->alpha == AlphaMode::Blend;
             const PipelineKind kind = blend ? (mat->double_sided ? PipBlendDouble : PipBlend)
                                             : (mat->double_sided ? PipOpaqueDouble : PipOpaque);
-            const mat4 world = cmd.world * part.local;
-            if (!frustum.intersects(mesh.bounds.transformed(world))) {
+            const mat4 world = skin_first >= 0 ? cmd.world : cmd.world * part.local;
+            const Bounds box = skin_first >= 0 ? cmd.skin_bounds : mesh.bounds.transformed(world);
+            if (!frustum.intersects(box)) {
                 ++stats.culled;
                 continue;
             }
-            const vec3 center = world.transform_point(mesh.bounds.center());
-            items.push_back({&mesh, mat, world, cmd.tint, dot(center - pass.camera.position, pass.camera.forward()), kind});
+            DrawItem item{&mesh, mat, world, cmd.tint, dot(box.center() - pass.camera.position, pass.camera.forward()), kind};
+            if (skin_first >= 0) item.skin_first = pass.skin_base + skin_first;
+            items.push_back(item);
         }
     }
     for (const WorldImpl::ManyCmd& cmd : pass.many) {
@@ -796,6 +832,10 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
         const Material& mat = *item.material;
         sg_bindings bind = {};
         bind.vertex_buffers[0] = item.mesh->vbuf;
+        if (item.skin_first >= 0) {
+            bind.vertex_buffers[0] = g_three.skin_buffer;
+            bind.vertex_buffer_offsets[0] = static_cast<int>(item.skin_first * sizeof(WorldImpl::SkinVertex));
+        }
         if (instanced) {
             bind.vertex_buffers[1] = g_three.instance_buffer;
             bind.vertex_buffer_offsets[1] = static_cast<int>(item.inst_first * sizeof(WorldImpl::Instance));
@@ -893,6 +933,36 @@ Model make_model(const MeshData& mesh, const Material& material) {
 
 namespace {
 ModelRecord build_record(const ModelData& data);
+
+// Linear blend skinning: each vertex moved by the weighted sum of its
+// joints' skin matrices. Normals use the same matrix (fine for the
+// rotations and uniform scales skeletons use).
+void skin_vertices(const std::vector<Vertex>& bind, const std::vector<mat4>& skin, std::vector<Vertex>& out) {
+    out.resize(bind.size());
+    const int n = static_cast<int>(skin.size());
+    for (size_t i = 0; i < bind.size(); ++i) {
+        const Vertex& v = bind[i];
+        const float w[4] = {v.weights.x, v.weights.y, v.weights.z, v.weights.w};
+        const float j[4] = {v.joints.x, v.joints.y, v.joints.z, v.joints.w};
+        mat4 m;
+        float total = 0.0f;
+        for (float& e : m.m) e = 0.0f;
+        for (int k = 0; k < 4; ++k) {
+            const int joint = static_cast<int>(j[k]);
+            if (w[k] <= 0.0f || joint < 0 || joint >= n) continue;
+            for (int e = 0; e < 16; ++e) m.m[e] += skin[static_cast<size_t>(joint)].m[e] * w[k];
+            total += w[k];
+        }
+        Vertex& o = out[i];
+        o = v;
+        if (total <= 0.0f) continue;
+        if (std::fabs(total - 1.0f) > 1e-3f) {
+            for (float& e : m.m) e /= total;
+        }
+        o.position = m.transform_point(v.position);
+        o.normal = normalize(m.transform_direction(v.normal));
+    }
+}
 } // namespace
 
 Model make_model(const ModelData& data) {
@@ -904,12 +974,25 @@ Model make_model(const ModelData& data) {
 namespace {
 ModelRecord build_record(const ModelData& data) {
     ModelRecord rec;
+    rec.skeleton = data.skeleton;
+    rec.animations = data.animations;
+    std::vector<mat4> rest;
+    if (!data.skeleton.empty()) detail::rest_skin_matrices(data.skeleton, rest);
     for (const ModelData::Part& part : data.parts) {
         MeshRecord m;
         m.cpu = part.mesh;
-        m.bounds = part.mesh.bounds();
-        m.positions.reserve(part.mesh.vertices.size());
-        for (const Vertex& v : part.mesh.vertices) m.positions.push_back(v.position);
+        const bool skinned = !rest.empty() && std::any_of(part.mesh.vertices.begin(), part.mesh.vertices.end(), [](const Vertex& v) {
+            return v.weights.x + v.weights.y + v.weights.z + v.weights.w > 0.0f;
+        });
+        if (skinned) {
+            // Keep the modeled vertices for posing; draw (and collide with)
+            // the rest pose until an Animator says otherwise.
+            m.bind = part.mesh.vertices;
+            skin_vertices(m.bind, rest, m.cpu.vertices);
+        }
+        m.bounds = m.cpu.bounds();
+        m.positions.reserve(m.cpu.vertices.size());
+        for (const Vertex& v : m.cpu.vertices) m.positions.push_back(v.position);
         m.triangles = part.mesh.indices;
         const Bounds placed = m.bounds.transformed(part.transform);
         if (placed.valid()) { rec.bounds.add(placed.min); rec.bounds.add(placed.max); }
@@ -990,6 +1073,7 @@ WorldImpl& touch(std::unique_ptr<WorldImpl>& impl) {
         impl->lights.clear();
         impl->lines.clear();
         impl->lines_on_top.clear();
+        impl->skinned.clear();
         impl->frame = frame;
     }
     return *impl;
@@ -1032,6 +1116,59 @@ void World::draw(Model model, const Transform& transform, rgba tint) {
     cmd.world = transform.matrix();
     cmd.tint = tint;
     touch(impl_).draws.push_back(std::move(cmd));
+}
+
+void World::draw(Model model, const Transform& transform, const Animator& pose, rgba tint) {
+    ModelRecord* rec = model_record(model);
+    if (!rec) return;
+    const std::vector<mat4>& skin = pose.skin_matrices();
+    if (rec->skeleton.empty() || skin.size() != rec->skeleton.joints.size() || pose.model().id != model.id) {
+        draw(model, transform, tint); // not animated (or the Animator is for another model): the rest pose
+        return;
+    }
+    WorldImpl& impl = touch(impl_);
+    WorldImpl::DrawCmd cmd;
+    cmd.model = model.id;
+    cmd.world = transform.matrix();
+    cmd.tint = tint;
+    cmd.skin_first = static_cast<int64_t>(impl.skinned.size());
+    static thread_local std::vector<Vertex> posed;
+    for (const PartRecord& part : rec->parts) {
+        const MeshRecord& mesh = rec->meshes[part.mesh];
+        if (mesh.bind.empty()) continue;
+        skin_vertices(mesh.bind, skin, posed);
+        for (const Vertex& v : posed) {
+            impl.skinned.push_back({v.position.x, v.position.y, v.position.z, v.normal.x, v.normal.y, v.normal.z, v.uv.x, v.uv.y,
+                                    pack_color(v.color)});
+            cmd.skin_bounds.add(cmd.world.transform_point(v.position));
+        }
+    }
+    impl.draws.push_back(std::move(cmd));
+}
+
+const Skeleton* model_skeleton(Model model) {
+    const ModelRecord* rec = model_record(model);
+    return rec && !rec->skeleton.empty() ? &rec->skeleton : nullptr;
+}
+
+int model_animation_count(Model model) {
+    const ModelRecord* rec = model_record(model);
+    return rec ? static_cast<int>(rec->animations.size()) : 0;
+}
+
+const AnimationClip* model_animation(Model model, int index) {
+    const ModelRecord* rec = model_record(model);
+    if (!rec || index < 0 || index >= static_cast<int>(rec->animations.size())) return nullptr;
+    return &rec->animations[static_cast<size_t>(index)];
+}
+
+int find_animation(Model model, const std::string& name) {
+    const ModelRecord* rec = model_record(model);
+    if (!rec) return -1;
+    for (size_t i = 0; i < rec->animations.size(); ++i) {
+        if (rec->animations[i].name == name) return static_cast<int>(i);
+    }
+    return -1;
 }
 
 void World::draw(Model model, const Transform& transform, const Material& material) {
@@ -1213,6 +1350,7 @@ void World::render(const Frame&, const Camera& camera, Rect viewport) {
     pass.billboards = impl.billboards;
     pass.many = impl.many;
     pass.instances = impl.instances;
+    pass.skinned = impl.skinned;
     pass.lines = impl.lines;
     pass.lines_on_top = impl.lines_on_top;
     g_three.passes.push_back(std::move(pass));
@@ -1448,6 +1586,7 @@ void three_shutdown() {
     sg_destroy_pipeline(s.shadow_instanced_pipeline);
     sg_destroy_shader(s.shadow_instanced_shader);
     if (s.instance_buffer.id != SG_INVALID_ID) sg_destroy_buffer(s.instance_buffer);
+    if (s.skin_buffer.id != SG_INVALID_ID) sg_destroy_buffer(s.skin_buffer);
     sg_destroy_pipeline(s.sky_pipeline);
     sg_destroy_pipeline(s.depth_reset_pipeline);
     sg_destroy_shader(s.lit_shader);
@@ -1469,6 +1608,7 @@ void three_before_passes() {
     // Transient buffers must be written before anything binds them this
     // frame — and the shadow passes below already bind the instance buffer.
     std::vector<WorldImpl::Instance> all_instances;
+    std::vector<WorldImpl::SkinVertex> all_skinned;
     std::vector<WorldImpl::LineVertex> all_lines;
     std::vector<WorldImpl::Quad> all_quads;
     for (PassRecord& pass : s.passes) {
@@ -1501,6 +1641,8 @@ void three_before_passes() {
 
         pass.instance_base = static_cast<uint32_t>(all_instances.size());
         all_instances.insert(all_instances.end(), pass.instances.begin(), pass.instances.end());
+        pass.skin_base = static_cast<uint32_t>(all_skinned.size());
+        all_skinned.insert(all_skinned.end(), pass.skinned.begin(), pass.skinned.end());
         pass.line_first = static_cast<int>(all_lines.size());
         all_lines.insert(all_lines.end(), pass.lines.begin(), pass.lines.end());
         pass.on_top_first = static_cast<int>(all_lines.size());
@@ -1525,6 +1667,7 @@ void three_before_passes() {
     };
     write_transient(s.instance_buffer, s.instance_capacity, all_instances.data(), all_instances.size(),
                     sizeof(WorldImpl::Instance), "three-instances");
+    write_transient(s.skin_buffer, s.skin_capacity, all_skinned.data(), all_skinned.size(), sizeof(WorldImpl::SkinVertex), "three-skinned");
     write_transient(s.line_buffer, s.line_capacity, all_lines.data(), all_lines.size(), sizeof(WorldImpl::LineVertex), "three-lines");
     write_transient(s.quad_buffer, s.quad_capacity, all_quads.data(), all_quads.size(), sizeof(WorldImpl::Quad), "three-billboards");
 
