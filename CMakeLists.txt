@@ -149,6 +149,19 @@ if(THISTLE_PHYSICS3D)
     FetchContent_MakeAvailable(JoltPhysics)
 endif()
 
+# Dear ImGui — opt-in debug windows (thistle::debug_ui_*). Off by default;
+# -DTHISTLE_DEBUG_UI=ON, or `thistle enable debug_ui` in a CLI project. The
+# pinned sokol's sokol_imgui.h needs ImGui 1.92+ (the texture API changed).
+option(THISTLE_DEBUG_UI "Build the Dear ImGui debug UI" OFF)
+if(THISTLE_DEBUG_UI)
+    FetchContent_Declare(
+        imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG        v1.92.9b
+    )
+    FetchContent_MakeAvailable(imgui)
+endif()
+
 # nlohmann/json (for Tiled .tmj tilemaps) is vendored as a single header in
 # third_party/nlohmann/json.hpp — the full repo is huge, so we don't fetch it.
 # We only use miniaudio's header (our audio_impl.c holds the implementation), but
@@ -170,6 +183,7 @@ add_library(thistle STATIC
     src/three_terrain.cpp
     src/three_collider.cpp
     src/three_destruction.cpp
+    src/three_audio.cpp
     src/cgltf_impl.c
     src/sokol_impl.c
     src/stb_impl.c
@@ -193,6 +207,21 @@ target_include_directories(thistle
 )
 
 target_link_libraries(thistle PUBLIC box2d)
+
+if(THISTLE_DEBUG_UI)
+    target_sources(thistle PRIVATE
+        src/debug_ui.cpp
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/imgui_demo.cpp) # ImGui::ShowDemoWindow(): the best reference for what it can do
+    # PUBLIC: games #include <imgui.h> themselves.
+    target_include_directories(thistle PUBLIC ${imgui_SOURCE_DIR})
+    target_compile_definitions(thistle PUBLIC THISTLE_DEBUG_UI=1)
+else()
+    target_sources(thistle PRIVATE src/debug_ui_off.cpp)
+endif()
 
 if(THISTLE_PHYSICS3D)
     target_sources(thistle PRIVATE src/three_physics.cpp)
@@ -444,6 +473,9 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_destruction_smoketest examples/destruction_smoketest.cpp)
     target_link_libraries(thistle_destruction_smoketest PRIVATE thistle)
 
+    add_executable(thistle_audio3d_smoketest examples/audio3d_smoketest.cpp)
+    target_link_libraries(thistle_audio3d_smoketest PRIVATE thistle)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -484,4 +516,6 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(physics3d_smoketest PROPERTIES TIMEOUT 60)
     add_test(NAME destruction_smoketest COMMAND thistle_destruction_smoketest)
     set_tests_properties(destruction_smoketest PROPERTIES TIMEOUT 60)
+    add_test(NAME audio3d_smoketest COMMAND thistle_audio3d_smoketest)
+    set_tests_properties(audio3d_smoketest PROPERTIES TIMEOUT 30)
 endif()

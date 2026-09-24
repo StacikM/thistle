@@ -70,8 +70,36 @@ set_sfx_volume(1.0f);
 set_master_volume(1.0f);
 ```
 
-`play_sound` is exactly what it sounds like — call it, forget it, it plays and cleans itself up. There's no handle, no "is it still playing," no way to stop one specific sound effect once fired. If you need that (a looping engine hum you can start/stop, positional audio, ducking), you're past what this API gives you and need to go straight to miniaudio yourself — it's already a dependency, nothing stops you from using its full API alongside this one.
+`play_sound` is exactly what it sounds like — call it, forget it, it plays and cleans itself up. There's no handle, no "is it still playing," no way to stop one specific sound effect once fired. If you need that, or sound with a position in a 3D world, see 3D sound below. For anything past both (ducking, effects chains) go straight to miniaudio yourself; it's already a dependency.
 
 `play_music` replaces whatever's currently playing. There is exactly one music slot. Two overlapping tracks is not a supported concept — if you want a crossfade, that's your own two-`ma_sound` setup against miniaudio directly, not something `play_music` will ever grow, because "one background track" is a deliberate simplification, not an oversight waiting to be fixed.
 
 Volumes are independent multipliers, 0..1, and `master` scales both — set them once from a settings screen and persist the values yourself with `save::set_float` (see [platform-and-networking.md](platform-and-networking.md)). The engine doesn't persist audio settings for you; "music: on" is a checkbox in *your* game's save data, not the engine's.
+
+### 3D sound (`thistle::three`)
+
+Sounds with a place in the world: quieter the farther they are from the listener, and panned toward the side they're on.
+
+```cpp
+using namespace thistle::three;
+
+play_sound_at("assets/boom.wav", blast_point);                        // a one-shot
+Sound engine = play_sound_at("assets/engine.ogg", car_pos, {.loop = true, .min_distance = 3});
+set_sound_position(engine, car_pos);                                  // every frame, to follow it
+stop_sound(engine);
+```
+
+- **It returns a handle**, unlike `play_sound`. You can move a sound, change its volume or pitch, or stop it. Handles go invalid by themselves when the sound finishes, and every call on a stale handle does nothing, so there's nothing to clean up.
+- **The listener is the camera** of the last `World::render()`, automatically. `set_listener(position, rotation)` puts the ears somewhere else (a third-person game might want the character's head) and switches to manual; `set_listener_automatic()` switches back.
+- **Distance**: full volume inside `min_distance`, then fading as `min / (min + rolloff × (distance − min))` (miniaudio's inverse model), and no quieter past `max_distance`. `rolloff` 1 is roughly real life; lower it for sounds that should carry.
+- **Up to 128 at once.** Past that the oldest one-shot is cut off (a looping sound only if nothing else can go). Files are decoded once and shared; `preload_sound()` does the decoding up front so the first play doesn't stall a frame. `stream = true` decodes while playing, for long ambience loops.
+- They go through the same effects group as `play_sound`, so `set_sfx_volume` covers them. There's no doppler (positions jump frame to frame, and it warbles) and no occlusion (walls don't muffle anything).
+
+**How it was verified.** CI has no sound card, so `audio3d_smoketest` only checks that everything is safe without an audio device (before `App::run()`, or on a machine without one). The sound itself was checked by recording the real output: PulseAudio with a virtual sink in the build container, the engine playing a 440 Hz tone around a fixed camera, and the recording measured per channel.
+- 6 m to the right: left 282, right 1414 (RMS).
+- 6 m to the left: exactly mirrored.
+- 2 m ahead: 2121 on both.
+- 30 m ahead: 141. That's 1/15 of the 2 m level, which is what the formula above gives.
+- 6 m behind: 707, 1/3 of the 2 m level, as predicted.
+
+In the same run, finished sounds freed their handles, a looping sound kept playing past its length until stopped, and the 129th and later sounds took over old slots. The destruction demo's generated blast sound was recorded the same way. Metal (macOS/iOS) and Windows audio backends weren't run; it's miniaudio's own code there, the same as for `play_sound`.

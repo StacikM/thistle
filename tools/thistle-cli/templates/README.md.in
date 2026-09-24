@@ -33,6 +33,7 @@ Some engine features are big enough that they're off until a game asks for them:
 ```bash
 thistle modules              # what there is, and what's on
 thistle enable physics3d     # 3D rigid-body physics (Jolt): three::Physics3D
+thistle enable debug_ui      # Dear ImGui debug windows (#include <imgui.h>)
 thistle disable physics3d
 ```
 

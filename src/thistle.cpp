@@ -468,6 +468,7 @@ void init_cb() {
     g_state->white_view = sg_make_view(&wv);
 
     detail::three_setup();
+    detail::debug_ui_setup();
 
 #if defined(__APPLE__)
     thistle_ios_init_audio_session(); // no-op on macOS
@@ -819,6 +820,7 @@ void frame_cb() {
     f.time = g_state->elapsed;
     f.width = w;
     f.height = h;
+    detail::debug_ui_new_frame(w, h, dt);
 
     // Apply a pending scene switch (exit old, enter new) before updating.
     if (g_state->has_pending) {
@@ -883,6 +885,7 @@ void frame_cb() {
         sg_range ur = {&params, sizeof(params)};
         sg_apply_uniforms(0, &ur);
         sg_draw(0, 3, 1);
+        detail::debug_ui_render();
         sg_end_pass();
         sg_commit();
     } else {
@@ -892,6 +895,7 @@ void frame_cb() {
         pass.swapchain = sglue_swapchain();
         sg_begin_pass(&pass);
         detail::three_draw_layers();
+        detail::debug_ui_render();
         sg_end_pass();
         sg_commit();
     }
@@ -919,16 +923,19 @@ void cleanup_cb() {
     if (g_state->post_pip.id != SG_INVALID_ID) sg_destroy_pipeline(g_state->post_pip);
     if (g_state->post_shader.id != SG_INVALID_ID) sg_destroy_shader(g_state->post_shader);
     if (g_state->post_sampler.id != SG_INVALID_ID) sg_destroy_sampler(g_state->post_sampler);
+    detail::three_audio_shutdown(); // its sounds go before the engine they play on
     if (g_state->music_ready) ma_sound_uninit(&g_state->music);
     if (g_state->sfx_group_ready) ma_sound_group_uninit(&g_state->sfx_group);
     if (g_state->audio_ready) ma_engine_uninit(&g_state->audio);
     if (g_state->fons) sfons_destroy(g_state->fons);
     detail::three_shutdown();
+    detail::debug_ui_shutdown();
     sgl_shutdown();
     sg_shutdown();
 }
 
 void event_cb(const sapp_event* e) {
+    if (detail::debug_ui_event(e)) return;
     switch (e->type) {
         case SAPP_EVENTTYPE_KEY_DOWN:
             if (e->key_code >= 0 && e->key_code < 512) {
@@ -3757,6 +3764,11 @@ void reload_texture(Texture tex) {
     rec.h = h;
     rec.uploaded = false; // re-uploads lazily on next draw
 }
+
+namespace detail {
+ma_engine* audio_engine() { return g_state && g_state->audio_ready ? &g_state->audio : nullptr; }
+ma_sound* sfx_group() { return g_state && g_state->sfx_group_ready ? &g_state->sfx_group : nullptr; }
+} // namespace detail
 
 void play_sound(const std::string& path) {
     if (!g_state->audio_ready) return;

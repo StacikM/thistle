@@ -256,6 +256,8 @@ def cmd_version(args) -> None:
 MODULES = {
     "physics3d": ("THISTLE_PHYSICS3D",
                   "3D rigid-body physics on Jolt Physics: three::Physics3D (adds a few minutes to the first build)"),
+    "debug_ui": ("THISTLE_DEBUG_UI",
+                 "Dear ImGui debug windows: #include <imgui.h> in your game, debug_stats_window()"),
 }
 
 

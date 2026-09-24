@@ -21,6 +21,10 @@ string(JSON THISTLE_PHYSICS3D ERROR_VARIABLE _thistle_no_physics3d GET "${THISTL
 if(_thistle_no_physics3d)
     set(THISTLE_PHYSICS3D OFF)
 endif()
+string(JSON THISTLE_DEBUG_UI ERROR_VARIABLE _thistle_no_debug_ui GET "${THISTLE_PROJECT_JSON}" modules debug_ui)
+if(_thistle_no_debug_ui)
+    set(THISTLE_DEBUG_UI OFF)
+endif()
 
 # Path to the Thistle engine, set by `thistle new` when this project was
 # created. Override with -DTHISTLE_DIR=... if you move this project

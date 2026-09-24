@@ -4,8 +4,8 @@ You want to make a game, not read a novel. Here's the map:
 
 - [building.md](building.md) — how this thing actually compiles and links. Read this first, it's not optional.
 - [drawing.md](drawing.md) — putting pixels on the screen: shapes, sprites, text, camera, blend modes, post-processing, and the "minor 3D" mode.
-- [ui-and-scenes.md](ui-and-scenes.md) — immediate-mode widgets, `Menu`, the `Node` scene graph, particles, tilemaps, and `App::scene`.
-- [input-and-audio.md](input-and-audio.md) — keyboard, mouse, touch, gamepad, sound, music.
+- [ui-and-scenes.md](ui-and-scenes.md) — immediate-mode widgets, `Menu`, the `Node` scene graph, particles, tilemaps, `App::scene`, and the optional Dear ImGui debug UI.
+- [input-and-audio.md](input-and-audio.md) — keyboard, mouse, touch, gamepad, sound, music, and 3D positional sound.
 - [physics.md](physics.md) — the Box2D wrapper. 2D only. Read the caveats before you build something that needs them.
 - [physics3d.md](physics3d.md) — opt-in 3D rigid bodies on Jolt (`three::Physics3D`) and Teardown-style voxel destruction (`VoxelDestruction`): turning it on, colliders, triggers, what falls and why, and exactly what's been verified where.
 - [platform-and-networking.md](platform-and-networking.md) — save data, HTTP, clipboard, haptics, text input, logging, platform queries.

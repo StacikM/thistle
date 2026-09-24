@@ -21,11 +21,12 @@ jobs:
       fail-fast: false   # one platform failing shouldn't hide the other two's results
       matrix:
         os: [macos-latest, windows-latest, ubuntu-latest]
-        # Physics3D is opt-in (Jolt): build and test both ways, so neither
-        # the Jolt build nor the stand-in used without it rots unnoticed.
-        physics3d: [OFF, ON]
+        # The optional modules (Jolt physics, the Dear ImGui debug UI) are
+        # built and tested both ways, so neither they nor the stand-ins used
+        # without them rot unnoticed.
+        modules: [OFF, ON]
     runs-on: ${{ matrix.os }}
-    name: ${{ matrix.os }} (physics3d ${{ matrix.physics3d }})
+    name: ${{ matrix.os }} (optional modules ${{ matrix.modules }})
 
     steps:
       - uses: actions/checkout@v4
@@ -49,10 +50,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/_deps
-          key: deps-${{ runner.os }}-physics3d-${{ matrix.physics3d }}-${{ hashFiles('CMakeLists.txt') }}
+          key: deps-${{ runner.os }}-modules-${{ matrix.modules }}-${{ hashFiles('CMakeLists.txt') }}
 
       - name: Configure
-        run: cmake -S . -B build -DTHISTLE_BUILD_SMOKETEST=ON -DCMAKE_BUILD_TYPE=Release -DTHISTLE_PHYSICS3D=${{ matrix.physics3d }}
+        run: cmake -S . -B build -DTHISTLE_BUILD_SMOKETEST=ON -DCMAKE_BUILD_TYPE=Release -DTHISTLE_PHYSICS3D=${{ matrix.modules }} -DTHISTLE_DEBUG_UI=${{ matrix.modules }}
 
       - name: Build
         run: cmake --build build --config Release
