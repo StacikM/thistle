@@ -11,6 +11,10 @@ namespace thistle::detail {
 
 // --- implemented in thistle.cpp ---
 sg_view texture_view(Texture tex); // uploads lazily; id == SG_INVALID_ID if unusable
+// Whole-file reads that also work on Android, where assets live inside the
+// APK rather than on the filesystem.
+bool read_file_bytes(const std::string& path, std::vector<unsigned char>& out);
+bool read_file_text(const std::string& path, std::string& out);
 uint64_t frame_index();            // increments once per rendered frame
 int frame_width();
 int frame_height();

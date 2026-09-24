@@ -90,12 +90,18 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/erincatto/box2d.git
     GIT_TAG        v2.4.1
 )
+# cgltf — glTF 2.0 / GLB parsing for three::load_model() (header-only).
+FetchContent_Declare(
+    cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG        v1.15
+)
 # nlohmann/json (for Tiled .tmj tilemaps) is vendored as a single header in
 # third_party/nlohmann/json.hpp — the full repo is huge, so we don't fetch it.
 # We only use miniaudio's header (our audio_impl.c holds the implementation), but
 # MakeAvailable is the non-deprecated path (FetchContent_Populate is a hard error
 # under newer CMake, e.g. via emcmake); its extra targets just build unused.
-FetchContent_MakeAvailable(sokol stb fontstash box2d miniaudio)
+FetchContent_MakeAvailable(sokol stb fontstash box2d miniaudio cgltf)
 
 add_library(thistle STATIC
     src/thistle.cpp
@@ -103,6 +109,8 @@ add_library(thistle STATIC
     src/three_camera.cpp
     src/three_mesh.cpp
     src/three_render.cpp
+    src/three_model.cpp
+    src/cgltf_impl.c
     src/sokol_impl.c
     src/stb_impl.c
     src/audio_impl.c
@@ -121,6 +129,7 @@ target_include_directories(thistle
         ${stb_SOURCE_DIR}
         ${miniaudio_SOURCE_DIR}
         ${fontstash_SOURCE_DIR}/src
+        ${cgltf_SOURCE_DIR}
 )
 
 target_link_libraries(thistle PUBLIC box2d)
@@ -215,6 +224,16 @@ if(THISTLE_BUILD_SMOKETEST)
         endif()
     endif()
 
+    # Point it at .obj/.gltf/.glb files to look at them (and at the loader).
+    add_executable(thistle_model_viewer examples/model_viewer.cpp)
+    target_link_libraries(thistle_model_viewer PRIVATE thistle)
+    if(WIN32)
+        set_target_properties(thistle_model_viewer PROPERTIES WIN32_EXECUTABLE ON)
+        if(MSVC)
+            target_link_options(thistle_model_viewer PRIVATE "/ENTRY:mainCRTStartup")
+        endif()
+    endif()
+
     # A plain console program (no window, no App/Frame) that spins up a real
     # NetServer + NetClient over localhost and checks the results — proof the
     # networking layer actually works, not just compiles. No WIN32_EXECUTABLE
@@ -252,6 +271,11 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_mesh3d_smoketest examples/mesh3d_smoketest.cpp)
     target_link_libraries(thistle_mesh3d_smoketest PRIVATE thistle)
 
+    # three::load_model_data() against OBJ/MTL, .gltf and .glb files it
+    # writes itself. Headless like scene_smoketest (App constructed, never run).
+    add_executable(thistle_model_smoketest examples/model_smoketest.cpp)
+    target_link_libraries(thistle_model_smoketest PRIVATE thistle)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -278,4 +302,6 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(math3d_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME mesh3d_smoketest COMMAND thistle_mesh3d_smoketest)
     set_tests_properties(mesh3d_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME model_smoketest COMMAND thistle_model_smoketest)
+    set_tests_properties(model_smoketest PROPERTIES TIMEOUT 30)
 endif()

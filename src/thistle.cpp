@@ -24,6 +24,7 @@
 #include <ctime>
 #include <exception>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <sstream>
@@ -3496,6 +3497,36 @@ Font load_font(const std::string& path) {
     return Font{idx};
 }
 
+namespace {
+Texture register_texture(unsigned char* pixels, int w, int h, const std::string& path) {
+    TextureRecord rec;
+    rec.pixels = pixels;
+    rec.w = w;
+    rec.h = h;
+    rec.path = path;
+    const int id = static_cast<int>(g_state->textures.size());
+    g_state->textures.push_back(rec);
+    return Texture{id, w, h};
+}
+} // namespace
+
+Texture load_texture_from_memory(const void* data, size_t size) {
+    int w = 0, h = 0, channels = 0;
+    unsigned char* pixels = stbi_load_from_memory(static_cast<const stbi_uc*>(data), static_cast<int>(size), &w, &h, &channels, 4);
+    if (pixels == nullptr) return Texture{};
+    return register_texture(pixels, w, h, "");
+}
+
+Texture make_texture(int width, int height, const unsigned char* rgba) {
+    if (width <= 0 || height <= 0 || rgba == nullptr) return Texture{};
+    const size_t bytes = static_cast<size_t>(width) * height * 4;
+    // malloc, not new: TextureRecord pixels are released with stbi_image_free (plain free()).
+    auto* pixels = static_cast<unsigned char*>(std::malloc(bytes));
+    if (pixels == nullptr) return Texture{};
+    std::memcpy(pixels, rgba, bytes);
+    return register_texture(pixels, width, height, "");
+}
+
 Texture load_texture(const std::string& path) {
     int w = 0, h = 0, channels = 0;
     unsigned char* pixels = thistle_stbi_load(path, &w, &h, &channels, 4);
@@ -3870,6 +3901,19 @@ sg_view texture_view(Texture tex) {
     ensure_uploaded(rec);
     return rec.img.id != SG_INVALID_ID ? rec.view : sg_view{};
 }
+
+bool read_file_bytes(const std::string& path, std::vector<unsigned char>& out) {
+#if defined(__ANDROID__)
+    return android_read_asset(path, out);
+#else
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+    out.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    return true;
+#endif
+}
+
+bool read_file_text(const std::string& path, std::string& out) { return thistle_read_text_asset(path, out); }
 
 uint64_t frame_index() { return g_state ? g_state->frame_index : 0; }
 int frame_width() { return sapp_width(); }
