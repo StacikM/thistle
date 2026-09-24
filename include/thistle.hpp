@@ -518,6 +518,22 @@ void set_music_volume(float volume);
 void set_sfx_volume(float volume);
 void set_master_volume(float volume);
 
+// --- debug UI (optional: Dear ImGui) ------------------------------------
+// Windows for tweaking and inspecting a game while you make it: sliders,
+// checkboxes, stats, a list of what's alive. Opt-in, like 3D physics:
+// `thistle enable debug_ui` (or -DTHISTLE_DEBUG_UI=ON). Then
+// #include <imgui.h> and call Dear ImGui anywhere in your update callback;
+// it's drawn last, on top of everything (post-effects too), and clicks or
+// typing that land in a debug window don't reach the game. Wrap that code
+// in #if THISTLE_DEBUG_UI so it still builds with the module off. Not for
+// the game's own UI (it looks like a tool, on purpose).
+bool debug_ui_available();
+bool debug_ui_wants_mouse();    // the mouse is over a debug window
+bool debug_ui_wants_keyboard(); // a debug field has the keyboard
+// A ready-made window: fps, a frame-time graph, 3D draw calls/triangles,
+// sounds playing. Call it every frame you want it shown.
+void debug_stats_window();
+
 // --- post-processing ----------------------------------------------------
 
 // Full-screen shader effects applied after the scene is drawn. The frame is
@@ -1911,6 +1927,55 @@ private:
 
 // Totals over every World::render() of the previous frame.
 RenderStats render_stats();
+
+// --- 3D sound ----------------------------------------------------------------------------
+// Sounds with a place in the world: quieter the farther they are from the
+// listener, and panned toward the side they're on. Sounds without a place
+// (UI clicks, music) stay on play_sound() / play_music().
+//
+//   play_sound_at("assets/boom.wav", crate_position);
+//   Sound engine = play_sound_at("assets/engine.ogg", car, {.loop = true});
+//   set_sound_position(engine, car);   // every frame, to follow the car
+//
+// The listener is the camera of the last World::render() automatically.
+// Call set_listener() to put it somewhere else (a third-person game might
+// prefer the character's head); from then on it stays where you put it.
+struct SoundSettings {
+    float volume = 1.0f;
+    float pitch = 1.0f;          // 2 = an octave up (and twice as fast)
+    bool loop = false;           // until stop_sound()
+    float min_distance = 1.0f;   // full volume this close
+    float max_distance = 60.0f;  // no quieter past this
+    float rolloff = 1.0f;        // how fast it fades in between (1: about like real life)
+    bool stream = false;         // decode while playing: long ambience loops, not effects played often
+};
+
+// A playing 3D sound. Goes invalid by itself when the sound finishes (every
+// call on it then does nothing), so it's safe to keep around.
+struct Sound {
+    uint32_t id = 0;
+    bool valid() const { return id != 0; }
+    explicit operator bool() const { return id != 0; }
+    bool operator==(Sound o) const { return id == o.id; }
+};
+
+// An invalid Sound when the file can't be played, or there's no audio
+// device yet (before App::run(), or on a machine without one). Up to 128
+// play at once; past that, the oldest non-looping one is cut off.
+Sound play_sound_at(const std::string& path, vec3 position, const SoundSettings& settings = {});
+void set_sound_position(Sound sound, vec3 position);
+void set_sound_volume(Sound sound, float volume);
+void set_sound_pitch(Sound sound, float pitch);
+void stop_sound(Sound sound);
+bool sound_playing(Sound sound);
+void stop_all_sounds(); // every 3D sound (not play_sound()/music)
+int playing_sound_count();
+// Decode a file now, so its first play_sound_at() doesn't stall a frame.
+// Files are decoded once and shared by every play either way.
+void preload_sound(const std::string& path);
+void set_listener(vec3 position, quat rotation);
+void set_listener(const Camera& camera);
+void set_listener_automatic(); // back to following World::render()'s camera
 
 // --- voxels ------------------------------------------------------------------------
 // A block world, Minecraft- or Teardown-style: a grid of block ids, stored

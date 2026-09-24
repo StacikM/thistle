@@ -10,11 +10,17 @@
 //   F              show the colliders
 //   R              rebuild the town
 //
+// Blasts and impacts are heard where they happen (3D sound: the impacts come
+// from the physics contact events, louder the harder the hit). The sounds
+// are made in code at startup, so the demo needs no asset files.
+//
 // Stats go to the log. Opens a window and never quits on its own, so CI
 // builds it but doesn't run it.
 #include <thistle.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -134,11 +140,54 @@ void build_town(VoxelWorld& v, const Palette& p) {
     }
 }
 
+// A mono 16-bit WAV from samples in -1..1.
+void write_wav(const std::string& path, const std::vector<float>& samples, int rate) {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return;
+    auto u32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
+    auto u16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
+    const uint32_t bytes = static_cast<uint32_t>(samples.size() * 2);
+    std::fwrite("RIFF", 1, 4, f); u32(36 + bytes); std::fwrite("WAVEfmt ", 1, 8, f);
+    u32(16); u16(1); u16(1); u32(static_cast<uint32_t>(rate)); u32(static_cast<uint32_t>(rate * 2)); u16(2); u16(16);
+    std::fwrite("data", 1, 4, f); u32(bytes);
+    for (float x : samples) {
+        const int16_t v = static_cast<int16_t>(std::clamp(x, -1.0f, 1.0f) * 32000.0f);
+        std::fwrite(&v, 2, 1, f);
+    }
+    std::fclose(f);
+}
+
+// Low-passed noise under a falling sine, dying away: a boom, or (short and
+// higher) a thud. `cutoff` 0..1 is how much of the noise gets through.
+std::vector<float> rumble(float seconds, float thump_hz, float cutoff, float decay, uint32_t seed) {
+    const int rate = 44100, n = static_cast<int>(seconds * rate);
+    std::vector<float> out(static_cast<size_t>(n));
+    float lp = 0.0f, phase = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        seed = seed * 1664525u + 1013904223u;
+        const float noise = static_cast<float>(seed >> 8) / 8388608.0f - 1.0f;
+        lp += cutoff * (noise - lp);
+        const float t = static_cast<float>(i) / rate;
+        phase += 2.0f * pi * thump_hz * (1.0f - 0.5f * t / seconds) / rate;
+        const float env = std::exp(-t * decay) * std::min(1.0f, t * 400.0f);
+        out[static_cast<size_t>(i)] = env * (0.8f * lp * 3.0f + 0.6f * std::sin(phase));
+    }
+    return out;
+}
+
 } // namespace
 
 int main() {
     App app{{.title = "thistle destruction demo", .width = 1280, .height = 720}};
     log_info("destruction demo: WASD+mouse fly, left click blasts, right click chips, Q throws a ball, F colliders, R rebuilds");
+
+    const std::filesystem::path tmp = std::filesystem::temp_directory_path();
+    const std::string boom_wav = (tmp / "thistle_demo_boom.wav").string();
+    const std::string thud_wav = (tmp / "thistle_demo_thud.wav").string();
+    write_wav(boom_wav, rumble(1.6f, 48.0f, 0.12f, 3.0f, 1), 44100);
+    write_wav(thud_wav, rumble(0.3f, 95.0f, 0.25f, 18.0f, 7), 44100);
+    preload_sound(boom_wav);
+    preload_sound(thud_wav);
 
     VoxelWorld town;
     town.voxel_size = 0.25f;
@@ -178,6 +227,7 @@ int main() {
             if (const PhysicsHit hit = physics.raycast(aim, 120.0f)) {
                 const bool big = f.mouse_pressed(Mouse::Left);
                 const int n = big ? boom->explode(hit.point, 1.2f, 10.0f) : boom->carve(hit.point, 0.45f);
+                play_sound_at(big ? boom_wav : thud_wav, hit.point, {.volume = big ? 1.0f : 0.6f, .min_distance = 3.0f, .max_distance = 90.0f});
                 log_info("destruction demo: removed " + std::to_string(n) + " blocks, " + std::to_string(boom->debris_count()) + " pieces of debris");
             }
         }
@@ -188,6 +238,13 @@ int main() {
 
         physics.step(f.dt);
         boom->update(f.dt);
+        // Impacts, loudest first, a few per frame (a collapsing wall makes hundreds).
+        std::vector<Contact> hits(physics.contacts().begin(), physics.contacts().end());
+        std::sort(hits.begin(), hits.end(), [](const Contact& a, const Contact& b) { return a.speed > b.speed; });
+        for (size_t i = 0; i < hits.size() && i < 4 && hits[i].speed > 2.5f; ++i) {
+            const float pitch = 0.8f + 0.4f * static_cast<float>(hash3(static_cast<int>(hits[i].point.x * 10), i, 0) % 100) / 100.0f;
+            play_sound_at(thud_wav, hits[i].point, {.volume = std::min(1.0f, hits[i].speed / 9.0f), .pitch = pitch, .min_distance = 2.0f});
+        }
 
         boom->draw(world);
         for (RigidBody b : balls) world.sphere(physics.transform(b, {0.6f, 0.6f, 0.6f}), rgb(0.2f, 0.2f, 0.22f));

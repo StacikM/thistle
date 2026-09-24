@@ -162,3 +162,36 @@ int tile = map.at(col, row);
 ```
 
 Loads [Tiled](https://www.mapeditor.org/) exports — full `.tmj`/`.json` (image path resolved relative to the JSON, all tile layers loaded back-to-front) or a bare single-layer CSV if that's all you exported. If you're not building a tile-grid game, ignore this entirely — it's not a general "level format," it's specifically Tiled's format, because reinventing a worse version of Tiled's format is a waste of everyone's time.
+
+## Debug UI (optional: Dear ImGui)
+
+Windows for tweaking and inspecting a game while you make it: sliders for values you're tuning, checkboxes for cheats, stats, lists of what's alive. It's [Dear ImGui](https://github.com/ocornut/imgui) (v1.92.9b, via sokol_imgui), opt-in like 3D physics:
+
+```bash
+thistle enable debug_ui     # or -DTHISTLE_DEBUG_UI=ON
+```
+
+Then call ImGui directly, anywhere in your update callback:
+
+```cpp
+#if THISTLE_DEBUG_UI
+#include <imgui.h>
+#endif
+
+app.update([&](Frame f) {
+#if THISTLE_DEBUG_UI
+    debug_stats_window();                       // fps + frame-time graph, 3D draw calls/triangles, sounds
+    ImGui::Begin("Tuning");
+    ImGui::SliderFloat("jump speed", &player.jump_speed, 2.0f, 20.0f);
+    ImGui::End();
+#endif
+    // ... the game
+});
+```
+
+- It's drawn last, **on top of everything**, post-effects included.
+- **Clicks, typing and scrolling that land on a debug window don't reach the game**, so clicking a checkbox doesn't also fire your gun. Releases always get through, so no key gets stuck down. `debug_ui_wants_mouse()` / `debug_ui_wants_keyboard()` are there if you need to know yourself.
+- `#if THISTLE_DEBUG_UI` keeps the game building with the module off, where `<imgui.h>` isn't on the include path. `ImGui::ShowDemoWindow()` is compiled in and is the best tour of what ImGui can do.
+- It's a debug tool, and it looks like one on purpose. Build the game's own menus with the widgets above.
+
+Verified: the physics demo's stats and tuning windows were used under Xvfb + llvmpipe. Toggling a checkbox and dragging a slider changed the game while the click didn't reach it (the fly camera didn't grab the mouse). The same build cross-compiles for Windows with MinGW, with sokol_imgui's D3D11 path compiled but not run. CI builds it on macOS, Windows and Linux with the modules on.

@@ -9,7 +9,9 @@
 //   F              show the colliders
 //   R              rebuild the scene
 //
-// Hard impacts kick up dust (from the contact events). Stats go to the log.
+// Hard impacts kick up dust (from the contact events). Stats go to the log;
+// built with the debug UI module (THISTLE_DEBUG_UI) there's also a stats
+// window and a panel for gravity, blast strength and the collider view.
 // Opens a window and never quits on its own, so CI builds it but doesn't run it.
 #include <thistle.hpp>
 #include <algorithm>
@@ -17,6 +19,9 @@
 #include <deque>
 #include <string>
 #include <vector>
+#if THISTLE_DEBUG_UI
+#include <imgui.h>
+#endif
 using namespace thistle;
 using namespace thistle::three;
 
@@ -152,6 +157,7 @@ int main() {
     FlyCamera fly;
     fly.look.pitch = radians(-14.0f);
     bool debug = false;
+    float blast_speed = 14.0f, blast_radius = 6.0f;
 
     ParticleSystem dust;
     dust.settings = ParticleSettings{.start_color = rgba{0.85f, 0.8f, 0.7f, 0.7f}, .end_color = rgba{0.85f, 0.8f, 0.7f, 0.0f},
@@ -187,7 +193,7 @@ int main() {
         }
         if (f.key_pressed(Key::E)) {
             if (const PhysicsHit hit = physics.raycast(aim, 200.0f)) {
-                const int n = physics.explode(hit.point, 6.0f, 14.0f);
+                const int n = physics.explode(hit.point, blast_radius, blast_speed);
                 dust.emit(hit.point, 80, fire);
                 dust.emit(hit.point, 60);
                 log_info("physics demo: blast moved " + std::to_string(n) + " bodies");
@@ -197,6 +203,18 @@ int main() {
             if (const PhysicsHit hit = physics.raycast(aim, 200.0f)) add_box(hit.point + vec3{0, 6, 0}, {1, 1, 1}, wood(static_cast<int>(things.size())));
         }
 
+#if THISTLE_DEBUG_UI
+        debug_stats_window();
+        ImGui::SetNextWindowPos(ImVec2(10, 150), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Physics", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+        ImGui::Text("%d bodies", physics.body_count());
+        ImGui::SliderFloat("gravity", &physics.gravity.y, -30.0f, 5.0f);
+        ImGui::SliderFloat("blast speed", &blast_speed, 1.0f, 40.0f);
+        ImGui::SliderFloat("blast radius", &blast_radius, 1.0f, 15.0f);
+        ImGui::Checkbox("show colliders", &debug);
+        if (ImGui::Button("rebuild")) build();
+        ImGui::End();
+#endif
         physics.step(f.dt);
         for (const Contact& c : physics.contacts()) {
             if (c.speed > 4.0f) dust.emit(c.point, std::min(24, static_cast<int>(c.speed * 2.0f)));

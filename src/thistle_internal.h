@@ -7,6 +7,10 @@
 
 #include "sokol_gfx.h"
 
+struct ma_engine;
+struct ma_sound;
+struct sapp_event;
+
 namespace thistle::detail {
 
 // --- implemented in thistle.cpp ---
@@ -17,6 +21,10 @@ bool read_file_bytes(const std::string& path, std::vector<unsigned char>& out);
 bool read_file_text(const std::string& path, std::string& out);
 bool load_image_rgba(const std::string& path, std::vector<unsigned char>& out, int& w, int& h);
 uint64_t frame_index();            // increments once per rendered frame
+// The miniaudio engine and the sound-effects group (set_sfx_volume) — null
+// before App::run() has set audio up, or if there's no audio device.
+ma_engine* audio_engine();
+ma_sound* sfx_group();
 int frame_width();
 int frame_height();
 
@@ -49,6 +57,18 @@ void terrain_triangles(const three::Terrain& terrain, std::vector<vec3>& out); /
 void replace_model(three::Model& model, const three::ModelData& data);
 // Every triangle of every part, in world space (3 vec3 per triangle).
 void model_world_triangles(three::Model model, const three::mat4& transform, std::vector<vec3>& out);
+
+// --- implemented in debug_ui.cpp (or debug_ui_off.cpp), called from thistle.cpp ---
+void debug_ui_setup();
+void debug_ui_new_frame(int width, int height, double dt);
+bool debug_ui_event(const sapp_event* e); // true: the debug UI took it, the game doesn't see it
+void debug_ui_render();                   // inside the last pass of the frame
+void debug_ui_shutdown();
+
+// --- implemented in three_audio.cpp ---
+void three_audio_update();     // once per frame: frees finished sounds
+void three_audio_shutdown();   // before the audio engine goes
+void three_audio_camera(vec3 position, three::quat rotation); // World::render(): the listener follows unless set manually
 
 // --- implemented in three_render.cpp, called from thistle.cpp's frame loop ---
 void three_setup();

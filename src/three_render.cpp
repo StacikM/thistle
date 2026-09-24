@@ -1199,6 +1199,7 @@ void World::render(const Frame& f, const Camera& camera) {
 }
 
 void World::render(const Frame&, const Camera& camera, Rect viewport) {
+    detail::three_audio_camera(camera.position, camera.rotation);
     WorldImpl& impl = touch(impl_);
     PassRecord pass;
     pass.camera = camera;
@@ -1554,6 +1555,7 @@ void three_draw_layers() {
 }
 
 void three_end_frame() {
+    three_audio_update();
     g_three.passes.clear();
     g_three.current_layer = 0;
     g_three.stats_last_frame = g_three.stats_this_frame;
