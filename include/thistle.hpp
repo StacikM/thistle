@@ -1442,6 +1442,12 @@ struct Bounds {
     vec3 size() const { return max - min; }
     void add(vec3 p);
     Bounds transformed(const mat4& m) const; // bounds of the 8 transformed corners
+    bool overlaps(const Bounds& o) const {   // touching edges don't count
+        return min.x < o.max.x && max.x > o.min.x && min.y < o.max.y && max.y > o.min.y && min.z < o.max.z && max.z > o.min.z;
+    }
+    bool contains(vec3 p) const {
+        return p.x >= min.x && p.x <= max.x && p.y >= min.y && p.y <= max.y && p.z >= min.z && p.z <= max.z;
+    }
 };
 
 // --- geometry --------------------------------------------------------------
@@ -1903,9 +1909,99 @@ public:
     // do it up front (e.g. behind a loading screen) instead.
     void remesh_all();
 
+    // Walks the grid along the ray, block by block (exact, no stepping
+    // artifacts), and stops at the first block that isn't air — or, with
+    // solid_only, the first solid one (so a ray passes through water).
+    // hit.block + hit.normal is the empty cell in front of the face that was
+    // hit: exactly where "place a block" should put it.
+    struct Hit {
+        bool hit = false;
+        ivec3 block;
+        ivec3 normal;   // which face: {0,1,0} = top, {-1,0,0} = the -X side, ...
+        BlockId id = 0;
+        float distance = 0.0f;
+        vec3 point;
+        explicit operator bool() const { return hit; }
+    };
+    Hit raycast(const Ray& ray, float max_distance = 100.0f, bool solid_only = false) const;
+
+    // Is any solid block inside this world-space box?
+    bool overlaps_solid(const Bounds& box) const;
+
 private:
     friend class World;
     std::unique_ptr<struct VoxelWorldImpl> impl_;
+};
+
+// --- collision & characters -------------------------------------------------------
+// Built in, no physics library needed: static colliders plus a character
+// controller that walks on them. It handles what a first- or third-person
+// game needs (walls, floors, stairs, jumping). Things that tumble and bounce
+// off each other are rigid-body physics — see the optional Physics3D.
+
+// The static stuff characters collide with: voxel worlds (read live, so
+// broken blocks stop blocking immediately), triangle meshes from models,
+// and plain boxes. Fill it once, or add/remove as the level changes.
+class CollisionWorld {
+public:
+    CollisionWorld();
+    ~CollisionWorld();
+    CollisionWorld(CollisionWorld&&) noexcept;
+    CollisionWorld& operator=(CollisionWorld&&) noexcept;
+    CollisionWorld(const CollisionWorld&) = delete;
+    CollisionWorld& operator=(const CollisionWorld&) = delete;
+
+    // Each add returns an id for remove(). The voxel world must outlive this.
+    int add(const VoxelWorld& voxels);
+    int add(Model model, const Transform& transform = {}); // its triangles, as they are now
+    int add_box(const Bounds& box);
+    void remove(int id);
+    void clear();
+
+    bool overlaps(const Bounds& box) const;
+    RaycastHit raycast(const Ray& ray, float max_distance = no_limit) const;
+
+private:
+    friend struct CharacterController;
+    std::unique_ptr<struct CollisionWorldImpl> impl_;
+};
+
+// A walking character: an upright box that slides along walls, lands on
+// floors, climbs small steps and jumps. `position` is the middle of its
+// feet. Feed it input every frame:
+//
+//   player.update(level, look.move_input(f), f.key_pressed(Key::Space), f.dt);
+//   camera.position = player.eye();
+struct CharacterController {
+    vec3 position;
+    vec3 velocity;
+    float radius = 0.3f;        // half the box's width (a 0.6 m wide person)
+    float height = 1.8f;
+    float eye_height = 1.62f;   // where eye() puts the camera
+    float move_speed = 5.0f;    // m/s at full input
+    float acceleration = 40.0f; // how quickly it reaches move_speed on the ground
+    float air_control = 0.25f;  // fraction of that acceleration while airborne
+    float gravity = 25.0f;      // m/s^2, a bit stronger than real life: jumps feel less floaty
+    float jump_speed = 8.0f;    // takeoff speed; 8 with gravity 25 clears ~1.25 m
+    float step_height = 0.55f;  // walk up ledges this tall without jumping (1.05 = Minecraft auto-jump)
+    float max_slope = radians(50.0f); // mesh slopes steeper than this act as walls instead of ramps
+    float coyote_time = 0.1f;   // can still jump this long after walking off a ledge
+    float jump_buffer = 0.1f;   // a jump pressed this long before landing still happens
+
+    // `wish`: desired horizontal direction, length 0..1 (y ignored).
+    void update(const CollisionWorld& world, vec3 wish, bool jump, float dt);
+    // Lower level: moves by `delta` against the world, sliding along whatever
+    // it hits, and returns how far it actually got. update() is built on this.
+    vec3 move(const CollisionWorld& world, vec3 delta);
+
+    bool on_ground() const { return grounded_; }
+    Bounds bounds() const { return Bounds{position - vec3{radius, 0.0f, radius}, position + vec3{radius, height, radius}}; }
+    vec3 eye() const { return position + vec3{0.0f, eye_height, 0.0f}; }
+
+private:
+    bool grounded_ = false;
+    float since_ground_ = 1e9f;
+    float since_jump_press_ = 1e9f;
 };
 
 } // namespace thistle::three
