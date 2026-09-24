@@ -1,11 +1,13 @@
-// A small model viewer and a visual check for three::load_model():
-//   thistle_model_viewer a.glb b.obj c.gltf ...
+// A small model viewer and a visual check for three::load_model() and
+// VoxelWorld::load_vox():
+//   thistle_model_viewer a.glb b.obj c.gltf d.vox ...
 // Lines the models up side by side, each scaled so its largest side is 2
 // units (sample files come in wildly different units), on a ground grid.
 // Right-drag orbits, scroll zooms, middle-drag pans. Opens a window and
 // never quits on its own, so CI builds it but doesn't run it.
 #include <thistle.hpp>
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 using namespace thistle;
@@ -16,8 +18,22 @@ int main(int argc, char** argv) {
 
     struct Placed { Model model; Transform at; };
     std::vector<Placed> placed;
+    std::vector<std::unique_ptr<VoxelWorld>> voxel_models;
     float x = 0.0f;
     for (int i = 1; i < argc; ++i) {
+        const std::string path = argv[i];
+        if (path.size() > 4 && path.substr(path.size() - 4) == ".vox") {
+            auto v = std::make_unique<VoxelWorld>();
+            if (!v->load_vox(path)) continue;
+            const Bounds b = v->bounds();
+            const vec3 size = b.size();
+            v->voxel_size = 2.0f / std::max({size.x, size.y, size.z, 1e-6f});
+            v->origin = {x - size.x * v->voxel_size * 0.5f, 0.0f, -size.z * v->voxel_size * 0.5f};
+            log_info("model viewer: " + path + " block types=" + std::to_string(v->block_type_count()));
+            voxel_models.push_back(std::move(v));
+            x += 3.0f;
+            continue;
+        }
         const Model m = load_model(argv[i]);
         if (!m.valid()) continue;
         const Bounds b = model_bounds(m);
@@ -40,6 +56,7 @@ int main(int argc, char** argv) {
         orbit.update(camera, f);
         world.grid({orbit.target.x, 0.0f, 0.0f}, std::max(10.0f, x + 6.0f), 1.0f);
         for (const Placed& p : placed) world.draw(p.model, p.at);
+        for (auto& v : voxel_models) world.draw(*v);
         world.render(f, camera);
     });
     return app.run();

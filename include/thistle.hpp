@@ -1869,6 +1869,10 @@ public:
 
     float voxel_size = 1.0f;     // world units per block: 1 for Minecraft, ~0.1 for Teardown
     vec3 origin{0.0f, 0.0f, 0.0f}; // world position of block (0,0,0)'s minimum corner
+    // Turns the whole grid around `origin` — a voxel prop or a chunk of
+    // debris. Drawing, raycast() and to_block() follow it; the built-in
+    // CharacterController/CollisionWorld assume an unrotated grid.
+    quat rotation{};
     bool ambient_occlusion = true; // darken the inside corners where blocks meet (applies on the next re-mesh)
 
     VoxelWorld();
@@ -1927,6 +1931,24 @@ public:
 
     // Is any solid block inside this world-space box?
     bool overlaps_solid(const Bounds& box) const;
+
+    // Everything — block types, blocks, voxel_size — as compact bytes
+    // (run-length compressed chunks), and back. save()/load() write/read a
+    // file; serialize()/deserialize() are for sending a world over the
+    // network or embedding it in your own save format. load/deserialize
+    // replace the whole world and return false (leaving it empty) on bad data.
+    std::vector<uint8_t> serialize() const;
+    bool deserialize(const uint8_t* data, size_t size);
+    bool save(const std::string& path) const;
+    bool load(const std::string& path);
+
+    // Imports a MagicaVoxel .vox file's blocks with their minimum corner at
+    // `at` (MagicaVoxel is Z-up; it's turned to stand upright here). Each
+    // palette color becomes a flat-colored block type (shared between
+    // imports), glass materials become see-through and emissive ones glow.
+    // Multi-model files are placed where MagicaVoxel's scene puts them.
+    // Returns false if the file can't be read.
+    bool load_vox(const std::string& path, ivec3 at = {0, 0, 0});
 
 private:
     friend class World;
