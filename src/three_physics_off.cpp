@@ -34,6 +34,8 @@ RigidBody Physics3D::add_box(vec3, vec3, BodyType) { explain_once(); return {}; 
 RigidBody Physics3D::add_sphere(vec3, float, BodyType) { explain_once(); return {}; }
 RigidBody Physics3D::add_static(Model, const Transform&) { explain_once(); return {}; }
 RigidBody Physics3D::add_static(const Terrain&) { explain_once(); return {}; }
+void Physics3D::add_static(const VoxelWorld&) { explain_once(); }
+void Physics3D::remove_static(const VoxelWorld&) {}
 void Physics3D::remove(RigidBody) {}
 void Physics3D::clear() {}
 bool Physics3D::contains(RigidBody) const { return false; }
@@ -61,6 +63,7 @@ bool Physics3D::sleeping(RigidBody) const { return false; }
 void Physics3D::wake(RigidBody) {}
 Bounds Physics3D::bounds(RigidBody) const { return {}; }
 uint64_t Physics3D::user(RigidBody) const { return 0; }
+void Physics3D::set_collider(RigidBody, const Collider&) {}
 
 PhysicsHit Physics3D::raycast(const Ray&, float, RigidBody) const { return {}; }
 std::vector<RigidBody> Physics3D::overlap_sphere(vec3, float) const { return {}; }

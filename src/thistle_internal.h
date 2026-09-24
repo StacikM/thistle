@@ -26,6 +26,19 @@ int frame_height();
 // such a ray *exits* and so would wrongly skip a box you're standing in.
 bool ray_reaches_box(const three::Ray& ray, const three::Bounds& box, float max_distance);
 
+// --- implemented in three_voxel.cpp ---
+struct VoxelWorldAccess {
+    // Bumped by every change to any of the world's chunks.
+    static uint64_t revision(const three::VoxelWorld& world);
+    // Every chunk holding at least one block, with the revision of its last change.
+    static void chunks(const three::VoxelWorld& world, std::vector<std::pair<three::ivec3, uint64_t>>& out);
+};
+
+// --- implemented in three_collider.cpp ---
+// One chunk's solid blocks merged into boxes: block min (inclusive) and max
+// (exclusive), in the world's block coordinates. Appends to `out`.
+void voxel_chunk_boxes(const three::VoxelWorld& world, three::ivec3 chunk, std::vector<std::pair<three::ivec3, three::ivec3>>& out);
+
 // --- implemented in three_terrain.cpp ---
 void terrain_triangles(const three::Terrain& terrain, std::vector<vec3>& out); // 3 vec3 per triangle, world space
 

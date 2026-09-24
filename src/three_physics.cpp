@@ -270,6 +270,17 @@ struct Physics3DImpl {
     int added_since_optimize = 0;
     bool warned_full = false;
 
+    // Block worlds added with add_static(): one static body per chunk.
+    struct VoxelLink {
+        const VoxelWorld* world = nullptr;
+        uint64_t revision = ~0ull;
+        vec3 origin;
+        quat rotation;
+        float voxel_size = 0.0f;
+        std::unordered_map<uint64_t, std::pair<RigidBody, uint64_t>> chunks; // packed chunk coords -> body, chunk revision
+    };
+    std::vector<VoxelLink> voxel_links;
+
     explicit Physics3DImpl(int max_bodies) {
         std::fill(std::begin(layer_matrix), std::end(layer_matrix), 0xFFFFFFFFu);
         acquire_jolt();
@@ -350,6 +361,38 @@ struct Physics3DImpl {
         return shape;
     }
 
+    // Boxes given as min/max corner pairs, glued into one shape.
+    JPH::ShapeRefC voxel_boxes(const std::vector<vec3>& corners, float voxel_size) {
+        if (corners.size() < 2) return nullptr;
+        // Rounded corners help Jolt's collision detection, but a voxel's
+        // edges should stay sharp-ish: at most a tenth of a block.
+        const float rounding = std::min(JPH::cDefaultConvexRadius, 0.1f * std::max(voxel_size, 1e-3f));
+        std::unordered_map<ShapeKey, JPH::ShapeRefC, ShapeKeyHash> boxes; // most boxes repeat a few sizes
+        auto box = [&](vec3 size) {
+            const ShapeKey key{0, size.x, size.y, size.z};
+            if (auto it = boxes.find(key); it != boxes.end()) return it->second;
+            const JPH::Vec3 half = jv(size) * 0.5f;
+            JPH::ShapeRefC b = new JPH::BoxShape(half, std::min(rounding, half.ReduceMin() * 0.5f));
+            boxes.emplace(key, b);
+            return b;
+        };
+        if (corners.size() == 2) {
+            const vec3 lo = corners[0], hi = corners[1];
+            return new JPH::RotatedTranslatedShape(jv((lo + hi) * 0.5f), JPH::Quat::sIdentity(), box(hi - lo));
+        }
+        JPH::StaticCompoundShapeSettings settings;
+        for (size_t i = 0; i + 1 < corners.size(); i += 2) {
+            const vec3 lo = corners[i], hi = corners[i + 1];
+            settings.AddShape(jv((lo + hi) * 0.5f), JPH::Quat::sIdentity(), box(hi - lo));
+        }
+        JPH::ShapeSettings::ShapeResult r = settings.Create();
+        if (!r.IsValid()) {
+            log_warn("Physics3D: couldn't build a voxel collider: " + std::string(r.GetError().c_str()));
+            return nullptr;
+        }
+        return r.Get();
+    }
+
     // The collider's own shape, ignoring its offset/rotation.
     JPH::ShapeRefC local_shape(const Collider& c, bool dynamic) {
         switch (c.kind) {
@@ -375,6 +418,7 @@ struct Physics3DImpl {
                 }
                 return r.Get();
             }
+            case Collider::Kind::Voxels: return voxel_boxes(c.points, c.size.x);
             case Collider::Kind::Compound: {
                 JPH::StaticCompoundShapeSettings settings;
                 int count = 0;
@@ -400,6 +444,94 @@ struct Physics3DImpl {
         JPH::ShapeRefC s = local_shape(c, dynamic);
         if (!s || is_identity(c.offset, c.rotation)) return s;
         return new JPH::RotatedTranslatedShape(jv(c.offset), jq(c.rotation), s);
+    }
+
+    static uint64_t pack(ivec3 c) {
+        constexpr int64_t bias = 1 << 20;
+        return (static_cast<uint64_t>(c.x + bias) << 42) | (static_cast<uint64_t>(c.y + bias) << 21) | static_cast<uint64_t>(c.z + bias);
+    }
+
+    void remove_body(RigidBody body) {
+        const JPH::BodyID id = to_id(body);
+        if (!body || !bodies().IsAdded(id)) return;
+        bodies().RemoveBody(id);
+        bodies().DestroyBody(id);
+        removed.insert(raw(id));
+    }
+
+    // Brings each linked block world's chunk bodies up to date with its
+    // edits. Runs before a step, so nothing simulates against stale blocks.
+    void sync_voxels() {
+        std::vector<std::pair<ivec3, uint64_t>> chunks;
+        std::vector<std::pair<ivec3, ivec3>> boxes;
+        for (VoxelLink& link : voxel_links) {
+            const VoxelWorld& w = *link.world;
+            const bool moved = !(w.origin == link.origin) || w.rotation.x != link.rotation.x || w.rotation.y != link.rotation.y ||
+                               w.rotation.z != link.rotation.z || w.rotation.w != link.rotation.w || w.voxel_size != link.voxel_size;
+            const uint64_t revision = detail::VoxelWorldAccess::revision(w);
+            if (!moved && revision == link.revision) continue;
+            if (moved) { // every body is placed by the world's transform: rebuild them all
+                for (auto& [key, entry] : link.chunks) remove_body(entry.first);
+                link.chunks.clear();
+                link.origin = w.origin;
+                link.rotation = w.rotation;
+                link.voxel_size = w.voxel_size;
+            }
+            link.revision = revision;
+            detail::VoxelWorldAccess::chunks(w, chunks);
+            std::unordered_set<uint64_t> alive;
+            const float s = w.voxel_size;
+            const Transform place{w.origin, w.rotation};
+            for (const auto& [chunk, chunk_revision] : chunks) {
+                const uint64_t key = pack(chunk);
+                alive.insert(key);
+                auto it = link.chunks.find(key);
+                if (it != link.chunks.end() && it->second.second == chunk_revision) continue;
+                if (it != link.chunks.end()) remove_body(it->second.first);
+                boxes.clear();
+                detail::voxel_chunk_boxes(w, chunk, boxes);
+                RigidBody body;
+                if (!boxes.empty()) {
+                    std::vector<vec3> corners;
+                    corners.reserve(boxes.size() * 2);
+                    for (const auto& [lo, hi] : boxes) {
+                        corners.push_back(vec3{static_cast<float>(lo.x), static_cast<float>(lo.y), static_cast<float>(lo.z)} * s);
+                        corners.push_back(vec3{static_cast<float>(hi.x), static_cast<float>(hi.y), static_cast<float>(hi.z)} * s);
+                    }
+                    if (JPH::ShapeRefC shape = voxel_boxes(corners, s)) {
+                        JPH::BodyCreationSettings bcs(shape, JPH::RVec3(jv(w.origin)), jq(w.rotation), JPH::EMotionType::Static,
+                                                      object_layer(0, kStatic));
+                        bcs.mFriction = 0.6f;
+                        if (JPH::Body* b = bodies().CreateBody(bcs)) {
+                            bodies().AddBody(b->GetID(), JPH::EActivation::DontActivate);
+                            body = to_body(b->GetID());
+                            ++added_since_optimize;
+                        }
+                    }
+                }
+                link.chunks[key] = {body, chunk_revision};
+                wake_chunk(w, chunk, place);
+            }
+            for (auto it = link.chunks.begin(); it != link.chunks.end();) {
+                if (alive.count(it->first)) { ++it; continue; }
+                remove_body(it->second.first);
+                // Rebuild the chunk's key into coords to wake what rested on it.
+                constexpr int64_t bias = 1 << 20, mask = (1 << 21) - 1;
+                const ivec3 chunk{static_cast<int>(((it->first >> 42) & mask) - bias), static_cast<int>(((it->first >> 21) & mask) - bias),
+                                  static_cast<int>((it->first & mask) - bias)};
+                wake_chunk(w, chunk, place);
+                it = link.chunks.erase(it);
+            }
+        }
+    }
+
+    // Sleeping bodies don't notice the ground changing under them.
+    void wake_chunk(const VoxelWorld& w, ivec3 chunk, const Transform& place) {
+        const float size = VoxelWorld::chunk_size * w.voxel_size;
+        const vec3 lo = vec3{static_cast<float>(chunk.x), static_cast<float>(chunk.y), static_cast<float>(chunk.z)} * size;
+        const Bounds local{lo - vec3{w.voxel_size, w.voxel_size, w.voxel_size}, lo + vec3{size, size, size} + vec3{w.voxel_size, w.voxel_size, w.voxel_size}};
+        const Bounds b = local.transformed(place.matrix());
+        bodies().ActivateBodiesInAABox(JPH::AABox(jv(b.min), jv(b.max)), {}, {});
     }
 
     void add_event_contact(const RawEvent& e) {
@@ -558,6 +690,29 @@ RigidBody Physics3D::add_static(const Terrain& terrain) {
     return add(BodySettings{.collider = std::move(c), .type = BodyType::Static});
 }
 
+void Physics3D::add_static(const VoxelWorld& voxels) {
+    for (const auto& link : impl_->voxel_links) {
+        if (link.world == &voxels) return;
+    }
+    Physics3DImpl::VoxelLink link;
+    link.world = &voxels;
+    link.origin = voxels.origin;
+    link.rotation = voxels.rotation;
+    link.voxel_size = voxels.voxel_size;
+    impl_->voxel_links.push_back(std::move(link));
+    impl_->sync_voxels(); // solid right away, not just from the next step
+}
+
+void Physics3D::remove_static(const VoxelWorld& voxels) {
+    auto& links = impl_->voxel_links;
+    for (auto it = links.begin(); it != links.end(); ++it) {
+        if (it->world != &voxels) continue;
+        for (auto& [key, entry] : it->chunks) impl_->remove_body(entry.first);
+        links.erase(it);
+        return;
+    }
+}
+
 void Physics3D::remove(RigidBody body) {
     Physics3DImpl& I = *impl_;
     const JPH::BodyID id = to_id(body);
@@ -578,6 +733,7 @@ void Physics3D::clear() {
     }
     for (const JPH::BodyID& id : ids) I.removed.insert(raw(id));
     I.static_triggers.clear();
+    I.voxel_links.clear();
 }
 
 bool Physics3D::contains(RigidBody body) const { return body && impl_->bodies().IsAdded(to_id(body)); }
@@ -587,6 +743,7 @@ void Physics3D::step(float dt) {
     Physics3DImpl& I = *impl_;
     I.contacts.clear();
     I.triggers.clear();
+    I.sync_voxels();
     I.sweep_removed();
     if (dt > 0.0f) {
         constexpr float max_step = 1.0f / 60.0f;
@@ -704,6 +861,38 @@ Bounds Physics3D::bounds(RigidBody body) const {
 }
 
 uint64_t Physics3D::user(RigidBody body) const { return impl_->bodies().GetUserData(to_id(body)); }
+
+void Physics3D::set_collider(RigidBody body, const Collider& collider) {
+    Physics3DImpl& I = *impl_;
+    const JPH::BodyID id = to_id(body);
+    float density = 0.0f;
+    bool dynamic = false;
+    {
+        JPH::BodyLockRead lock(I.locks(), id);
+        if (!lock.Succeeded()) return;
+        const JPH::Body& b = lock.GetBody();
+        dynamic = b.IsDynamic();
+        if (dynamic) {
+            const float inv = b.GetMotionProperties()->GetInverseMassUnchecked();
+            const float volume = b.GetShape()->GetVolume();
+            if (inv > 0.0f && volume > 0.0f) density = 1.0f / inv / volume;
+        }
+    }
+    JPH::ShapeRefC shape = I.shape(collider, dynamic);
+    if (!shape) {
+        log_warn("Physics3D::set_collider: the collider is empty, so the body keeps its old shape");
+        return;
+    }
+    I.bodies().SetShape(id, shape, false, JPH::EActivation::Activate);
+    if (dynamic && density > 0.0f && shape->GetVolume() > 0.0f) {
+        JPH::BodyLockWrite lock(I.system->GetBodyLockInterfaceNoLock(), id);
+        if (lock.Succeeded()) {
+            JPH::MassProperties mp = shape->GetMassProperties();
+            mp.ScaleToMass(std::max(shape->GetVolume() * density, 1e-3f));
+            lock.GetBody().GetMotionProperties()->SetMassProperties(JPH::EAllowedDOFs::All, mp);
+        }
+    }
+}
 
 // --- queries --------------------------------------------------------------------------------
 
