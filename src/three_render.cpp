@@ -254,8 +254,16 @@ void upload_mesh(MeshRecord& mesh) {
     id.data = {mesh.cpu.indices.data(), mesh.cpu.indices.size() * sizeof(uint32_t)};
     id.label = "three-mesh-indices";
     mesh.ibuf = sg_make_buffer(&id);
-    mesh.index_count = static_cast<int>(mesh.cpu.indices.size());
     mesh.cpu = MeshData{};
+    if (sg_query_buffer_state(mesh.vbuf) != SG_RESOURCESTATE_VALID || sg_query_buffer_state(mesh.ibuf) != SG_RESOURCESTATE_VALID) {
+        // Out of GPU buffer slots (or memory). Skip the mesh rather than
+        // hand sokol an invalid handle, which is a hard error in debug builds.
+        static bool warned = false;
+        if (!warned) log_warn("3D: couldn't create a GPU buffer (too many meshes loaded at once?) - some meshes won't draw");
+        warned = true;
+        return;
+    }
+    mesh.index_count = static_cast<int>(id.data.size / sizeof(uint32_t));
 }
 
 void destroy_mesh(MeshRecord& mesh) {

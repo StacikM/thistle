@@ -26,6 +26,9 @@ int frame_height();
 // such a ray *exits* and so would wrongly skip a box you're standing in.
 bool ray_reaches_box(const three::Ray& ray, const three::Bounds& box, float max_distance);
 
+// --- implemented in three_terrain.cpp ---
+void terrain_triangles(const three::Terrain& terrain, std::vector<vec3>& out); // 3 vec3 per triangle, world space
+
 // --- implemented in three_render.cpp ---
 // Swaps a model's parts for new ones, keeping its id — so a mesh that gets
 // rebuilt over and over (a voxel chunk) doesn't grow the model registry.

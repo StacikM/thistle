@@ -113,6 +113,8 @@ add_library(thistle STATIC
     src/three_voxel.cpp
     src/three_collision.cpp
     src/three_particles.cpp
+    src/three_noise.cpp
+    src/three_terrain.cpp
     src/cgltf_impl.c
     src/sokol_impl.c
     src/stb_impl.c
@@ -267,6 +269,26 @@ if(THISTLE_BUILD_SMOKETEST)
         endif()
     endif()
 
+    # Terrain + noise: a low-poly island you can walk around.
+    add_executable(thistle_terrain_demo examples/terrain_demo.cpp)
+    target_link_libraries(thistle_terrain_demo PRIVATE thistle)
+    if(WIN32)
+        set_target_properties(thistle_terrain_demo PROPERTIES WIN32_EXECUTABLE ON)
+        if(MSVC)
+            target_link_options(thistle_terrain_demo PRIVATE "/ENTRY:mainCRTStartup")
+        endif()
+    endif()
+
+    # VoxelWorld streaming: an endless generated block world.
+    add_executable(thistle_endless_demo examples/endless_demo.cpp)
+    target_link_libraries(thistle_endless_demo PRIVATE thistle)
+    if(WIN32)
+        set_target_properties(thistle_endless_demo PROPERTIES WIN32_EXECUTABLE ON)
+        if(MSVC)
+            target_link_options(thistle_endless_demo PRIVATE "/ENTRY:mainCRTStartup")
+        endif()
+    endif()
+
     # A plain console program (no window, no App/Frame) that spins up a real
     # NetServer + NetClient over localhost and checks the results — proof the
     # networking layer actually works, not just compiles. No WIN32_EXECUTABLE
@@ -320,6 +342,9 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_particles_smoketest examples/particles_smoketest.cpp)
     target_link_libraries(thistle_particles_smoketest PRIVATE thistle)
 
+    add_executable(thistle_terrain_smoketest examples/terrain_smoketest.cpp)
+    target_link_libraries(thistle_terrain_smoketest PRIVATE thistle)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -354,4 +379,6 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(character_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME particles_smoketest COMMAND thistle_particles_smoketest)
     set_tests_properties(particles_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME terrain_smoketest COMMAND thistle_terrain_smoketest)
+    set_tests_properties(terrain_smoketest PROPERTIES TIMEOUT 60)
 endif()

@@ -206,10 +206,11 @@ int CollisionWorld::add(const VoxelWorld& voxels) {
     return id;
 }
 
-int CollisionWorld::add(Model model, const Transform& transform) {
+namespace {
+int add_triangles(CollisionWorldImpl& impl, std::vector<vec3> tris) {
     CollisionWorldImpl::Mesh m;
-    m.id = impl_->next_id++;
-    detail::model_world_triangles(model, transform.matrix(), m.tris);
+    m.id = impl.next_id++;
+    m.tris = std::move(tris);
     const uint32_t count = static_cast<uint32_t>(m.tris.size() / 3);
     m.stamp.assign(count, 0);
     for (uint32_t t = 0; t < count; ++t) {
@@ -220,9 +221,22 @@ int CollisionWorld::add(Model model, const Transform& transform) {
                 for (int x = ifloor(tb.min.x / kCell); x <= ifloor(tb.max.x / kCell); ++x)
                     m.grid[cell_key(x, y, z)].push_back(t);
     }
-    if (count == 0) log_warn("CollisionWorld::add: model has no triangles");
-    impl_->meshes.push_back(std::move(m));
-    return impl_->meshes.back().id;
+    if (count == 0) log_warn("CollisionWorld::add: no triangles to collide with");
+    impl.meshes.push_back(std::move(m));
+    return impl.meshes.back().id;
+}
+} // namespace
+
+int CollisionWorld::add(Model model, const Transform& transform) {
+    std::vector<vec3> tris;
+    detail::model_world_triangles(model, transform.matrix(), tris);
+    return add_triangles(*impl_, std::move(tris));
+}
+
+int CollisionWorld::add(const Terrain& terrain) {
+    std::vector<vec3> tris;
+    detail::terrain_triangles(terrain, tris);
+    return add_triangles(*impl_, std::move(tris));
 }
 
 int CollisionWorld::add_box(const Bounds& box) {
