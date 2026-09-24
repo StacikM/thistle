@@ -1126,6 +1126,15 @@ void World::plane(vec3 center, vec2 size, rgba color) {
     draw(unit_model(g_three.unit_plane, [] { return plane_mesh(); }), Transform{center, {}, {size.x, 1.0f, size.y}}, color);
 }
 
+void World::shape(int kind, const Transform& transform, rgba color) {
+    switch (kind) {
+        case 0: draw(unit_model(g_three.unit_box, [] { return box_mesh(); }), transform, color); break;
+        case 1: draw(unit_model(g_three.unit_sphere, [] { return sphere_mesh(); }), transform, color); break;
+        case 2: draw(unit_model(g_three.unit_cylinder, [] { return cylinder_mesh(); }), transform, color); break;
+        default: draw(unit_model(g_three.unit_cone, [] { return cone_mesh(); }), transform, color); break;
+    }
+}
+
 namespace {
 WorldImpl::LineVertex line_vertex(vec3 p, rgba c) { return {p.x, p.y, p.z, pack_color(c)}; }
 } // namespace

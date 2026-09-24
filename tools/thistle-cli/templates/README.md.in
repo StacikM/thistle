@@ -25,3 +25,15 @@ thistle version bump patch   # or minor / major
 thistle version set 2.0.0
 thistle version show
 ```
+
+## Optional engine modules
+
+Some engine features are big enough that they're off until a game asks for them:
+
+```bash
+thistle modules              # what there is, and what's on
+thistle enable physics3d     # 3D rigid-body physics (Jolt): three::Physics3D
+thistle disable physics3d
+```
+
+This edits `thistle.json`; the next `thistle build` picks it up.

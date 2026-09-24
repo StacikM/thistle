@@ -13,6 +13,9 @@ Commands:
     thistle version show             print the current version
     thistle version set X.Y.Z        set an exact version
     thistle version bump PART        bump major/minor/patch by one
+    thistle modules                  list the optional engine modules, and which are on
+    thistle enable MODULE            turn one on for this project (e.g. physics3d)
+    thistle disable MODULE           turn it back off
     thistle editor install           build tools/thistle-editor, put `thistle-editor` on PATH
     thistle editor update            pull the latest engine source, then rebuild+reinstall the editor
     thistle editor run               build (if needed) and run the editor without installing it
@@ -245,6 +248,63 @@ def cmd_version(args) -> None:
     print(proj["version"])
 
 
+# --- optional engine modules ---------------------------------------------------
+# Big engine features a game has to ask for. Each is a CMake option in the
+# engine that the project's CMakeLists.txt sets from thistle.json's
+# "modules" object before adding the engine (see templates/CMakeLists.txt.in).
+
+MODULES = {
+    "physics3d": ("THISTLE_PHYSICS3D",
+                  "3D rigid-body physics on Jolt Physics: three::Physics3D (adds a few minutes to the first build)"),
+}
+
+
+def _project_reads_module(root: Path, option: str) -> bool:
+    try:
+        return option in (root / "CMakeLists.txt").read_text()
+    except OSError:
+        return False
+
+
+def cmd_modules(args) -> None:
+    root = find_project_root(Path.cwd())
+    enabled = read_project(root).get("modules", {})
+    for name, (_, description) in MODULES.items():
+        state = "on " if enabled.get(name) else "off"
+        print(f"  {state}  {name:<12} {description}")
+
+
+def _set_module(args, on: bool) -> None:
+    if args.module not in MODULES:
+        die(f"no module called '{args.module}' — `thistle modules` lists them")
+    root = find_project_root(Path.cwd())
+    proj = read_project(root)
+    modules = proj.setdefault("modules", {})
+    if bool(modules.get(args.module)) == on:
+        print(f"{args.module} is already {'on' if on else 'off'}")
+        return
+    modules[args.module] = on
+    write_project(root, proj)
+    print(f"{args.module} is now {'on' if on else 'off'}; the next `thistle build` picks it up")
+    option = MODULES[args.module][0]
+    if not _project_reads_module(root, option):
+        # Projects made before modules existed don't read them from
+        # thistle.json. Say how to fix it rather than editing their CMake.
+        print(f"warning: this project's CMakeLists.txt doesn't read modules from thistle.json yet (it was made by an", file=sys.stderr)
+        print(f"older `thistle new`), so this won't take effect. Add these lines before its add_subdirectory(...):", file=sys.stderr)
+        print(f'  file(READ "${{CMAKE_CURRENT_SOURCE_DIR}}/thistle.json" _project_json)', file=sys.stderr)
+        print(f'  string(JSON {option} ERROR_VARIABLE _no_module GET "${{_project_json}}" modules {args.module})', file=sys.stderr)
+        print(f"  if(_no_module)\n      set({option} OFF)\n  endif()", file=sys.stderr)
+
+
+def cmd_enable(args) -> None:
+    _set_module(args, True)
+
+
+def cmd_disable(args) -> None:
+    _set_module(args, False)
+
+
 # --- main --------------------------------------------------------------
 
 def main() -> None:
@@ -273,6 +333,14 @@ def main() -> None:
     p_bump = vsub.add_parser("bump")
     p_bump.add_argument("part", choices=["major", "minor", "patch"])
     p_bump.set_defaults(func=cmd_version)
+
+    sub.add_parser("modules", help="list the optional engine modules, and which are on").set_defaults(func=cmd_modules)
+    p_enable = sub.add_parser("enable", help="turn an optional engine module on (e.g. physics3d)")
+    p_enable.add_argument("module")
+    p_enable.set_defaults(func=cmd_enable)
+    p_disable = sub.add_parser("disable", help="turn an optional engine module off")
+    p_disable.add_argument("module")
+    p_disable.set_defaults(func=cmd_disable)
 
     p_editor = sub.add_parser("editor", help="install/update/run the Thistle Editor (tools/thistle-editor)")
     esub = p_editor.add_subparsers(dest="editor_cmd", required=True)

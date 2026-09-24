@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <type_traits>
 
 #include <nlohmann/json.hpp>
 
@@ -1875,6 +1876,18 @@ public:
     void cylinder(vec3 center, float radius, float height, rgba color = white);
     void cone(vec3 center, float radius, float height, rgba color = white);
     void plane(vec3 center, vec2 size, rgba color = white);
+    // Rotated, too: a 1 m cube / 1 m wide sphere, cylinder and cone, scaled
+    // by transform.scale — so world.box(physics.transform(crate, size)).
+    // (Templates only so that box({x, y, z}, {w, h, d}) still means the
+    // center-and-size version above instead of being ambiguous.)
+    template <class T> requires std::is_same_v<T, Transform>
+    void box(const T& transform, rgba color = white) { shape(0, transform, color); }
+    template <class T> requires std::is_same_v<T, Transform>
+    void sphere(const T& transform, rgba color = white) { shape(1, transform, color); }
+    template <class T> requires std::is_same_v<T, Transform>
+    void cylinder(const T& transform, rgba color = white) { shape(2, transform, color); }
+    template <class T> requires std::is_same_v<T, Transform>
+    void cone(const T& transform, rgba color = white) { shape(3, transform, color); }
 
     // Debug lines: 1 pixel wide, unlit. on_top draws them through everything
     // (gizmos, selection outlines); otherwise they're hidden behind solid objects.
@@ -1888,6 +1901,7 @@ public:
     void render(const Frame& f, const Camera& camera, Rect viewport); // viewport in pixels, top-left origin
 
 private:
+    void shape(int kind, const Transform& transform, rgba color); // 0 box, 1 sphere, 2 cylinder, 3 cone
     std::unique_ptr<struct WorldImpl> impl_;
 };
 
@@ -2167,6 +2181,217 @@ private:
     bool grounded_ = false;
     float since_ground_ = 1e9f;
     float since_jump_press_ = 1e9f;
+};
+
+// --- rigid-body physics (optional, Jolt Physics) ------------------------------------
+// Things that tumble, stack, bounce and get knocked over: crates, barrels,
+// debris, a wrecking ball. Built on Jolt Physics, and opt-in because it's a
+// big library: while it's off the engine doesn't download or compile it,
+// and this API still compiles but does nothing (it logs once that it's
+// off). Turn it on with `thistle enable physics3d` in a CLI project, or
+// -DTHISTLE_PHYSICS3D=ON. Meters, kilograms, seconds.
+//
+//   Physics3D physics;
+//   physics.add_box({0, -0.5f, 0}, {40, 1, 40}, BodyType::Static); // the ground
+//   RigidBody crate = physics.add_box({0, 5, 0}, {1, 1, 1});      // falls onto it
+//   // every frame:
+//   physics.step(f.dt);
+//   world.box(physics.transform(crate, {1, 1, 1}), brown);
+//
+// Walking characters don't need any of this (see CharacterController).
+
+// Whether the engine was built with Physics3D. Code that must compile
+// either way can also test the THISTLE_PHYSICS3D macro.
+bool physics3d_available();
+
+enum class BodyType {
+    Static,    // never moves: floors, walls, the level
+    Dynamic,   // moved by the simulation: falls, gets pushed, spins
+    Kinematic, // moved only by you (move_kinematic), and pushes dynamic bodies out of its way: platforms, doors
+};
+
+// A body's shape. Boxes, spheres, capsules and cylinders are the cheap
+// ones. convex() shrink-wraps a point cloud (a rock, a barrel, any model)
+// and is still fast. mesh() is the exact triangles, for static and
+// kinematic bodies only: a dynamic body given one uses its convex hull
+// instead. compound() glues several together, each at its own offset.
+struct Collider {
+    enum class Kind { Box, Sphere, Capsule, Cylinder, Convex, Mesh, Compound };
+    Kind kind = Kind::Box;
+    vec3 size{1.0f, 1.0f, 1.0f}; // Box: full size. Sphere: x = radius. Capsule, Cylinder: x = radius, y = full height
+    std::vector<vec3> points;    // Convex: the cloud. Mesh: 3 per triangle, counter-clockwise from outside
+    std::vector<Collider> parts; // Compound
+    vec3 offset;                 // where it sits within its body (or compound)
+    quat rotation;
+
+    static Collider box(vec3 size);
+    static Collider sphere(float radius);
+    static Collider capsule(float radius, float height); // upright; height includes the caps, like capsule_mesh()
+    static Collider cylinder(float radius, float height);
+    static Collider convex(std::vector<vec3> points);
+    static Collider convex(const MeshData& mesh);
+    static Collider convex(Model model, vec3 scale = {1.0f, 1.0f, 1.0f}); // every part, placed as in the model
+    static Collider mesh(const MeshData& mesh);
+    static Collider mesh(Model model, vec3 scale = {1.0f, 1.0f, 1.0f});
+    static Collider compound(std::vector<Collider> parts);
+    // This collider moved within its body: box({1, 2, 1}).at({0, 1, 0})
+    // puts a box's bottom at the body's origin.
+    Collider at(vec3 offset, quat rotation = {}) const;
+};
+
+struct BodySettings {
+    Collider collider;
+    BodyType type = BodyType::Dynamic;
+    vec3 position;
+    quat rotation;
+    vec3 velocity;
+    vec3 angular_velocity;         // radians per second around each axis
+    float mass = 0.0f;             // kg; 0 = worked out from the collider's volume and `density`
+    float density = 500.0f;        // kg per m^3: 500 is wood, water is 1000, stone about 2500
+    float friction = 0.5f;         // 0 = ice
+    float bounciness = 0.0f;       // 0 = lands with a thud, 1 = a superball
+    float linear_damping = 0.05f;  // like air resistance
+    float angular_damping = 0.05f;
+    float gravity_scale = 1.0f;    // 0 = floats
+    // A trigger reports what enters and leaves it (see on_trigger) but
+    // doesn't block anything. It never sleeps, so it notices resting bodies.
+    bool trigger = false;
+    // Extra checks so small fast bodies (bullets, thrown knives) can't pass
+    // through thin walls between two steps. Costs a little, so opt-in.
+    bool fast = false;
+    // Bodies at rest stop simulating until something touches them: that's
+    // what makes thousands of settled crates cheap. Turn off for bodies you
+    // steer every frame with forces.
+    bool can_sleep = true;
+    int layer = 0;      // 0..31; see Physics3D::set_layers_collide
+    uint64_t user = 0;  // yours: an entity id, an index, a pointer...
+};
+
+// A handle to a body in a Physics3D. Stays safe to use after the body is
+// removed: every call then just does nothing (or returns zeroes).
+struct RigidBody {
+    uint32_t id = 0;
+    bool valid() const { return id != 0; }
+    explicit operator bool() const { return id != 0; }
+    bool operator==(RigidBody o) const { return id == o.id; }
+    bool operator!=(RigidBody o) const { return id != o.id; }
+};
+
+struct PhysicsHit : RaycastHit {
+    RigidBody body;
+};
+
+// Two bodies starting to touch.
+struct Contact {
+    RigidBody a, b;
+    vec3 point;         // where they touch
+    vec3 normal;        // pointing from a toward b
+    float speed = 0.0f; // how fast they were closing in, m/s: loudness for an impact sound, or damage
+};
+
+struct TriggerEvent {
+    RigidBody trigger, other;
+    bool entered = true; // false = left it (or was removed)
+};
+
+class Physics3D {
+public:
+    vec3 gravity{0.0f, -9.81f, 0.0f};
+
+    // max_bodies is a hard limit (bodies past it aren't added); the
+    // default is plenty for almost anything.
+    explicit Physics3D(int max_bodies = 65536);
+    ~Physics3D();
+    Physics3D(Physics3D&&) noexcept;
+    Physics3D& operator=(Physics3D&&) noexcept;
+    Physics3D(const Physics3D&) = delete;
+    Physics3D& operator=(const Physics3D&) = delete;
+
+    RigidBody add(const BodySettings& settings); // an invalid handle if the collider couldn't be built
+    RigidBody add_box(vec3 center, vec3 size, BodyType type = BodyType::Dynamic);
+    RigidBody add_sphere(vec3 center, float radius, BodyType type = BodyType::Dynamic);
+    // Level geometry as exact triangles (placed by `transform`, scale
+    // included), as it is now. Static.
+    RigidBody add_static(Model model, const Transform& transform = {});
+    RigidBody add_static(const Terrain& terrain);
+    void remove(RigidBody body);
+    void clear();
+    bool contains(RigidBody body) const;
+    int body_count() const;
+
+    // Advances the simulation: call once per frame with f.dt. Long frames
+    // are split into steps of at most 1/60 s; past 4 of those the rest is
+    // dropped (the game briefly runs slow instead of freezing up).
+    void step(float dt);
+
+    // --- one body ---
+    // Where to draw it: world.draw(crate_model, physics.transform(crate)).
+    // `scale` goes into the result as is, for scaled shapes like world.box().
+    Transform transform(RigidBody body, vec3 scale = {1.0f, 1.0f, 1.0f}) const;
+    vec3 position(RigidBody body) const;
+    quat rotation(RigidBody body) const;
+    void set_position(RigidBody body, vec3 position); // teleports (and wakes it)
+    void set_rotation(RigidBody body, quat rotation);
+    // Kinematic bodies: be at this position and rotation `dt` seconds from
+    // now, pushing whatever is in the way. Call before step(f.dt), with f.dt.
+    void move_kinematic(RigidBody body, vec3 position, quat rotation, float dt);
+    vec3 velocity(RigidBody body) const;
+    void set_velocity(RigidBody body, vec3 velocity);
+    vec3 angular_velocity(RigidBody body) const;
+    void set_angular_velocity(RigidBody body, vec3 velocity);
+    // Forces and torques last one step: call them every frame for a steady
+    // push (thrusters, wind). Impulses are instant kicks: mass * change in
+    // velocity. at_point off the center of mass also sets it spinning.
+    void apply_force(RigidBody body, vec3 force);
+    void apply_torque(RigidBody body, vec3 torque);
+    void apply_impulse(RigidBody body, vec3 impulse);
+    void apply_impulse(RigidBody body, vec3 impulse, vec3 at_point);
+    float mass(RigidBody body) const; // 0 for static bodies
+    BodyType type(RigidBody body) const;
+    // Dynamic <-> Kinematic (pick something up, then drop it), or to
+    // Static. A body added as Static stays static.
+    void set_type(RigidBody body, BodyType type);
+    bool sleeping(RigidBody body) const;
+    void wake(RigidBody body);
+    Bounds bounds(RigidBody body) const;
+    uint64_t user(RigidBody body) const;
+
+    // --- queries ---
+    // Nearest body along the ray. Triggers are ignored, and so is `ignore`
+    // (e.g. whoever fired).
+    PhysicsHit raycast(const Ray& ray, float max_distance = no_limit, RigidBody ignore = {}) const;
+    // Every body touching the sphere or box (exact shapes, not just bounds).
+    std::vector<RigidBody> overlap_sphere(vec3 center, float radius) const;
+    std::vector<RigidBody> overlap_box(const Bounds& box) const;
+    // Every dynamic body within `radius` flies away from `center` at up to
+    // `speed` m/s: full at the center, fading to nothing at the edge. The
+    // same speed for a pebble and a car, so it's easy to tune. Returns how
+    // many bodies it moved.
+    int explode(vec3 center, float radius, float speed);
+
+    // --- events ---
+    // What happened during the last step(). A resting pair that falls
+    // asleep and is woken again (by a push, a nearby explosion) reports
+    // touching again, with speed near 0: filter on speed for sounds.
+    const std::vector<Contact>& contacts() const;
+    const std::vector<TriggerEvent>& trigger_events() const;
+    // Or get called for each, at the end of every step() (on your thread,
+    // so it's fine to add and remove bodies from inside).
+    void on_contact(std::function<void(const Contact&)> fn);
+    void on_trigger(std::function<void(const TriggerEvent&)> fn);
+
+    // Layers 0..31. Every pair collides until told otherwise, e.g.
+    // set_layers_collide(DEBRIS, PLAYER, false). Triggers go by layers
+    // too: one only notices bodies on layers it collides with.
+    void set_layers_collide(int layer_a, int layer_b, bool collide);
+    bool layers_collide(int layer_a, int layer_b) const;
+
+    // Wireframes of every collider: green awake, gray asleep, blue static,
+    // yellow triggers. Hidden behind solid geometry unless on_top.
+    void draw_debug(World& world, bool on_top = false) const;
+
+private:
+    std::unique_ptr<struct Physics3DImpl> impl_;
 };
 
 } // namespace thistle::three

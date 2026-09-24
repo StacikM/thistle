@@ -15,8 +15,12 @@
 // Before windows.h: it defines min/max as macros unless told not to, which
 // breaks any std::min/std::max used later in this file (see the same fix
 // and full explanation in thistle.cpp).
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX // Jolt (THISTLE_PHYSICS3D) passes it on the command line too
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include <winhttp.h>
 #include <xinput.h>

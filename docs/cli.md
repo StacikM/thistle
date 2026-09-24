@@ -35,7 +35,7 @@ A complete, ordinary CMake project — nothing about it depends on the CLI conti
 ```
 mygame/
   CMakeLists.txt     # wired to the engine via THISTLE_DIR, calls thistle_bundle_assets()
-  thistle.json        # {"name": "mygame", "version": "1.0.0"}
+  thistle.json        # {"name": "mygame", "version": "1.0.0"} (+ "modules" once you enable one)
   src/
     main.cpp           # starter: a moving circle + a rect, zero assets required
     version.hpp.in      # configure_file() template — becomes generated/version.hpp
@@ -52,6 +52,7 @@ The starter `main.cpp` deliberately draws shapes, not text — text needs a `.tt
 - **`thistle build [--release]`** — configures on first run (creates `build/`), then just builds on every call after. Debug by default.
 - **`thistle run [--release]`** — builds, then execs the resulting binary. Finds it under whatever your platform's generator actually produced (`.app` bundle on macOS, `Debug/`/`Release/` subfolder on Windows' multi-config generator, a plain binary on Linux) so you never have to know that path yourself.
 - **`thistle version show`** / **`set X.Y.Z`** / **`bump major|minor|patch`** — reads/writes `thistle.json`. No network behavior of any kind — this is metadata, not an updater (see below).
+- **`thistle modules`** / **`enable <module>`** / **`disable <module>`** — optional engine modules, big enough that a game has to ask for them. Right now there's one, `physics3d` (Jolt, see [physics3d.md](physics3d.md)). Switching writes `"modules": {...}` into `thistle.json`; the generated `CMakeLists.txt` reads it before adding the engine, and the `CONFIGURE_DEPENDS` line below makes the next build reconfigure by itself. Projects made by an older `thistle new` don't read modules — `enable` notices and prints the lines to add rather than editing your CMake for you.
 - **`thistle editor install`** — builds `tools/thistle-editor` and puts a `thistle-editor` launcher on your `PATH` (same default/override as the `thistle` command itself: `~/.local/bin`, or `THISTLE_BIN_DIR`). A symlink on Unix, a one-line wrapper `.bat` on Windows (same reasoning as `install.bat` above).
 - **`thistle editor update`** — `git pull --ff-only` on the engine checkout (the editor's source lives in the same repo, so this is the same update mechanism as the engine itself), then rebuilds and reinstalls.
 - **`thistle editor run`** — builds (if needed) and execs the editor directly, without touching your `PATH` — for trying a change without installing it.

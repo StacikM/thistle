@@ -1,12 +1,13 @@
 name: CI
 
-# Builds the engine (and both example programs) on real macOS, Windows, and
-# Linux runners on every push/PR to main, then runs the one test that's
-# actually safe to run headlessly (thistle_net_smoketest — see the comment
-# on it in CMakeLists.txt). thistle_smoketest opens a real window and never
-# exits on its own, so it's built here (catches link/compile regressions —
-# this exact CI would have caught both Windows-specific bugs already found
-# by hand this project) but never executed.
+# Builds the engine (and the example programs) on real macOS, Windows, and
+# Linux runners on every push/PR to main, with and without the opt-in Jolt
+# physics, then runs the headless ctest suites (networking, scenes, and the
+# 3D ones — see the add_test() calls in CMakeLists.txt). The demos and
+# thistle_smoketest open a real window and never exit on their own, so
+# they're built here (catches link/compile regressions — this exact CI would
+# have caught both Windows-specific bugs already found by hand this
+# project) but never executed.
 on:
   push:
     branches: [main]
@@ -20,7 +21,11 @@ jobs:
       fail-fast: false   # one platform failing shouldn't hide the other two's results
       matrix:
         os: [macos-latest, windows-latest, ubuntu-latest]
+        # Physics3D is opt-in (Jolt): build and test both ways, so neither
+        # the Jolt build nor the stand-in used without it rots unnoticed.
+        physics3d: [OFF, ON]
     runs-on: ${{ matrix.os }}
+    name: ${{ matrix.os }} (physics3d ${{ matrix.physics3d }})
 
     steps:
       - uses: actions/checkout@v4
@@ -44,13 +49,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/_deps
-          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          key: deps-${{ runner.os }}-physics3d-${{ matrix.physics3d }}-${{ hashFiles('CMakeLists.txt') }}
 
       - name: Configure
-        run: cmake -S . -B build -DTHISTLE_BUILD_SMOKETEST=ON -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DTHISTLE_BUILD_SMOKETEST=ON -DCMAKE_BUILD_TYPE=Release -DTHISTLE_PHYSICS3D=${{ matrix.physics3d }}
 
       - name: Build
         run: cmake --build build --config Release
 
-      - name: Test (net_smoketest — real TCP client/server, no GPU/display needed)
+      - name: Test (headless suites — no GPU/display needed)
         run: ctest --test-dir build -C Release --output-on-failure
