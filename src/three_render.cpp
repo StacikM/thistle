@@ -698,8 +698,18 @@ Model make_model(const MeshData& mesh, const Material& material) {
     return Model{static_cast<int>(g_three.models.size()) - 1};
 }
 
+namespace {
+ModelRecord build_record(const ModelData& data);
+} // namespace
+
 Model make_model(const ModelData& data) {
     if (data.parts.empty()) return Model{};
+    g_three.models.push_back(build_record(data));
+    return Model{static_cast<int>(g_three.models.size()) - 1};
+}
+
+namespace {
+ModelRecord build_record(const ModelData& data) {
     ModelRecord rec;
     for (const ModelData::Part& part : data.parts) {
         MeshRecord m;
@@ -713,9 +723,9 @@ Model make_model(const ModelData& data) {
         rec.parts.push_back({static_cast<int>(rec.meshes.size()), part.material, part.transform});
         rec.meshes.push_back(std::move(m));
     }
-    g_three.models.push_back(std::move(rec));
-    return Model{static_cast<int>(g_three.models.size()) - 1};
+    return rec;
 }
+} // namespace
 
 void unload_model(Model& model) {
     if (ModelRecord* rec = model_record(model)) {
@@ -997,6 +1007,20 @@ void unload_skybox(Skybox& skybox) {
 namespace thistle::detail {
 
 using namespace thistle::three;
+
+void replace_model(Model& model, const ModelData& data) {
+    ModelRecord* rec = model_record(model);
+    if (data.parts.empty()) {
+        if (rec) unload_model(model);
+        return;
+    }
+    if (!rec) {
+        model = make_model(data);
+        return;
+    }
+    for (MeshRecord& mesh : rec->meshes) destroy_mesh(mesh);
+    *rec = build_record(data);
+}
 
 void three_setup() {
     RenderState& s = g_three;

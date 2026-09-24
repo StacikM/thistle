@@ -1682,7 +1682,7 @@ struct Sun {
     bool shadows = true;
     // Shadows are drawn out to this far from the camera. One shadow map is
     // stretched over that range, so smaller = sharper shadows up close.
-    float shadow_distance = 40.0f;
+    float shadow_distance = 60.0f;
     float shadow_strength = 1.0f;  // 1 = shadowed areas get only ambient light, 0.5 = half as dark
     float shadow_softness = 1.0f;  // edge blur, in shadow-map texels
     int shadow_resolution = 2048;  // shadow map size in pixels (memory: 4 bytes each)
@@ -1752,6 +1752,8 @@ struct RenderStats {
     int culled = 0; // model parts skipped because they were off-screen
 };
 
+class VoxelWorld;
+
 // A 3D scene. Settings (sun, sky, ambient) stay until you change them; draw
 // calls are per frame, exactly like the 2D API — call draw() for everything
 // visible every frame, then render() once:
@@ -1787,6 +1789,8 @@ public:
     void light(const SpotLight& light);
 
     void draw(Model model, const Transform& transform = {}, rgba tint = white);
+    // A block world: re-meshes whatever chunks were edited, then draws them.
+    void draw(VoxelWorld& voxels);
     // Same, but every part of the model uses `material` instead of its own.
     void draw(Model model, const Transform& transform, const Material& material);
 
@@ -1814,6 +1818,95 @@ private:
 
 // Totals over every World::render() of the previous frame.
 RenderStats render_stats();
+
+// --- voxels ------------------------------------------------------------------------
+// A block world, Minecraft- or Teardown-style: a grid of block ids, stored
+// in 32x32x32 chunks that only exist where something was placed, turned into
+// ordinary meshes (and so lit, shadowed and culled like everything else).
+// Optional — nothing else in the engine depends on it.
+
+struct ivec3 {
+    int x = 0, y = 0, z = 0;
+};
+inline ivec3 operator+(ivec3 a, ivec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
+inline ivec3 operator-(ivec3 a, ivec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+inline bool operator==(ivec3 a, ivec3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; }
+inline bool operator!=(ivec3 a, ivec3 b) { return !(a == b); }
+
+using BlockId = uint16_t; // 0 is always air
+
+// What a block looks like. Either a flat color (the MagicaVoxel/Teardown
+// look) or textured from the VoxelWorld's atlas (the Minecraft look) — set
+// the tiles and the color becomes a tint on top of them.
+struct BlockType {
+    std::string name;
+    rgba color = white;
+    // Tile indices into the atlas (see VoxelWorld::set_atlas), counted left
+    // to right, top to bottom. -1 = untextured. set_tiles() fills all three.
+    int tile_top = -1;
+    int tile_side = -1;
+    int tile_bottom = -1;
+    // Opaque: a normal block. Cutout: see-through where the texture is
+    // (leaves). Blend: glass, water — color.a says how see-through.
+    AlphaMode alpha = AlphaMode::Opaque;
+    rgba emissive = black; // lava, glowstone
+    bool solid = true;     // false: things walk through it (water, tall grass)
+
+    BlockType& set_tiles(int all) { tile_top = tile_side = tile_bottom = all; return *this; }
+    BlockType& set_tiles(int top, int side, int bottom) { tile_top = top; tile_side = side; tile_bottom = bottom; return *this; }
+    bool textured() const { return tile_top >= 0 || tile_side >= 0 || tile_bottom >= 0; }
+};
+
+class VoxelWorld {
+public:
+    static constexpr int chunk_size = 32;
+
+    float voxel_size = 1.0f;     // world units per block: 1 for Minecraft, ~0.1 for Teardown
+    vec3 origin{0.0f, 0.0f, 0.0f}; // world position of block (0,0,0)'s minimum corner
+    bool ambient_occlusion = true; // darken the inside corners where blocks meet (applies on the next re-mesh)
+
+    VoxelWorld();
+    ~VoxelWorld();
+    VoxelWorld(VoxelWorld&&) noexcept;
+    VoxelWorld& operator=(VoxelWorld&&) noexcept;
+    VoxelWorld(const VoxelWorld&) = delete;
+    VoxelWorld& operator=(const VoxelWorld&) = delete;
+
+    // Block types. Ids are handed out in order starting at 1.
+    BlockId add_block(const BlockType& type);
+    const BlockType& block_type(BlockId id) const; // id 0 or unknown: an "air" type
+    BlockId find_block(const std::string& name) const; // 0 if there's none by that name
+    int block_type_count() const;
+    // One texture holding every block texture in a grid of tile_size-pixel
+    // squares. Filter defaults to Nearest: crisp pixels, the Minecraft look.
+    void set_atlas(Texture atlas, int tile_size, TextureFilter filter = TextureFilter::Nearest);
+
+    BlockId get(int x, int y, int z) const;
+    BlockId get(ivec3 p) const { return get(p.x, p.y, p.z); }
+    void set(int x, int y, int z, BlockId id);
+    void set(ivec3 p, BlockId id) { set(p.x, p.y, p.z, id); }
+    void fill(ivec3 min, ivec3 max, BlockId id); // inclusive box
+    void fill_sphere(vec3 center, float radius, BlockId id); // in block coordinates; id 0 carves
+    void clear();
+
+    ivec3 to_block(vec3 world_point) const;    // which block a world point is inside
+    vec3 block_center(ivec3 block) const;      // world position of a block's center
+    Bounds block_bounds(ivec3 block) const;    // world-space box of one block
+    Bounds bounds() const;                     // world-space box around every non-air block (slow-ish: scans)
+
+    int chunk_count() const;
+    // The mesh the renderer draws for one chunk (chunk coordinates, i.e.
+    // block / 32), in the chunk's own block units — useful for exporting,
+    // or for tests. Parts are split by material (flat vs textured, alpha).
+    ModelData mesh_chunk(ivec3 chunk) const;
+    // Chunks are re-meshed lazily, when drawn after an edit. Call this to
+    // do it up front (e.g. behind a loading screen) instead.
+    void remesh_all();
+
+private:
+    friend class World;
+    std::unique_ptr<struct VoxelWorldImpl> impl_;
+};
 
 } // namespace thistle::three
 
