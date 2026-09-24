@@ -543,7 +543,12 @@ out vec2 uv;
 void main() {
     vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
     gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
-    uv = vec2(p.x, 1.0 - p.y);
+    // No V flip here, unlike the Metal/HLSL versions: a GL render target's
+    // row 0 is the bottom of the image, so clip-space up already matches
+    // texture-space up. Copying the flip from the other backends rendered
+    // every post effect upside down on Linux — caught by actually running
+    // it (Xvfb + Mesa llvmpipe), after it had only ever been compile-checked.
+    uv = p;
 }
 )GLSL";
 const char* POST_GLSL_FS_BODY = R"GLSL(
