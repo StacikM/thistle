@@ -127,9 +127,15 @@ int main() {
     check(client_world.get(30, 3, 30) == glass, "a client's edit shows up there at once");
     pump(300, [&] { return server_world.get(30, 3, 30) == glass; });
     check(server_world.get(30, 3, 30) == glass, "and the server applies it");
+    // Let the server's echo of that chunk arrive before the next edit in the
+    // same chunk: otherwise that (older) echo would overwrite the next
+    // optimistic edit, and "put back" below would pass for the wrong reason.
+    // (It did, on macOS CI.)
+    pump(300, [&] { return same(server_world, client_world); });
 
     client_sync.request_set({30, 30, 30}, stone);
-    pump(300, [&] { return client_world.get(30, 30, 30) == 0; });
+    check(client_world.get(30, 30, 30) == stone, "a refused edit also shows up at first");
+    pump(1000, [&] { return refused_from != -1 && client_world.get(30, 30, 30) == 0; });
     check(server_world.get(30, 30, 30) == 0 && client_world.get(30, 30, 30) == 0, "an edit the server refuses is put back on the client");
     check(refused_from == client.connection_id(), "allow_edit is told which connection asked (net::command_sender)");
 
