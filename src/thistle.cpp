@@ -2369,6 +2369,7 @@ struct NetServer::Impl {
 
 struct NetClient::Impl {
     SocketFd fd = kInvalidSocket;
+    int conn_id = 0; // from the server's welcome
     std::string rx;
     std::map<uint32_t, std::unique_ptr<NetObject>> objects;
     bool connected = false;
@@ -2390,6 +2391,7 @@ static std::unordered_map<std::string, std::function<std::unique_ptr<NetObject>(
 
 static NetServer* g_active_server = nullptr;
 static NetClient* g_active_client = nullptr;
+static int g_command_sender = 0; // set while an on_command handler runs
 
 static void net_send_spawn(SocketFd fd, NetObject& obj) {
     nlohmann::json vars = nlohmann::json::object();
@@ -2400,6 +2402,7 @@ static void net_send_spawn(SocketFd fd, NetObject& obj) {
 namespace net {
 bool is_server() { return g_active_server != nullptr; }
 bool is_client() { return g_active_client != nullptr; }
+int command_sender() { return g_command_sender; }
 }
 
 void net_register_class(const std::string& class_name, std::function<std::unique_ptr<NetObject>()> make) {
@@ -2421,6 +2424,17 @@ void NetObject::call_client_rpc(const std::string& name, NetArgs args) {
     if (!g_active_server) { log_warn("call_client_rpc(\"" + name + "\"): not running as a server"); return; }
     nlohmann::json msg = { {"t", "rpc"}, {"id", id_}, {"name", name}, {"args", args} };
     for (auto& c : NetObjectAccess::server_impl(*g_active_server).conns) net_send_json(c.fd, msg);
+}
+
+bool NetObject::call_target_rpc(int conn_id, const std::string& name, NetArgs args) {
+    if (!g_active_server) { log_warn("call_target_rpc(\"" + name + "\"): not running as a server"); return false; }
+    for (auto& c : NetObjectAccess::server_impl(*g_active_server).conns) {
+        if (c.id != conn_id) continue;
+        // Same message as a ClientRpc: the client can't tell (or need to) that only it got it.
+        net_send_json(c.fd, { {"t", "rpc"}, {"id", id_}, {"name", name}, {"args", args} });
+        return true;
+    }
+    return false;
 }
 
 // --- spawn / despawn (server-only) -----------------------------------------
@@ -2503,6 +2517,7 @@ void NetServer::update() {
         set_nodelay(fd);
         int cid = impl_->next_conn_id++;
         impl_->conns.push_back({fd, std::string(), cid});
+        net_send_json(fd, { {"t", "welcome"}, {"conn", cid} });            // older clients ignore it
         for (auto& [id, obj] : impl_->objects) net_send_spawn(fd, *obj);   // full snapshot for the newcomer
         if (on_connect) on_connect(cid);
     }
@@ -2523,8 +2538,13 @@ void NetServer::update() {
             std::string name = msg.value("name", std::string());
             auto it = impl_->objects.find(id);
             if (it == impl_->objects.end()) continue;
-            for (auto& [n, fn] : NetObjectAccess::commands(*it->second))
-                if (n == name) { fn(msg.value("args", NetArgs::object())); break; }
+            for (auto& [n, fn] : NetObjectAccess::commands(*it->second)) {
+                if (n != name) continue;
+                g_command_sender = c.id;
+                fn(msg.value("args", NetArgs::object()));
+                g_command_sender = 0;
+                break;
+            }
         }
         ++i;
     }
@@ -2587,7 +2607,9 @@ void NetClient::update() {
     while (net_extract_message(impl_->rx, msg)) {
         std::string t = msg.value("t", std::string());
         uint32_t id = msg.value("id", 0u);
-        if (t == "spawn") {
+        if (t == "welcome") {
+            impl_->conn_id = msg.value("conn", 0);
+        } else if (t == "spawn") {
             std::string cls = msg.value("class", std::string());
             auto it = net_class_registry().find(cls);
             if (it == net_class_registry().end()) { log_error("net: unknown class \"" + cls + "\" (not registered on this machine)"); continue; }
@@ -2625,12 +2647,14 @@ void NetClient::disconnect() {
     bool was = impl_->connected;
     if (impl_->fd != kInvalidSocket) { close_socket(impl_->fd); impl_->fd = kInvalidSocket; }
     impl_->connected = false;
+    impl_->conn_id = 0;
     impl_->objects.clear();
     if (g_active_client == this) g_active_client = nullptr;
     if (was && on_disconnect) on_disconnect();
 }
 
 bool NetClient::connected() const { return impl_->connected; }
+int NetClient::connection_id() const { return impl_->conn_id; }
 
 NetObject* NetClient::find(uint32_t id) const {
     auto it = impl_->objects.find(id);

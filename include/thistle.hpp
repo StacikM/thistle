@@ -702,6 +702,10 @@ private:
 namespace net {
     bool is_server();   // true from NetServer::listen() succeeding until stop()
     bool is_client();   // true from NetClient::connect() succeeding until disconnect()
+    // Inside an on_command handler (server): which connection sent it, the
+    // same id NetServer::on_connect got. 0 anywhere else. This is how a
+    // server checks "is this player allowed to move this object?"
+    int command_sender();
 }
 
 // Arguments/payload for Commands and ClientRpcs: NetArgs{{"x", 1.0f}} to
@@ -769,6 +773,10 @@ protected:
     // Server-side: sends a ClientRpc to every connected client for this
     // object. Called client-side instead: logs a warning and does nothing.
     void call_client_rpc(const std::string& name, NetArgs args = NetArgs::object());
+    // Server-side: the same, to one connection only (Mirror's TargetRpc):
+    // a newcomer's catch-up data, one player's private info. False if that
+    // connection is gone.
+    bool call_target_rpc(int conn_id, const std::string& name, NetArgs args = NetArgs::object());
 
 private:
     struct NetSyncField {
@@ -858,6 +866,11 @@ public:
     void disconnect();
     bool connected() const;
     NetObject* find(uint32_t id) const;   // unambiguous even if a NetServer is also active in this process
+    // This client's connection id as the server knows it (what
+    // net::command_sender() returns there for our commands), e.g. to find
+    // which player object is ours. 0 until the server's welcome arrives
+    // (on the first update() after connecting).
+    int connection_id() const;
 
     std::function<void()> on_connect;
     std::function<void()> on_disconnect;
@@ -2116,6 +2129,14 @@ public:
     bool deserialize(const uint8_t* data, size_t size);
     bool save(const std::string& path) const;
     bool load(const std::string& path);
+    // One chunk's blocks (chunk coordinates, i.e. block / 32) as compact
+    // bytes, and back: deserialize_chunk() replaces that chunk's blocks
+    // (empty bytes clear it). Ids only, so both worlds need the same block
+    // types. What VoxelSync sends over the network; handy for your own
+    // region-based saves too.
+    std::vector<uint8_t> serialize_chunk(ivec3 chunk) const;
+    bool deserialize_chunk(ivec3 chunk, const uint8_t* data, size_t size);
+    std::vector<ivec3> chunks() const; // every chunk that holds at least one block
 
     // Imports a MagicaVoxel .vox file's blocks with their minimum corner at
     // `at` (MagicaVoxel is Z-up; it's turned to stand upright here). Each
@@ -2544,6 +2565,74 @@ public:
 
 private:
     std::unique_ptr<struct VoxelDestructionImpl> impl_;
+};
+
+// --- multiplayer -----------------------------------------------------------------------------
+// On top of the realtime networking layer (NetServer / NetClient / NetObject,
+// see docs/networking.md), two things a multiplayer 3D game needs.
+
+// Keeps a VoxelWorld the same on the server and on every client. A client
+// that joins gets the whole world, streamed a few chunks per update so the
+// server never stalls. After that, any change to the server's world (set,
+// fill, carving, a VoxelDestruction blast) reaches every client as the
+// changed chunks. Clients ask for edits with request_set(); the server has
+// the last word.
+//
+//   // server and every client, before listen()/connect():
+//   VoxelSync sync(world);
+//   // server, after listen():
+//   sync.host();
+//   // every frame, after server.update() / client.update():
+//   sync.update();
+//   // client, when the player clicks:
+//   sync.request_set(target, stone);
+class VoxelSync {
+public:
+    // One per synced world. `name` tells worlds apart when there are several;
+    // it must match on the server and the clients.
+    explicit VoxelSync(VoxelWorld& world, const std::string& name = "world");
+    ~VoxelSync();
+    VoxelSync(const VoxelSync&) = delete;
+    VoxelSync& operator=(const VoxelSync&) = delete;
+
+    void host();   // server: start sharing the world (after NetServer::listen())
+    void update(); // every frame, both sides
+
+    // Client: change a block. Shown here right away; the server applies it
+    // for everyone, or refuses (allow_edit) and this client's chunk is put back.
+    void request_set(ivec3 block, BlockId id);
+    // Server: return false to refuse a client's edit (out of reach, a
+    // protected area, not their turn). Everything is allowed by default.
+    std::function<bool(int conn_id, ivec3 block, BlockId id)> allow_edit;
+
+    bool ready() const;     // client: the whole world has arrived (the server: always)
+    float progress() const; // client: 0..1 while it streams in
+    int stream_bytes_per_update = 64 * 1024; // server: per joining client
+
+private:
+    std::unique_ptr<struct VoxelSyncImpl> impl_;
+    friend struct VoxelSyncAccess;
+};
+
+// Smooths movement that arrives from the network in steps (other players,
+// synced objects): add() each new position as it arrives, and sample() a
+// smoothly moving one a little in the past. The delay trades lag for
+// smoothness: at least one network update's worth, plus a bit for jitter.
+class TransformInterpolator {
+public:
+    float delay = 0.1f; // seconds
+
+    void add(const Transform& transform, double time); // time: when it arrived (Frame::time)
+    Transform sample(double time) const;               // at time - delay; holds the last value past the newest
+    bool empty() const { return samples_.empty(); }
+    void clear() { samples_.clear(); }
+
+private:
+    struct Sample {
+        double time;
+        Transform transform;
+    };
+    std::vector<Sample> samples_;
 };
 
 } // namespace thistle::three

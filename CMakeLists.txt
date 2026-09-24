@@ -184,6 +184,7 @@ add_library(thistle STATIC
     src/three_collider.cpp
     src/three_destruction.cpp
     src/three_audio.cpp
+    src/three_net.cpp
     src/cgltf_impl.c
     src/sokol_impl.c
     src/stb_impl.c
@@ -397,6 +398,10 @@ if(THISTLE_BUILD_SMOKETEST)
         endif()
     endif()
 
+    # VoxelSync: a multiplayer block world (a dedicated server + players).
+    add_executable(thistle_mp_demo examples/voxel_mp_demo.cpp)
+    target_link_libraries(thistle_mp_demo PRIVATE thistle)
+
     # VoxelWorld streaming: an endless generated block world.
     add_executable(thistle_endless_demo examples/endless_demo.cpp)
     target_link_libraries(thistle_endless_demo PRIVATE thistle)
@@ -476,6 +481,10 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_audio3d_smoketest examples/audio3d_smoketest.cpp)
     target_link_libraries(thistle_audio3d_smoketest PRIVATE thistle)
 
+    # VoxelSync + TransformInterpolator over loopback TCP.
+    add_executable(thistle_voxelnet_smoketest examples/voxelnet_smoketest.cpp)
+    target_link_libraries(thistle_voxelnet_smoketest PRIVATE thistle)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -518,4 +527,6 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(destruction_smoketest PROPERTIES TIMEOUT 60)
     add_test(NAME audio3d_smoketest COMMAND thistle_audio3d_smoketest)
     set_tests_properties(audio3d_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME voxelnet_smoketest COMMAND thistle_voxelnet_smoketest)
+    set_tests_properties(voxelnet_smoketest PROPERTIES TIMEOUT 60)
 endif()
