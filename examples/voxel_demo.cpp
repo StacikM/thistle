@@ -23,7 +23,8 @@ constexpr int kTile = 16;
 constexpr int kCols = 4;
 
 uint32_t hash(int x, int y, int salt) {
-    uint32_t h = static_cast<uint32_t>(x * 374761393 + y * 668265263 + salt * 2147483647);
+    // Unsigned math: the products overflow on purpose, and signed overflow is undefined.
+    uint32_t h = static_cast<uint32_t>(x) * 374761393u + static_cast<uint32_t>(y) * 668265263u + static_cast<uint32_t>(salt) * 2147483647u;
     h = (h ^ (h >> 13)) * 1274126177u;
     return h ^ (h >> 16);
 }
