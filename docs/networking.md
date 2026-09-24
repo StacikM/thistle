@@ -5,7 +5,7 @@ A small client/server layer shaped like Unity's [Mirror](https://mirror-networki
 - **TCP only.** No UDP, no unreliable channel. If you want the "TCP for things that must arrive, unreliable UDP for high-frequency stuff like position where a dropped packet doesn't matter" hybrid real games use, that's a real V2, not this.
 - **JSON wire format**, length-prefixed over the TCP stream. Not fast, not compact, genuinely simple and easy to debug (log the message, read it). If you're sending hundreds of updates a second to dozens of clients, you'll feel it. For a small game, you won't.
 - **No NAT traversal, no relay service.** Same situation raw Mirror is in without its paid relay — you need a port someone can actually reach: a LAN, a VPS you control, port-forwarding. This library will not get two players behind separate home routers talking to each other for free. Nothing does, without a relay.
-- **No client-side prediction, no interpolation, no lag compensation.** A client's `NetVar` updates the instant a `sync` message arrives — one tick of network latency, visible as-is. Fine for a turn-based or low-tempo game; a twitch shooter will feel it immediately.
+- **No client-side prediction, no lag compensation.** A client's `NetVar` updates the instant a `sync` message arrives — one tick of network latency, visible as-is. `three::TransformInterpolator` (below) smooths *other* things' movement between those updates; nothing predicts your own. Fine for a co-op builder or a low-tempo game; a twitch shooter will feel it immediately.
 - **No "host mode."** A process is a server, or a client. It cannot usefully be both — see the last section of this doc for exactly why, and how to still test locally without two machines.
 
 If any of those are dealbreakers, that's the honest answer to "is this enough for my game," not a bug report.
@@ -69,6 +69,43 @@ app.update([&](Frame f) {
 
 That's the whole API surface: `NetVar<T>` for auto-synced fields, `on_command`/`call_command` for client→server, `on_client_rpc`/`call_client_rpc` for server→clients, `net_spawn`/`net_despawn` (server-only) and `net_find`/`net_each_object` (read side, works on either) to actually get at your objects.
 
+## Who sent it, and talking to one client
+
+Three small additions that most real games need sooner or later:
+
+- **`net::command_sender()`** — inside an `on_command` handler on the server, the connection id that sent the command (the same id `NetServer::on_connect` got). That's how a server says "only this player's own client may move this player":
+  ```cpp
+  on_command("move", [this](const NetArgs& a) {
+      if (net::command_sender() != owner.get()) return;
+      position = a.at("p").get<vec3>();
+  });
+  ```
+- **`call_target_rpc(conn_id, name, args)`** — a ClientRpc to one connection only (Mirror's TargetRpc): a newcomer's catch-up data, one player's private hand of cards. Returns false if that connection is gone.
+- **`NetClient::connection_id()`** — the client's own id as the server knows it, e.g. to find which player object is yours (`avatar->owner == client.connection_id()`). It arrives in a small "welcome" message the server now sends first; 0 until the first `update()` after connecting.
+
+## Multiplayer block worlds: `three::VoxelSync`
+
+Keeps a `VoxelWorld` identical on the server and every client:
+
+```cpp
+VoxelSync sync(world);            // server and every client, before listen()/connect()
+sync.host();                      // server, after listen()
+sync.update();                    // every frame, after server.update() / client.update()
+sync.request_set(block, stone);   // client: shown at once, then the server decides
+sync.allow_edit = [](int conn, ivec3 b, BlockId id) { return b.y > 0; }; // server: no digging through bedrock
+```
+
+- **Joining**: the client gets the block types, then every chunk, streamed a byte budget per update (`stream_bytes_per_update`, 64 KB) so one player joining never stalls the server for everyone else. `ready()` / `progress()` drive a loading bar. Whatever the client's world held before is replaced.
+- **Changes**: anything that changes the server's world reaches every client as the changed chunks: `set()`, `fill()`, a generator, a `VoxelDestruction` blast. It's detected through per-chunk revisions, so there's no special edit API to route through. A chunk is a few hundred bytes of run-length data for a typical edit.
+- **Client edits** go through `request_set()`. They show immediately (no waiting a round trip to see your own block), and the server's copy of that chunk replaces it if the server disagrees (`allow_edit`).
+- **Not synced**: debris from a `VoxelDestruction` on the server is physics, not blocks, and doesn't replicate. Clients see the holes, not the pieces flying. Streaming worlds (`stream_around`) aren't synced as such either; generate on the server and let the chunks flow.
+
+`examples/voxel_mp_demo.cpp` is the whole thing in about 200 lines: `thistle_mp_demo server` runs a dedicated server with no window, and `thistle_mp_demo [host]` joins as a player who can walk, break and place blocks, and see the others (NetObject avatars moved by their owners' commands, drawn through a `TransformInterpolator`).
+
+### Smoothing other players: `three::TransformInterpolator`
+
+Network updates arrive in steps (the demo sends 20 a second). Drawing a remote player at its latest position looks like teleporting. Instead, `add()` each new transform as it arrives and `sample()` one `delay` (0.1 s) in the past: position and scale are blended, rotation is slerped, and past the newest sample it holds still rather than guessing.
+
 ## Why it's this verbose instead of `[Command]`-style magic
 
 Mirror's ergonomics come from Unity's IL weaver rewriting your assembly after compilation — a `[Command] void CmdFire()` method's body gets moved into a generated handler, and the original method becomes a network-send call, invisibly. C++ has no equivalent compile step here. What you see (`on_command` to register what runs, `call_command` to trigger it) is the honest, unmagical version of the same idea: two explicit halves instead of one method that secretly becomes two things. It's more typing. It's also something you can read top-to-bottom and know exactly what happens, which matters more once something's wrong at 2am.
@@ -100,3 +137,13 @@ cmake --build build --target thistle_net_smoketest
 ```
 
 No window, no `App`, no graphics dependency at all — `NetServer`/`NetClient` don't touch rendering, which is also why a dedicated (headless) server binary for your game needs nothing but `thistle`'s networking pieces linked in, not the whole engine's graphics stack.
+
+`thistle_voxelnet_smoketest` does the same kind of loopback round trip for `VoxelSync`. It checks:
+- a joining client ends up with an identical world, chunk for chunk, streamed over several updates under a tiny budget
+- server edits reach it, including a chunk emptied completely
+- a client edit shows up at once and is applied by the server, and a refused one is put back
+- `allow_edit` sees the sender's connection id
+- `call_target_rpc` reaches exactly one client and reports a gone connection
+- `TransformInterpolator` blends
+
+The demo was also run as a dedicated server plus two player windows under Xvfb. Both players received the 74,690-block world. Player A's walk showed up at the right spot for B, and A's placed blocks appeared in B's world. B, walking off a tree, saw A's avatar standing next to them. That was one machine over loopback: not a real network with latency and packet loss.

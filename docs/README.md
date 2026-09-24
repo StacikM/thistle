@@ -9,7 +9,7 @@ You want to make a game, not read a novel. Here's the map:
 - [physics.md](physics.md) — the Box2D wrapper. 2D only. Read the caveats before you build something that needs them.
 - [physics3d.md](physics3d.md) — opt-in 3D rigid bodies on Jolt (`three::Physics3D`) and Teardown-style voxel destruction (`VoxelDestruction`): turning it on, colliders, triggers, what falls and why, and exactly what's been verified where.
 - [platform-and-networking.md](platform-and-networking.md) — save data, HTTP, clipboard, haptics, text input, logging, platform queries.
-- [networking.md](networking.md) — realtime client/server (Mirror-flavored `NetVar`/Command/ClientRpc over TCP). Read the scope section before you plan a game around it.
+- [networking.md](networking.md) — realtime client/server (Mirror-flavored `NetVar`/Command/ClientRpc over TCP), multiplayer block worlds (`VoxelSync`) and smoothing remote movement. Read the scope section before you plan a game around it.
 - [iap.md](iap.md) — in-app purchases via StoreKit (iOS/macOS only). Read the "what's actually been verified" section before you assume a purchase has ever succeeded.
 - [cli.md](cli.md) — the `thistle` CLI: scaffold a project, build/run it, manage its version. No dependencies to install, on purpose.
 - [crash-handler.md](crash-handler.md) — local-only crash reporting: a report file plus a native popup, automatically, on every crash. No telemetry, ever.

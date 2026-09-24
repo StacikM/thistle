@@ -706,6 +706,55 @@ bool VoxelWorld::deserialize(const uint8_t* data, size_t size) {
     return true;
 }
 
+std::vector<uint8_t> VoxelWorld::serialize_chunk(ivec3 c) const {
+    Writer w;
+    const Chunk* chunk = impl_->find(c.x, c.y, c.z);
+    if (!chunk || chunk->non_air == 0) return {};
+    std::vector<std::pair<BlockId, uint16_t>> runs;
+    for (int i = 0; i < CS3; ++i) {
+        const BlockId id = chunk->blocks[i];
+        if (!runs.empty() && runs.back().first == id && runs.back().second < 0xFFFF) ++runs.back().second;
+        else runs.push_back({id, 1});
+    }
+    w.u32(static_cast<uint32_t>(runs.size()));
+    for (const auto& [id, n] : runs) { w.u16(id); w.u16(n); }
+    return std::move(w.out);
+}
+
+bool VoxelWorld::deserialize_chunk(ivec3 c, const uint8_t* data, size_t size) {
+    std::vector<BlockId> blocks(CS3, 0);
+    if (size > 0) {
+        Reader r{data, data + size};
+        const uint32_t runs = r.u32();
+        if (!r.ok || runs > static_cast<uint32_t>(CS3)) return false;
+        int at = 0;
+        for (uint32_t i = 0; i < runs && r.ok; ++i) {
+            const BlockId id = r.u16();
+            const uint16_t n = r.u16();
+            if (!r.ok || at + n > CS3) return false;
+            std::fill_n(blocks.begin() + at, n, id);
+            at += n;
+        }
+        if (!r.ok || at != CS3) return false;
+    }
+    // Through set(), which keeps counts, dirty flags (this chunk's and its
+    // neighbors' faces) and revisions right. Only changed blocks cost anything.
+    const ivec3 base = c * CS;
+    for (int i = 0; i < CS3; ++i) {
+        const ivec3 p = base + ivec3{i % CS, (i / CS) % CS, i / (CS * CS)};
+        if (get(p) != blocks[static_cast<size_t>(i)]) set(p, blocks[static_cast<size_t>(i)]);
+    }
+    return true;
+}
+
+std::vector<ivec3> VoxelWorld::chunks() const {
+    std::vector<ivec3> out;
+    for (const auto& [key, chunk] : impl_->chunks) {
+        if (chunk.non_air > 0) out.push_back(key_chunk(key));
+    }
+    return out;
+}
+
 bool VoxelWorld::save(const std::string& path) const {
     const std::vector<uint8_t> bytes = serialize();
     std::FILE* f = std::fopen(path.c_str(), "wb");
