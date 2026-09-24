@@ -100,6 +100,7 @@ FetchContent_MakeAvailable(sokol stb fontstash box2d miniaudio)
 add_library(thistle STATIC
     src/thistle.cpp
     src/three_math.cpp
+    src/three_camera.cpp
     src/three_mesh.cpp
     src/three_render.cpp
     src/sokol_impl.c

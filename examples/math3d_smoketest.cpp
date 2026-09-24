@@ -104,6 +104,76 @@ int main() {
               near(back.scale, t.scale), "Transform survives a JSON round trip");
     }
 
+    // Rays
+    {
+        const Ray r{{0, 0, 10}, {0, 0, -1}};
+        const RaycastHit h = raycast(r, Bounds{{-1, -1, -1}, {1, 1, 1}});
+        check(h.hit && near(h.distance, 9.0f) && near(h.normal, {0, 0, 1}), "ray hits the near face of a box, normal facing the ray");
+        check(!raycast(r, Bounds{{-1, -1, -1}, {1, 1, 1}}, 5.0f).hit, "max_distance cuts the ray short");
+        check(!raycast(Ray{{3, 0, 10}, {0, 0, -1}}, Bounds{{-1, -1, -1}, {1, 1, 1}}).hit, "ray beside a box misses");
+        const RaycastHit inside = raycast(Ray{{0, 0, 0}, {1, 0, 0}}, Bounds{{-1, -1, -1}, {1, 1, 1}});
+        check(inside.hit && near(inside.distance, 1.0f), "ray starting inside a box hits its far side");
+        const RaycastHit sh = raycast_sphere(r, {0, 0, 0}, 2.0f);
+        check(sh.hit && near(sh.distance, 8.0f) && near(sh.normal, {0, 0, 1}), "ray hits a sphere's front");
+        check(!raycast_sphere(Ray{{0, 5, 10}, {0, 0, -1}}, {0, 0, 0}, 2.0f).hit, "ray passing over a sphere misses");
+        const RaycastHit ph = raycast_plane(Ray{{0, 5, 0}, normalize(vec3{1, -1, 0})}, {0, 0, 0}, {0, 1, 0});
+        check(ph.hit && near(ph.point, {5, 0, 0}), "diagonal ray hits the ground plane where expected");
+        const RaycastHit th = raycast_triangle(r, {-1, -1, 0}, {1, -1, 0}, {0, 1, 0});
+        check(th.hit && near(th.distance, 10.0f), "ray hits a triangle in front of it");
+        check(raycast_triangle(Ray{{0, 0, -10}, {0, 0, 1}}, {-1, -1, 0}, {1, -1, 0}, {0, 1, 0}).hit, "triangles are hit from behind too");
+        check(!raycast_triangle(Ray{{2, 2, 10}, {0, 0, -1}}, {-1, -1, 0}, {1, -1, 0}, {0, 1, 0}).hit, "ray outside a triangle misses");
+    }
+
+    // Frustum
+    {
+        Camera cam;
+        cam.position = {0, 0, 0};
+        const Frustum f = cam.frustum(16.0f / 9.0f);
+        check(f.contains({0, 0, -5}), "point in front of the camera is inside the frustum");
+        check(!f.contains({0, 0, 5}), "point behind the camera is outside");
+        check(!f.contains({0, 0, -2000}), "point beyond far_z is outside");
+        check(!f.intersects(Bounds{{50, -1, -6}, {52, 1, -4}}), "box far off to the side is culled");
+        check(f.intersects(Bounds{{-100, -1, -6}, {100, 1, -4}}), "huge box spanning the view is kept");
+        check(f.intersects_sphere({0, 0, 1}, 1.5f), "sphere poking in from behind the near plane is kept");
+    }
+
+    // Camera screen <-> world
+    {
+        Camera cam;
+        cam.position = {3, 2, 8};
+        cam.look_at({0, 0, 0});
+        const Rect vp{{0, 0}, {1280, 720}};
+        const Ray center = cam.screen_ray({640, 360}, vp);
+        check(near(center.direction, cam.forward()), "ray through the screen center goes straight ahead");
+        vec2 px;
+        check(cam.world_to_screen({0, 0, 0}, vp, px) && near(px.x, 640.0f, 0.05f) && near(px.y, 360.0f, 0.05f),
+              "the look_at target projects to the screen center");
+        const vec3 world_pt{1.5f, 0.7f, -2.0f};
+        cam.world_to_screen(world_pt, vp, px);
+        const Ray back = cam.screen_ray(px, vp);
+        const vec3 closest = back.at(dot(world_pt - back.origin, back.direction));
+        check(near(closest, world_pt, 1e-2f), "world_to_screen then screen_ray passes back through the point");
+        check(!cam.world_to_screen({3, 2, 20}, vp, px), "a point behind the camera has no screen position");
+        const Ray top_left = cam.screen_ray({0, 0}, vp);
+        check(dot(top_left.direction, cam.up()) > 0.0f && dot(top_left.direction, cam.right()) < 0.0f,
+              "pixel (0,0) is up and to the left (y-down screen, like the 2D API)");
+    }
+
+    // OrbitCamera placement
+    {
+        OrbitCamera orbit;
+        orbit.target = {1, 2, 3};
+        orbit.distance = 10.0f;
+        orbit.yaw = 0.0f;
+        orbit.pitch = 0.0f;
+        Camera cam;
+        orbit.apply(cam);
+        check(near(cam.position, {1, 2, 13}) && near(cam.forward(), {0, 0, -1}), "orbit yaw=0 pitch=0 sits on +Z looking at the target");
+        orbit.pitch = radians(90.0f) - 0.001f;
+        orbit.apply(cam);
+        check(cam.position.y > 11.9f, "orbit pitch up puts the camera above the target");
+    }
+
     if (g_failures) { std::printf("%d check(s) failed\n", g_failures); return 1; }
     std::printf("all math3d checks passed\n");
     return 0;

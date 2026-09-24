@@ -4,6 +4,7 @@
 #include "sokol_gl.h"
 
 #include "shaders/background.glsl.h"
+#include "shaders/lines.glsl.h"
 #include "shaders/lit.glsl.h"
 
 #include <algorithm>
@@ -20,7 +21,13 @@ struct WorldImpl {
         bool override_material = false;
         Material material;
     };
+    struct LineVertex {
+        float x, y, z;
+        uint32_t color;
+    };
     std::vector<DrawCmd> draws;
+    std::vector<LineVertex> lines;
+    std::vector<LineVertex> lines_on_top;
     uint64_t frame = ~0ull;
 };
 
@@ -40,6 +47,10 @@ uint32_t pack_color(rgba c) {
 
 struct MeshRecord {
     MeshData cpu; // dropped once uploaded
+    // Kept for the life of the mesh (unlike `cpu`): raycasts and collision
+    // need the triangles, not the normals/UVs/colors.
+    std::vector<vec3> positions;
+    std::vector<uint32_t> triangles;
     sg_buffer vbuf = {};
     sg_buffer ibuf = {};
     int index_count = 0;
@@ -67,6 +78,10 @@ struct PassRecord {
     Sky sky;
     float ambient = 0.0f;
     std::vector<WorldImpl::DrawCmd> draws;
+    std::vector<WorldImpl::LineVertex> lines;
+    std::vector<WorldImpl::LineVertex> lines_on_top;
+    int line_first = 0; // vertex offsets into this frame's shared line buffer
+    int on_top_first = 0;
 };
 
 enum PipelineKind { PipOpaque, PipOpaqueDouble, PipBlend, PipBlendDouble, PipCount };
@@ -82,6 +97,11 @@ struct RenderState {
     sg_sampler sampler_nearest = {};
     sg_image white_image = {};
     sg_view white_view = {};
+    sg_shader lines_shader = {};
+    sg_pipeline line_pipeline = {};
+    sg_pipeline line_on_top_pipeline = {};
+    sg_buffer line_buffer = {};
+    size_t line_capacity = 0; // in vertices
 
     std::vector<ModelRecord> models;
     std::vector<PassRecord> passes;
@@ -178,6 +198,36 @@ sg_pipeline make_lit_pipeline(bool blend, bool double_sided) {
     return sg_make_pipeline(&pd);
 }
 
+sg_pipeline make_line_pipeline(bool on_top) {
+    sg_pipeline_desc pd = {};
+    pd.shader = g_three.lines_shader;
+    pd.layout.attrs[ATTR_lines_position].format = SG_VERTEXFORMAT_FLOAT3;
+    pd.layout.attrs[ATTR_lines_color0].format = SG_VERTEXFORMAT_UBYTE4N;
+    pd.primitive_type = SG_PRIMITIVETYPE_LINES;
+    pd.depth.compare = on_top ? SG_COMPAREFUNC_ALWAYS : SG_COMPAREFUNC_LESS_EQUAL;
+    pd.depth.write_enabled = false;
+    pd.colors[0].blend.enabled = true;
+    pd.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_SRC_ALPHA;
+    pd.colors[0].blend.dst_factor_rgb = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    pd.colors[0].blend.src_factor_alpha = SG_BLENDFACTOR_ONE;
+    pd.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    pd.label = on_top ? "three-lines-on-top" : "three-lines";
+    return sg_make_pipeline(&pd);
+}
+
+void draw_lines(sg_pipeline pip, int first, int count, const mat4& view_proj) {
+    if (count <= 0) return;
+    sg_apply_pipeline(pip);
+    sg_bindings bind = {};
+    bind.vertex_buffers[0] = g_three.line_buffer;
+    sg_apply_bindings(&bind);
+    lines_vs_params_t vs = {};
+    vs.view_proj = view_proj;
+    sg_apply_uniforms(UB_lines_vs_params, SG_RANGE(vs));
+    sg_draw(first, count, 1);
+    ++g_three.stats_this_frame.draw_calls;
+}
+
 sg_pipeline make_background_pipeline(bool write_color) {
     sg_pipeline_desc pd = {};
     pd.shader = g_three.background_shader;
@@ -236,6 +286,7 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
     sg_draw(0, 3, 1);
     ++stats.draw_calls;
 
+    const Frustum frustum = Frustum::from_matrix(view_proj_gl);
     std::vector<DrawItem> items;
     for (const WorldImpl::DrawCmd& cmd : pass.draws) {
         ModelRecord* rec = model_record(Model{cmd.model});
@@ -249,6 +300,10 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
             const PipelineKind kind = blend ? (mat->double_sided ? PipBlendDouble : PipBlend)
                                             : (mat->double_sided ? PipOpaqueDouble : PipOpaque);
             const mat4 world = cmd.world * part.local;
+            if (!frustum.intersects(mesh.bounds.transformed(world))) {
+                ++stats.culled;
+                continue;
+            }
             const vec3 center = world.transform_point(mesh.bounds.center());
             items.push_back({&mesh, mat, world, cmd.tint, dot(center - pass.camera.position, pass.camera.forward()), kind});
         }
@@ -271,7 +326,13 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
     scene.ground_ambient = to_linear4(pass.sky.ground, pass.ambient);
 
     int bound_pipeline = -1;
+    bool lines_drawn = false;
     for (const DrawItem& item : items) {
+        if (item.pipeline >= PipBlend && !lines_drawn) {
+            draw_lines(g_three.line_pipeline, pass.line_first, static_cast<int>(pass.lines.size()), view_proj);
+            lines_drawn = true;
+            bound_pipeline = -1;
+        }
         if (item.pipeline != bound_pipeline) {
             sg_apply_pipeline(g_three.pipelines[item.pipeline]);
             sg_apply_uniforms(UB_lit_scene_params, SG_RANGE(scene));
@@ -307,6 +368,9 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
         stats.triangles += item.mesh->index_count / 3;
     }
 
+    if (!lines_drawn) draw_lines(g_three.line_pipeline, pass.line_first, static_cast<int>(pass.lines.size()), view_proj);
+    draw_lines(g_three.line_on_top_pipeline, pass.on_top_first, static_cast<int>(pass.lines_on_top.size()), view_proj);
+
     // Back to the full framebuffer for the 2D layers drawn after this pass.
     sg_apply_viewport(0, 0, fb_w, fb_h, true);
     sg_apply_scissor_rect(0, 0, fb_w, fb_h, true);
@@ -321,6 +385,9 @@ Model make_model(const MeshData& mesh, const Material& material) {
     MeshRecord m;
     m.cpu = mesh;
     m.bounds = mesh.bounds();
+    m.positions.reserve(mesh.vertices.size());
+    for (const Vertex& v : mesh.vertices) m.positions.push_back(v.position);
+    m.triangles = mesh.indices;
     rec.bounds = m.bounds;
     rec.meshes.push_back(std::move(m));
     rec.parts.push_back({0, material, mat4{}});
@@ -361,18 +428,27 @@ void set_model_material(Model model, const Material& material, int part) {
     }
 }
 
-// --- camera --------------------------------------------------------------------
-
-mat4 Camera::view() const {
-    return mat4::rotate(rotation.inverse()) * mat4::translate(-position);
-}
-
-mat4 Camera::projection(float aspect) const {
-    if (orthographic) {
-        const float h = ortho_height * 0.5f;
-        return mat4::ortho(-h * aspect, h * aspect, -h, h, near_z, far_z);
+RaycastHit raycast(const Ray& ray, Model model, const Transform& transform, float max_distance) {
+    RaycastHit best;
+    const ModelRecord* rec = model_record(model);
+    if (!rec) return best;
+    const mat4 model_matrix = transform.matrix();
+    for (const PartRecord& part : rec->parts) {
+        const MeshRecord& mesh = rec->meshes[part.mesh];
+        const mat4 world = model_matrix * part.local;
+        const float limit = best.hit ? best.distance : max_distance;
+        if (!raycast(ray, mesh.bounds.transformed(world), limit)) continue;
+        // Triangles are tested in world space, so hit distances stay in the
+        // caller's units even under non-uniform scale.
+        for (size_t i = 0; i + 2 < mesh.triangles.size(); i += 3) {
+            const vec3 a = world.transform_point(mesh.positions[mesh.triangles[i]]);
+            const vec3 b = world.transform_point(mesh.positions[mesh.triangles[i + 1]]);
+            const vec3 c = world.transform_point(mesh.positions[mesh.triangles[i + 2]]);
+            const RaycastHit h = raycast_triangle(ray, a, b, c, best.hit ? best.distance : max_distance);
+            if (h.hit) best = h;
+        }
     }
-    return mat4::perspective(fov, aspect, near_z, far_z);
+    return best;
 }
 
 // --- world ---------------------------------------------------------------------
@@ -383,6 +459,8 @@ WorldImpl& touch(std::unique_ptr<WorldImpl>& impl) {
     const uint64_t frame = detail::frame_index();
     if (impl->frame != frame) {
         impl->draws.clear();
+        impl->lines.clear();
+        impl->lines_on_top.clear();
         impl->frame = frame;
     }
     return *impl;
@@ -436,6 +514,65 @@ void World::plane(vec3 center, vec2 size, rgba color) {
     draw(unit_model(g_three.unit_plane, [] { return plane_mesh(); }), Transform{center, {}, {size.x, 1.0f, size.y}}, color);
 }
 
+namespace {
+WorldImpl::LineVertex line_vertex(vec3 p, rgba c) { return {p.x, p.y, p.z, pack_color(c)}; }
+} // namespace
+
+void World::line(vec3 a, vec3 b, rgba color, bool on_top) {
+    WorldImpl& impl = touch(impl_);
+    auto& list = on_top ? impl.lines_on_top : impl.lines;
+    list.push_back(line_vertex(a, color));
+    list.push_back(line_vertex(b, color));
+}
+
+void World::wire_box(const Bounds& box, rgba color, bool on_top) {
+    if (!box.valid()) return;
+    vec3 c[8];
+    for (int i = 0; i < 8; ++i) {
+        c[i] = {(i & 1) ? box.max.x : box.min.x, (i & 2) ? box.max.y : box.min.y, (i & 4) ? box.max.z : box.min.z};
+    }
+    static constexpr int edges[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3},
+                                         {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    for (const auto& e : edges) line(c[e[0]], c[e[1]], color, on_top);
+}
+
+void World::wire_box(const Transform& transform, rgba color, bool on_top) {
+    const mat4 m = transform.matrix();
+    vec3 c[8];
+    for (int i = 0; i < 8; ++i) {
+        c[i] = m.transform_point({(i & 1) ? 0.5f : -0.5f, (i & 2) ? 0.5f : -0.5f, (i & 4) ? 0.5f : -0.5f});
+    }
+    static constexpr int edges[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3},
+                                         {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    for (const auto& e : edges) line(c[e[0]], c[e[1]], color, on_top);
+}
+
+void World::wire_sphere(vec3 center, float radius, rgba color, bool on_top) {
+    constexpr int segments = 32;
+    for (int axis = 0; axis < 3; ++axis) {
+        for (int i = 0; i < segments; ++i) {
+            const float a0 = static_cast<float>(i) / segments * 2.0f * pi;
+            const float a1 = static_cast<float>(i + 1) / segments * 2.0f * pi;
+            auto point = [&](float a) {
+                const float u = std::cos(a) * radius, v = std::sin(a) * radius;
+                return center + (axis == 0 ? vec3{0, u, v} : axis == 1 ? vec3{u, 0, v} : vec3{u, v, 0});
+            };
+            line(point(a0), point(a1), color, on_top);
+        }
+    }
+}
+
+void World::grid(vec3 center, float size, float spacing, rgba color) {
+    if (spacing <= 0.0f) return;
+    const int half = static_cast<int>(size * 0.5f / spacing);
+    const float extent = half * spacing;
+    for (int i = -half; i <= half; ++i) {
+        const float o = i * spacing;
+        line(center + vec3{o, 0, -extent}, center + vec3{o, 0, extent}, color);
+        line(center + vec3{-extent, 0, o}, center + vec3{extent, 0, o}, color);
+    }
+}
+
 void World::render(const Frame& f, const Camera& camera) {
     render(f, camera, Rect{{0.0f, 0.0f}, {static_cast<float>(f.width), static_cast<float>(f.height)}});
 }
@@ -449,6 +586,8 @@ void World::render(const Frame&, const Camera& camera, Rect viewport) {
     pass.sky = sky;
     pass.ambient = ambient;
     pass.draws = impl.draws;
+    pass.lines = impl.lines;
+    pass.lines_on_top = impl.lines_on_top;
     g_three.passes.push_back(std::move(pass));
     // Everything 2D drawn after this call lands in the next sokol_gl layer,
     // which three_draw_layers() draws after this pass — i.e. on top of it.
@@ -474,6 +613,9 @@ void three_setup() {
     s.pipelines[PipBlendDouble] = make_lit_pipeline(true, true);
     s.sky_pipeline = make_background_pipeline(true);
     s.depth_reset_pipeline = make_background_pipeline(false);
+    s.lines_shader = sg_make_shader(lines_shader_desc(sg_query_backend()));
+    s.line_pipeline = make_line_pipeline(false);
+    s.line_on_top_pipeline = make_line_pipeline(true);
 
     sg_sampler_desc lin = {};
     lin.min_filter = SG_FILTER_LINEAR;
@@ -514,6 +656,10 @@ void three_shutdown() {
     sg_destroy_pipeline(s.depth_reset_pipeline);
     sg_destroy_shader(s.lit_shader);
     sg_destroy_shader(s.background_shader);
+    sg_destroy_pipeline(s.line_pipeline);
+    sg_destroy_pipeline(s.line_on_top_pipeline);
+    sg_destroy_shader(s.lines_shader);
+    if (s.line_buffer.id != SG_INVALID_ID) sg_destroy_buffer(s.line_buffer);
     sg_destroy_sampler(s.sampler_linear);
     sg_destroy_sampler(s.sampler_nearest);
     sg_destroy_view(s.white_view);
@@ -521,7 +667,34 @@ void three_shutdown() {
     s = RenderState{};
 }
 
-void three_before_passes() {}
+void three_before_passes() {
+    // Every pass's lines go into one transient buffer, written once, before
+    // any pass binds it (sokol only allows transient writes before the
+    // first bind in a frame).
+    RenderState& s = g_three;
+    std::vector<WorldImpl::LineVertex> all;
+    for (PassRecord& pass : s.passes) {
+        pass.line_first = static_cast<int>(all.size());
+        all.insert(all.end(), pass.lines.begin(), pass.lines.end());
+        pass.on_top_first = static_cast<int>(all.size());
+        all.insert(all.end(), pass.lines_on_top.begin(), pass.lines_on_top.end());
+    }
+    if (all.empty()) return;
+    if (all.size() > s.line_capacity) {
+        if (s.line_buffer.id != SG_INVALID_ID) sg_destroy_buffer(s.line_buffer);
+        s.line_capacity = std::max<size_t>(all.size() * 2, 4096);
+        sg_buffer_desc bd = {};
+        bd.size = s.line_capacity * sizeof(WorldImpl::LineVertex);
+        bd.usage.immutable = false;
+        bd.usage.write_transient = true;
+        bd.label = "three-lines";
+        s.line_buffer = sg_make_buffer(&bd);
+    }
+    sg_write_buffer_desc wd = {};
+    wd.src.data = {all.data(), all.size() * sizeof(WorldImpl::LineVertex)};
+    wd.dst.buffer = s.line_buffer;
+    sg_write_buffer_transient(&wd);
+}
 
 void three_draw_layers() {
     const int pass_count = static_cast<int>(g_three.passes.size());
