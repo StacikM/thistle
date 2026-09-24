@@ -7,6 +7,10 @@ same no-extra-installs rule as the thistle CLI.
 
     python3 tools/shaders/build_shaders.py            # all shaders
     python3 tools/shaders/build_shaders.py lit sky    # just these
+    python3 tools/shaders/build_shaders.py --check    # also compile-check the
+        # generated HLSL and GLSL ES with glslangValidator (if installed): the
+        # D3D11 and Android/Web versions otherwise only ever get compiled at
+        # runtime, on someone else's machine. There's no Metal compiler off macOS.
 
 sokol-shdc comes from the pinned sokol-tools-bin commit below, downloaded
 once into build/_sokol-tools. Set SOKOL_SHDC=/path/to/sokol-shdc to use your
@@ -16,6 +20,8 @@ whose layout changes between sokol versions.
 """
 import os
 import platform
+import shutil
+import tempfile
 import stat
 import subprocess
 import sys
@@ -59,9 +65,33 @@ def fetch_sokol_shdc() -> Path:
     return binary
 
 
+def check(shdc: Path, sources) -> int:
+    validator = shutil.which("glslangValidator")
+    if not validator:
+        print("--check: glslangValidator not found (e.g. `apt install glslang-tools`), skipping", file=sys.stderr)
+        return 1
+    failures = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        for src in sources:
+            subprocess.run([str(shdc), "-i", src.name, "-o", str(Path(tmp) / src.stem), "-l", "hlsl5:glsl300es",
+                            "-f", "bare"], cwd=SHADER_DIR, check=True)
+        for out in sorted(Path(tmp).iterdir()):
+            stage = "vert" if "_vertex" in out.name else "frag"
+            cmd = [validator, "-S", stage, str(out)]
+            if out.suffix == ".hlsl":
+                cmd = [validator, "-D", "-V", "-S", stage, "-e", "main", "-o", os.devnull, str(out)]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            print(f"  check {out.name}: {'ok' if result.returncode == 0 else 'FAILED'}")
+            if result.returncode != 0:
+                print(result.stdout + result.stderr)
+                failures += 1
+    return 1 if failures else 0
+
+
 def main() -> int:
     shdc = Path(os.environ["SOKOL_SHDC"]) if os.environ.get("SOKOL_SHDC") else fetch_sokol_shdc()
-    wanted = set(sys.argv[1:])
+    run_check = "--check" in sys.argv[1:]
+    wanted = set(a for a in sys.argv[1:] if a != "--check")
     sources = sorted(p for p in SHADER_DIR.glob("*.glsl") if not wanted or p.stem in wanted)
     if not sources:
         print("no matching shaders in src/shaders/", file=sys.stderr)
@@ -75,7 +105,7 @@ def main() -> int:
         result = subprocess.run(cmd, cwd=SHADER_DIR)
         if result.returncode != 0:
             return result.returncode
-    return 0
+    return check(shdc, sources) if run_check else 0
 
 
 if __name__ == "__main__":

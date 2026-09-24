@@ -1506,6 +1506,7 @@ struct Material {
     float alpha_cutoff = 0.5f;  // only for AlphaMode::Cutout
     vec2 uv_scale{1.0f, 1.0f};  // texture tiling
     TextureFilter filter = TextureFilter::Linear;
+    bool casts_shadow = true;   // AlphaMode::Blend surfaces never cast shadows, whatever this says
 };
 
 // --- models ------------------------------------------------------------------
@@ -1677,6 +1678,14 @@ struct Sun {
     vec3 direction{-0.35f, -1.0f, -0.45f};
     rgba color = rgb(1.0f, 0.96f, 0.88f);
     float intensity = 1.0f;
+
+    bool shadows = true;
+    // Shadows are drawn out to this far from the camera. One shadow map is
+    // stretched over that range, so smaller = sharper shadows up close.
+    float shadow_distance = 40.0f;
+    float shadow_strength = 1.0f;  // 1 = shadowed areas get only ambient light, 0.5 = half as dark
+    float shadow_softness = 1.0f;  // edge blur, in shadow-map texels
+    int shadow_resolution = 2048;  // shadow map size in pixels (memory: 4 bytes each)
 };
 
 // A sky made of 6 square images, one per direction (a cube map). A handle,
