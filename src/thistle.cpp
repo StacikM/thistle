@@ -40,8 +40,12 @@
 // as macros unless told not to, which mangles every std::min/std::max call
 // in this file (MSVC error C2589, found by CI actually building on real
 // Windows — see docs/building.md's running theme).
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX // Jolt (THISTLE_PHYSICS3D) passes it on the command line too
 #define NOMINMAX
+#endif
 #include <direct.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>

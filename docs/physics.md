@@ -2,7 +2,7 @@
 
 A thin wrapper over [Box2D](https://box2d.org/) `v2.4.1`, in pixels instead of meters, with +Y down to match the screen instead of up like every physics textbook. Both of those choices exist so you never have to convert units or flip a sign when going from `Physics::position()` to `f.rect()`. That's the whole point of the wrapper — if you find yourself converting units anyway, something's wrong.
 
-**This is 2D. There is no 3D physics anywhere in this engine.** The "minor 3D" drawing calls in [drawing.md](drawing.md) have zero connection to this. A `cube()` doesn't fall, collide, or exist to Box2D at all — it's a shape drawn at a position you chose. If you want an object to actually fall and collide in 3D, that means integrating a real 3D physics engine (Jolt is the obvious modern choice) from scratch — a real, multi-week undertaking, not a config flag here.
+**This is 2D.** The "minor 3D" drawing calls in [drawing.md](drawing.md) have zero connection to it: a `cube()` doesn't fall, collide, or exist to Box2D at all. Real 3D physics is a separate, opt-in module on Jolt, `three::Physics3D`; see [physics3d.md](physics3d.md).
 
 ## Setup
 

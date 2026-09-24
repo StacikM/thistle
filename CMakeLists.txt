@@ -96,6 +96,59 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
     GIT_TAG        v1.15
 )
+# Jolt Physics — opt-in 3D rigid bodies for three::Physics3D. Off by default
+# (it's a big library: a few minutes of extra first build). Turn it on with
+# -DTHISTLE_PHYSICS3D=ON, or `thistle enable physics3d` in a CLI project,
+# which sets "modules": {"physics3d": true} in thistle.json. Off, Physics3D still
+# compiles and links; it just logs that it's disabled and does nothing.
+option(THISTLE_PHYSICS3D "Build three::Physics3D on Jolt Physics" OFF)
+if(THISTLE_PHYSICS3D)
+    # Jolt's own defaults that would break or surprise a consumer build:
+    # a static MSVC runtime (/MT) that won't link with ours (/MD), LTO,
+    # AVX-512 (binaries that crash on many players' CPUs), and its tests/samples.
+    set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
+    set(USE_AVX512 OFF CACHE BOOL "" FORCE)
+    # Jolt's defaults also assume AVX2/FMA (Haswell, 2013+), and its flags
+    # for that reach every engine source that links it. Some CPUs still in
+    # use (older Pentiums/Celerons, some VMs) lack them, and a game built
+    # that way crashes on start there. SSE4.2 runs everywhere that matters;
+    # these aren't FORCEd, so -DUSE_AVX2=ON etc. still opts back in.
+    set(USE_AVX OFF CACHE BOOL "")
+    set(USE_AVX2 OFF CACHE BOOL "")
+    set(USE_LZCNT OFF CACHE BOOL "")
+    set(USE_TZCNT OFF CACHE BOOL "")
+    set(USE_F16C OFF CACHE BOOL "")
+    set(USE_FMADD OFF CACHE BOOL "")
+    set(ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    set(TARGET_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+    set(TARGET_HELLO_WORLD OFF CACHE BOOL "" FORCE)
+    set(TARGET_PERFORMANCE_TEST OFF CACHE BOOL "" FORCE)
+    set(TARGET_SAMPLES OFF CACHE BOOL "" FORCE)
+    set(TARGET_VIEWER OFF CACHE BOOL "" FORCE)
+    set(GENERATE_DEBUG_SYMBOLS OFF CACHE BOOL "" FORCE)
+    # Jolt 5.x also builds GPU compute backends (needing the DX12/Vulkan/
+    # Metal SDKs), treats every warning as an error on whatever compiler
+    # you have, traps floating-point exceptions, and keeps its profiler and
+    # debug renderer in release builds. None of that belongs in a game build.
+    set(JPH_USE_DX12 OFF CACHE BOOL "" FORCE)
+    set(JPH_USE_VK OFF CACHE BOOL "" FORCE)
+    set(JPH_USE_MTL OFF CACHE BOOL "" FORCE)
+    set(ENABLE_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+    set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
+    set(FLOATING_POINT_EXCEPTIONS_ENABLED OFF CACHE BOOL "" FORCE)
+    set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+    set(PROFILER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+    set(ENABLE_OBJECT_STREAM OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        JoltPhysics
+        GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
+        GIT_TAG        v5.6.0
+        SOURCE_SUBDIR  Build
+    )
+    FetchContent_MakeAvailable(JoltPhysics)
+endif()
+
 # nlohmann/json (for Tiled .tmj tilemaps) is vendored as a single header in
 # third_party/nlohmann/json.hpp — the full repo is huge, so we don't fetch it.
 # We only use miniaudio's header (our audio_impl.c holds the implementation), but
@@ -115,6 +168,7 @@ add_library(thistle STATIC
     src/three_particles.cpp
     src/three_noise.cpp
     src/three_terrain.cpp
+    src/three_collider.cpp
     src/cgltf_impl.c
     src/sokol_impl.c
     src/stb_impl.c
@@ -138,6 +192,15 @@ target_include_directories(thistle
 )
 
 target_link_libraries(thistle PUBLIC box2d)
+
+if(THISTLE_PHYSICS3D)
+    target_sources(thistle PRIVATE src/three_physics.cpp)
+    target_link_libraries(thistle PRIVATE Jolt)
+    # PUBLIC so games can #if THISTLE_PHYSICS3D around physics-only code.
+    target_compile_definitions(thistle PUBLIC THISTLE_PHYSICS3D=1)
+else()
+    target_sources(thistle PRIVATE src/three_physics_off.cpp)
+endif()
 
 if(THISTLE_DEBUG)
     target_compile_definitions(thistle PUBLIC THISTLE_DEBUG)
@@ -279,6 +342,19 @@ if(THISTLE_BUILD_SMOKETEST)
         endif()
     endif()
 
+    # Physics3D: crates, barrels and balls to knock over (Jolt builds only —
+    # without it there'd be nothing to see).
+    if(THISTLE_PHYSICS3D)
+        add_executable(thistle_physics_demo examples/physics_demo.cpp)
+        target_link_libraries(thistle_physics_demo PRIVATE thistle)
+        if(WIN32)
+            set_target_properties(thistle_physics_demo PROPERTIES WIN32_EXECUTABLE ON)
+            if(MSVC)
+                target_link_options(thistle_physics_demo PRIVATE "/ENTRY:mainCRTStartup")
+            endif()
+        endif()
+    endif()
+
     # VoxelWorld streaming: an endless generated block world.
     add_executable(thistle_endless_demo examples/endless_demo.cpp)
     target_link_libraries(thistle_endless_demo PRIVATE thistle)
@@ -345,6 +421,11 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_terrain_smoketest examples/terrain_smoketest.cpp)
     target_link_libraries(thistle_terrain_smoketest PRIVATE thistle)
 
+    # three::Physics3D simulated headlessly. Built either way: with
+    # THISTLE_PHYSICS3D off it checks that the stand-in does nothing, safely.
+    add_executable(thistle_physics3d_smoketest examples/physics3d_smoketest.cpp)
+    target_link_libraries(thistle_physics3d_smoketest PRIVATE thistle)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -381,4 +462,6 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(particles_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME terrain_smoketest COMMAND thistle_terrain_smoketest)
     set_tests_properties(terrain_smoketest PROPERTIES TIMEOUT 60)
+    add_test(NAME physics3d_smoketest COMMAND thistle_physics3d_smoketest)
+    set_tests_properties(physics3d_smoketest PROPERTIES TIMEOUT 60)
 endif()

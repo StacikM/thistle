@@ -4,6 +4,24 @@ project({{name}} LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# thistle.json holds the version and which optional engine modules this
+# game uses. configure_file() below only reruns when CMake reconfigures,
+# not on every `cmake --build` — this CONFIGURE_DEPENDS line is what makes
+# editing thistle.json (via `thistle version bump`, `thistle enable ...`, or
+# by hand) automatically trigger that reconfigure on your next build,
+# instead of silently building with a stale version or module list.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/thistle.json")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/thistle.json" THISTLE_PROJECT_JSON)
+string(JSON THISTLE_PROJECT_VERSION GET "${THISTLE_PROJECT_JSON}" version)
+
+# Optional engine modules (`thistle modules` lists them; `thistle enable
+# physics3d` turns one on). Read before the engine is added, so it builds
+# with them. A module missing from thistle.json is off.
+string(JSON THISTLE_PHYSICS3D ERROR_VARIABLE _thistle_no_physics3d GET "${THISTLE_PROJECT_JSON}" modules physics3d)
+if(_thistle_no_physics3d)
+    set(THISTLE_PHYSICS3D OFF)
+endif()
+
 # Path to the Thistle engine, set by `thistle new` when this project was
 # created. Override with -DTHISTLE_DIR=... if you move this project
 # somewhere else relative to the engine.
@@ -11,14 +29,7 @@ set(THISTLE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/{{engine_dir}}" CACHE PATH "Path to
 add_subdirectory(${THISTLE_DIR} ${CMAKE_BINARY_DIR}/thistle)
 
 # Bakes the version from thistle.json into a header your code can #include —
-# see src/version.hpp.in and `thistle version bump`. configure_file() only
-# reruns when CMake reconfigures, not on every `cmake --build` — this
-# CONFIGURE_DEPENDS line is what makes editing thistle.json (via `thistle
-# version bump`, or by hand) automatically trigger that reconfigure on your
-# next build, instead of silently building with a stale version.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/thistle.json")
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/thistle.json" THISTLE_PROJECT_JSON)
-string(JSON THISTLE_PROJECT_VERSION GET "${THISTLE_PROJECT_JSON}" version)
+# see src/version.hpp.in and `thistle version bump`.
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/version.hpp.in"
     "${CMAKE_CURRENT_BINARY_DIR}/generated/version.hpp"
