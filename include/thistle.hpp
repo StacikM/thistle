@@ -158,6 +158,11 @@ struct Texture {
 // Loads a PNG/JPG/etc. into a texture. Safe to call before run(); the pixels
 // are uploaded to the GPU lazily on first draw.
 Texture load_texture(const std::string& path);
+// Same, from an encoded image (PNG/JPG/...) already in memory.
+Texture load_texture_from_memory(const void* data, size_t size);
+// From raw RGBA8 pixels, row by row from the top — for textures you
+// generate in code (the pixels are copied).
+Texture make_texture(int width, int height, const unsigned char* rgba);
 
 // Frees a texture's GPU image + any pending pixels and invalidates the handle.
 // Call when unloading a level so textures don't leak.
@@ -1492,6 +1497,7 @@ struct Material {
     rgba color = white;         // multiplied with the texture and the vertex colors
     Texture texture;            // any thistle::load_texture() result; none = plain color
     rgba emissive = black;      // light the surface gives off itself; black = none
+    Texture emissive_texture;   // optional glow map, multiplied by `emissive` (screens, windows, lava)
     float specular = 0.2f;      // highlight strength, 0 = completely matte
     float shininess = 24.0f;    // highlight tightness: ~8 rough plastic, ~64 polished
     bool unlit = false;         // ignore lighting entirely (signs, UI in the world, stylized looks)
@@ -1513,6 +1519,29 @@ struct Model {
 };
 
 Model make_model(const MeshData& mesh, const Material& material = {});
+
+// What a model file contains, parsed but not yet on the GPU: edit it (recolor
+// a part, merge parts, bake it into something else) and then make_model() it.
+struct ModelData {
+    struct Part {
+        std::string name;
+        MeshData mesh;
+        Material material;
+        mat4 transform; // where the part sits in the model (from the file's node hierarchy)
+    };
+    std::vector<Part> parts;
+    bool empty() const { return parts.empty(); }
+    Bounds bounds() const;
+};
+
+// Reads .obj (+ its .mtl: colors, textures, transparency, glow), .gltf and
+// .glb (the format to export from Blender: node hierarchy, materials,
+// vertex colors, embedded or external textures). Textures load through
+// load_texture(), relative to the model file. Logs a warning and returns
+// an empty/invalid result if the file can't be read.
+ModelData load_model_data(const std::string& path);
+Model make_model(const ModelData& data);
+Model load_model(const std::string& path); // load_model_data() + make_model()
 void unload_model(Model& model);
 Bounds model_bounds(Model model);       // in the model's own space
 int model_part_count(Model model);

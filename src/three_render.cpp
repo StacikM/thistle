@@ -344,6 +344,8 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
         bind.index_buffer = item.mesh->ibuf;
         sg_view tex_view = mat.texture.valid() ? detail::texture_view(mat.texture) : sg_view{};
         bind.views[VIEW_base_tex] = tex_view.id != SG_INVALID_ID ? tex_view : g_three.white_view;
+        const sg_view glow_view = mat.emissive_texture.valid() ? detail::texture_view(mat.emissive_texture) : sg_view{};
+        bind.views[VIEW_emissive_tex] = glow_view.id != SG_INVALID_ID ? glow_view : g_three.white_view;
         bind.samplers[SMP_base_smp] = mat.filter == TextureFilter::Nearest ? g_three.sampler_nearest : g_three.sampler_linear;
         sg_apply_bindings(&bind);
 
@@ -391,6 +393,25 @@ Model make_model(const MeshData& mesh, const Material& material) {
     rec.bounds = m.bounds;
     rec.meshes.push_back(std::move(m));
     rec.parts.push_back({0, material, mat4{}});
+    g_three.models.push_back(std::move(rec));
+    return Model{static_cast<int>(g_three.models.size()) - 1};
+}
+
+Model make_model(const ModelData& data) {
+    if (data.parts.empty()) return Model{};
+    ModelRecord rec;
+    for (const ModelData::Part& part : data.parts) {
+        MeshRecord m;
+        m.cpu = part.mesh;
+        m.bounds = part.mesh.bounds();
+        m.positions.reserve(part.mesh.vertices.size());
+        for (const Vertex& v : part.mesh.vertices) m.positions.push_back(v.position);
+        m.triangles = part.mesh.indices;
+        const Bounds placed = m.bounds.transformed(part.transform);
+        if (placed.valid()) { rec.bounds.add(placed.min); rec.bounds.add(placed.max); }
+        rec.parts.push_back({static_cast<int>(rec.meshes.size()), part.material, part.transform});
+        rec.meshes.push_back(std::move(m));
+    }
     g_three.models.push_back(std::move(rec));
     return Model{static_cast<int>(g_three.models.size()) - 1};
 }

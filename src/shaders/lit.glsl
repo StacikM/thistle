@@ -49,6 +49,7 @@ layout(binding=2) uniform lit_material_params {
 };
 
 layout(binding=0) uniform texture2D base_tex;
+layout(binding=1) uniform texture2D emissive_tex;
 layout(binding=0) uniform sampler base_smp;
 
 in vec3 v_world_pos;
@@ -84,7 +85,7 @@ void main() {
         float spec = ndotl > 0.0 ? pow(max(dot(n, h), 0.0), surface.y) * surface.x : 0.0;
         color = albedo * (ambient + sun_color.rgb * ndotl) + sun_color.rgb * spec;
     }
-    color += to_linear(emissive.rgb);
+    color += to_linear(emissive.rgb * texture(sampler2D(emissive_tex, base_smp), v_uv).rgb);
     frag_color = vec4(to_srgb(color), srgb.a);
 }
 @end
