@@ -24,6 +24,8 @@ ctest --test-dir build --output-on-failure
 
 - `include/thistle.hpp` — the entire public API. One header, on purpose.
 - `src/thistle.cpp` — the engine. Most things live here; platform-specific code splits out only when it has to (Objective-C++, Windows headers, etc.).
+- `src/three_*.cpp` — the 3D engine (`thistle::three` in the header). Split out of `thistle.cpp` by area (math, renderer, voxels, physics, ...) because it's several times the size of the 2D engine; each file is still just part of the one `thistle` target.
+- `src/shaders/*.glsl` — the 3D renderer's shaders, written once in sokol-shdc's annotated GLSL. The `*.glsl.h` next to each is **generated and committed** (Metal/HLSL/GLSL for every backend) so nobody building the engine needs sokol-shdc. After editing a `.glsl`, run `python3 tools/shaders/build_shaders.py` and commit both files. sokol is pinned in `CMakeLists.txt` for this reason — bump it together with the script's `SOKOL_TOOLS_COMMIT`.
 - `src/ios_support.mm`, `src/win32_support.cpp`, `src/linux_gamepad.cpp` — platform glue that needs a different compiler mode or platform headers thistle.cpp can't include directly.
 - `src/sokol_impl.c`, `src/*_impl.c` — single translation units that instantiate the header-only vendored libraries (sokol, stb, miniaudio, fontstash) and pick the graphics backend by platform. Don't touch backend selection without reading `docs/building.md`'s table first.
 - `examples/` — smoketests, not sample games. Each one exists to prove something specific works; read the comment at the top of each file before assuming what it covers.
