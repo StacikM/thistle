@@ -1754,7 +1754,7 @@ struct Fog {
 
 struct RenderStats {
     int draw_calls = 0;
-    int triangles = 0;
+    int triangles = 0;  // copies drawn by draw_many() count once each
     int culled = 0; // model parts skipped because they were off-screen
 };
 
@@ -1795,6 +1795,14 @@ public:
     void light(const SpotLight& light);
 
     void draw(Model model, const Transform& transform = {}, rgba tint = white);
+    // Many copies of one model in one draw call per part — a forest, grass,
+    // rubble, a crowd. Each copy has its own transform and (optionally) tint.
+    // Culled as one group; see-through copies aren't sorted among themselves.
+    void draw_many(Model model, const Transform* transforms, size_t count, const rgba* tints = nullptr);
+    void draw_many(Model model, const std::vector<Transform>& transforms) { draw_many(model, transforms.data(), transforms.size()); }
+    void draw_many(Model model, const std::vector<Transform>& transforms, const std::vector<rgba>& tints) {
+        draw_many(model, transforms.data(), transforms.size(), tints.size() >= transforms.size() ? tints.data() : nullptr);
+    }
     // A block world: re-meshes whatever chunks were edited, then draws them.
     void draw(VoxelWorld& voxels);
     // Same, but every part of the model uses `material` instead of its own.

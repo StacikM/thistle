@@ -24,6 +24,33 @@ void main() {
 }
 @end
 
+@vs shadow_instanced_vs
+layout(binding=0) uniform shadow_vs_params {
+    mat4 light_mvp; // light view-projection * the part's placement in the model
+    vec4 uv_transform;
+};
+
+in vec3 position;
+in vec2 texcoord0;
+in vec4 color0;
+in vec4 inst_m0;
+in vec4 inst_m1;
+in vec4 inst_m2;
+in vec4 inst_m3;
+in vec4 inst_color;
+
+out vec2 v_uv;
+out float v_alpha;
+
+void main() {
+    v_uv = texcoord0 * uv_transform.xy + uv_transform.zw;
+    v_alpha = color0.a * inst_color.a;
+    // light_mvp is (light view-proj * part placement); the instance
+    // transform goes between them.
+    gl_Position = light_mvp * (mat4(inst_m0, inst_m1, inst_m2, inst_m3) * vec4(position, 1.0));
+}
+@end
+
 @fs shadow_fs
 layout(binding=1) uniform shadow_fs_params {
     vec4 cutout; // x = alpha cutoff (< 0: opaque, skip the texture read), y = material alpha
@@ -46,3 +73,4 @@ void main() {
 @end
 
 @program shadow shadow_vs shadow_fs
+@program shadow_instanced shadow_instanced_vs shadow_fs

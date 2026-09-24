@@ -256,6 +256,16 @@ if(THISTLE_BUILD_SMOKETEST)
         endif()
     endif()
 
+    # World::draw_many(): 10k instanced trees + rocks.
+    add_executable(thistle_forest_demo examples/forest_demo.cpp)
+    target_link_libraries(thistle_forest_demo PRIVATE thistle)
+    if(WIN32)
+        set_target_properties(thistle_forest_demo PROPERTIES WIN32_EXECUTABLE ON)
+        if(MSVC)
+            target_link_options(thistle_forest_demo PRIVATE "/ENTRY:mainCRTStartup")
+        endif()
+    endif()
+
     # A plain console program (no window, no App/Frame) that spins up a real
     # NetServer + NetClient over localhost and checks the results — proof the
     # networking layer actually works, not just compiles. No WIN32_EXECUTABLE

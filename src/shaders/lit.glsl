@@ -34,6 +34,49 @@ void main() {
 }
 @end
 
+// Same outputs as lit_vs, for World::draw_many(): the per-copy transform and
+// tint come from a second, per-instance vertex buffer. `model` (the uniform)
+// is the part's own placement inside the model, applied first.
+@vs lit_instanced_vs
+layout(binding=0) uniform lit_vs_params {
+    mat4 model;
+    mat4 view_proj;
+    mat4 normal_matrix;
+    vec4 uv_transform;
+};
+
+in vec3 position;
+in vec3 normal;
+in vec2 texcoord0;
+in vec4 color0;
+in vec4 inst_m0;
+in vec4 inst_m1;
+in vec4 inst_m2;
+in vec4 inst_m3;
+in vec4 inst_color;
+
+out vec3 v_world_pos;
+out vec3 v_normal;
+out vec2 v_uv;
+out vec4 v_color;
+
+void main() {
+    mat4 world = mat4(inst_m0, inst_m1, inst_m2, inst_m3) * model;
+    vec4 world_pos = world * vec4(position, 1.0);
+    v_world_pos = world_pos.xyz;
+    // The cofactor matrix is the inverse-transpose times the determinant:
+    // right for non-uniform scale, and far cheaper than inverse() per
+    // vertex. Its sign flips for mirrored copies, so undo that.
+    vec3 c0 = world[0].xyz, c1 = world[1].xyz, c2 = world[2].xyz;
+    mat3 cof = mat3(cross(c1, c2), cross(c2, c0), cross(c0, c1));
+    float det = dot(c0, cross(c1, c2));
+    v_normal = (det < 0.0 ? -1.0 : 1.0) * (cof * normal);
+    v_uv = texcoord0 * uv_transform.xy + uv_transform.zw;
+    v_color = color0 * inst_color;
+    gl_Position = view_proj * world_pos;
+}
+@end
+
 @fs lit_fs
 layout(binding=1) uniform lit_scene_params {
     vec4 camera_pos;     // xyz
@@ -156,3 +199,4 @@ void main() {
 @end
 
 @program lit lit_vs lit_fs
+@program lit_instanced lit_instanced_vs lit_fs
