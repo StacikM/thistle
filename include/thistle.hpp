@@ -1366,6 +1366,14 @@ struct Transform {
     quat rotation{};
     vec3 scale{1.0f, 1.0f, 1.0f};
 
+    Transform() = default;
+    // Implicit on purpose: anywhere a Transform is wanted, a plain position
+    // works too — world.draw(crate, player_pos).
+    Transform(vec3 position_, quat rotation_ = {}, vec3 scale_ = {1.0f, 1.0f, 1.0f})
+        : position(position_), rotation(rotation_), scale(scale_) {}
+    // ...and so does a bare {x, y, z}: world.draw(crate, {0, 1, 0}).
+    Transform(float x, float y, float z) : position{x, y, z} {}
+
     mat4 matrix() const { return mat4::trs(position, rotation, scale); }
     vec3 forward() const { return rotation.forward(); }
     vec3 right() const { return rotation.right(); }
@@ -1392,6 +1400,188 @@ inline void to_json(nlohmann::json& j, const Transform& t) {
 inline void from_json(const nlohmann::json& j, Transform& t) {
     j.at("position").get_to(t.position); j.at("rotation").get_to(t.rotation); j.at("scale").get_to(t.scale);
 }
+
+// Axis-aligned box, min/max corners. Default-constructed = empty (invalid).
+struct Bounds {
+    vec3 min{1e30f, 1e30f, 1e30f};
+    vec3 max{-1e30f, -1e30f, -1e30f};
+
+    bool valid() const { return min.x <= max.x && min.y <= max.y && min.z <= max.z; }
+    vec3 center() const { return (min + max) * 0.5f; }
+    vec3 size() const { return max - min; }
+    void add(vec3 p);
+    Bounds transformed(const mat4& m) const; // bounds of the 8 transformed corners
+};
+
+// --- geometry --------------------------------------------------------------
+
+struct Vertex {
+    vec3 position;
+    vec3 normal{0.0f, 1.0f, 0.0f};
+    vec2 uv;
+    rgba color = white; // multiplied into the material color: this is how vertex-colored low-poly models get their colors
+};
+
+// Geometry on the CPU side: build or edit it however you like, then turn it
+// into something drawable with make_model(). Triangles are counter-clockwise
+// when seen from the front (the glTF/OpenGL convention).
+struct MeshData {
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices; // 3 per triangle
+
+    void add_triangle(const Vertex& a, const Vertex& b, const Vertex& c);
+    void add_quad(const Vertex& a, const Vertex& b, const Vertex& c, const Vertex& d); // a-b-c-d counter-clockwise
+    void append(const MeshData& other, const Transform& t = {});
+    void recalculate_normals(); // smooth, averaged per shared vertex
+    // Splits every triangle into its own 3 vertices with the face normal —
+    // the faceted low-poly look. A low-res sphere_mesh() plus this is a rock.
+    void make_flat();
+    void set_color(rgba color); // paints every vertex
+    Bounds bounds() const;
+};
+
+// Ready-made shapes, centered on the origin, 1 unit big by default.
+MeshData box_mesh(vec3 size = {1.0f, 1.0f, 1.0f});
+MeshData sphere_mesh(float radius = 0.5f, int rings = 16, int segments = 24);
+MeshData cylinder_mesh(float radius = 0.5f, float height = 1.0f, int segments = 24);
+MeshData cone_mesh(float radius = 0.5f, float height = 1.0f, int segments = 24);
+MeshData capsule_mesh(float radius = 0.5f, float height = 2.0f, int segments = 16); // height includes the caps
+// Flat on the ground (facing +Y). uv_repeat tiles the texture that many times.
+MeshData plane_mesh(float width = 1.0f, float depth = 1.0f, float uv_repeat = 1.0f);
+
+// --- materials -------------------------------------------------------------
+
+enum class AlphaMode {
+    Opaque, // alpha ignored
+    Cutout, // pixels below alpha_cutoff are thrown away: leaves, fences, grass cards
+    Blend,  // real see-through: glass, water, ghosts (drawn last, sorted back to front)
+};
+
+enum class TextureFilter {
+    Linear,  // smooth — photos, painted textures
+    Nearest, // crisp pixels — pixel art, Minecraft-style blocks
+};
+
+struct Material {
+    rgba color = white;         // multiplied with the texture and the vertex colors
+    Texture texture;            // any thistle::load_texture() result; none = plain color
+    rgba emissive = black;      // light the surface gives off itself; black = none
+    float specular = 0.2f;      // highlight strength, 0 = completely matte
+    float shininess = 24.0f;    // highlight tightness: ~8 rough plastic, ~64 polished
+    bool unlit = false;         // ignore lighting entirely (signs, UI in the world, stylized looks)
+    bool double_sided = false;  // draw the back faces too (leaves, flags, paper)
+    AlphaMode alpha = AlphaMode::Opaque;
+    float alpha_cutoff = 0.5f;  // only for AlphaMode::Cutout
+    vec2 uv_scale{1.0f, 1.0f};  // texture tiling
+    TextureFilter filter = TextureFilter::Linear;
+};
+
+// --- models ------------------------------------------------------------------
+
+// A drawable 3D thing, stored on the GPU: one or more parts, each a mesh with
+// its own material. A lightweight handle — copy it freely, draw it as many
+// times per frame as you like, at different transforms.
+struct Model {
+    int id = -1;
+    bool valid() const { return id >= 0; }
+};
+
+Model make_model(const MeshData& mesh, const Material& material = {});
+void unload_model(Model& model);
+Bounds model_bounds(Model model);       // in the model's own space
+int model_part_count(Model model);
+Material model_material(Model model, int part = 0);
+void set_model_material(Model model, const Material& material, int part = -1); // -1 = every part
+
+// --- camera --------------------------------------------------------------------
+
+struct Camera {
+    vec3 position{0.0f, 2.0f, 6.0f};
+    quat rotation{};                // identity looks down -Z
+    float fov = radians(60.0f);     // vertical field of view
+    float near_z = 0.1f;
+    float far_z = 1000.0f;
+    bool orthographic = false;
+    float ortho_height = 10.0f;     // world units visible top-to-bottom when orthographic
+
+    void look_at(vec3 target, vec3 up = {0.0f, 1.0f, 0.0f}) { rotation = quat::look_rotation(target - position, up); }
+    vec3 forward() const { return rotation.forward(); }
+    vec3 right() const { return rotation.right(); }
+    vec3 up() const { return rotation.up(); }
+    mat4 view() const;
+    mat4 projection(float aspect) const;
+};
+
+// --- world -----------------------------------------------------------------------
+
+// The main light: parallel rays from far away. `direction` is the way the
+// light travels, so the default (mostly -Y) is a sun high in the sky.
+struct Sun {
+    vec3 direction{-0.35f, -1.0f, -0.45f};
+    rgba color = rgb(1.0f, 0.96f, 0.88f);
+    float intensity = 1.0f;
+};
+
+// The background gradient. Its colors also light the scene: surfaces facing
+// up pick up `top`, facing down pick up `ground` (scaled by World::ambient),
+// so shadowed sides are tinted by the sky instead of going flat black.
+struct Sky {
+    rgba top = rgb(0.30f, 0.52f, 0.85f);
+    rgba horizon = rgb(0.72f, 0.82f, 0.92f);
+    rgba ground = rgb(0.33f, 0.31f, 0.29f);
+    bool visible = true; // false: no background, whatever 2D was drawn earlier shows through
+};
+
+struct RenderStats {
+    int draw_calls = 0;
+    int triangles = 0;
+};
+
+// A 3D scene. Settings (sun, sky, ambient) stay until you change them; draw
+// calls are per frame, exactly like the 2D API — call draw() for everything
+// visible every frame, then render() once:
+//
+//   world.draw(crate, {0, 0.5f, 0});
+//   world.box({3, 0.5f, 0}, {1, 1, 1}, coral);
+//   world.render(f, camera);
+//   f.text("score", ...);   // 2D after render() lands on top of the 3D
+//
+// 2D drawn before render() ends up behind the 3D (hidden by the sky unless
+// sky.visible is false). render() can be called more than once per frame,
+// e.g. once per viewport for split-screen.
+class World {
+public:
+    Sun sun;
+    Sky sky;
+    float ambient = 0.55f; // how strongly the sky/ground colors light everything
+
+    World();
+    ~World();
+    World(World&&) noexcept;
+    World& operator=(World&&) noexcept;
+    World(const World&) = delete;
+    World& operator=(const World&) = delete;
+
+    void draw(Model model, const Transform& transform = {}, rgba tint = white);
+    // Same, but every part of the model uses `material` instead of its own.
+    void draw(Model model, const Transform& transform, const Material& material);
+
+    // Quick shapes, no Model needed (they share built-in unit meshes).
+    void box(vec3 center, vec3 size, rgba color = white);
+    void sphere(vec3 center, float radius, rgba color = white);
+    void cylinder(vec3 center, float radius, float height, rgba color = white);
+    void cone(vec3 center, float radius, float height, rgba color = white);
+    void plane(vec3 center, vec2 size, rgba color = white);
+
+    void render(const Frame& f, const Camera& camera);
+    void render(const Frame& f, const Camera& camera, Rect viewport); // viewport in pixels, top-left origin
+
+private:
+    std::unique_ptr<struct WorldImpl> impl_;
+};
+
+// Totals over every World::render() of the previous frame.
+RenderStats render_stats();
 
 } // namespace thistle::three
 

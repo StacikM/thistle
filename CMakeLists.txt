@@ -100,6 +100,8 @@ FetchContent_MakeAvailable(sokol stb fontstash box2d miniaudio)
 add_library(thistle STATIC
     src/thistle.cpp
     src/three_math.cpp
+    src/three_mesh.cpp
+    src/three_render.cpp
     src/sokol_impl.c
     src/stb_impl.c
     src/audio_impl.c
@@ -200,6 +202,18 @@ if(THISTLE_BUILD_SMOKETEST)
         endif()
     endif()
 
+    # The thistle::three renderer, visually: lit shapes, custom meshes,
+    # transparency, 2D before/after 3D, a second viewport. Opens a window
+    # and never exits on its own, same as thistle_smoketest above.
+    add_executable(thistle_three_smoketest examples/three_smoketest.cpp)
+    target_link_libraries(thistle_three_smoketest PRIVATE thistle)
+    if(WIN32)
+        set_target_properties(thistle_three_smoketest PROPERTIES WIN32_EXECUTABLE ON)
+        if(MSVC)
+            target_link_options(thistle_three_smoketest PRIVATE "/ENTRY:mainCRTStartup")
+        endif()
+    endif()
+
     # A plain console program (no window, no App/Frame) that spins up a real
     # NetServer + NetClient over localhost and checks the results — proof the
     # networking layer actually works, not just compiles. No WIN32_EXECUTABLE
@@ -232,6 +246,11 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_math3d_smoketest examples/math3d_smoketest.cpp)
     target_link_libraries(thistle_math3d_smoketest PRIVATE thistle)
 
+    # Winding/normals/bounds of every built-in 3D shape plus the MeshData
+    # helpers — CPU-side geometry only, no GPU.
+    add_executable(thistle_mesh3d_smoketest examples/mesh3d_smoketest.cpp)
+    target_link_libraries(thistle_mesh3d_smoketest PRIVATE thistle)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -256,4 +275,6 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(collision_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME math3d_smoketest COMMAND thistle_math3d_smoketest)
     set_tests_properties(math3d_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME mesh3d_smoketest COMMAND thistle_mesh3d_smoketest)
+    set_tests_properties(mesh3d_smoketest PROPERTIES TIMEOUT 30)
 endif()

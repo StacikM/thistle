@@ -12,6 +12,7 @@
 #include "sokol_fontstash.h"
 
 #include "thistle_gamepad.h"
+#include "thistle_internal.h"
 
 #include <algorithm>
 #include <atomic>
@@ -312,6 +313,8 @@ struct EngineState {
     ThistleGamepad pad_cur{};
     ThistleGamepad pad_prev{};
 
+    uint64_t frame_index = 0;
+
     int menu_focus = 0;      // gamepad-focused menu item
     int menu_last_count = 0; // items in the last menu built
 
@@ -330,14 +333,48 @@ std::vector<std::string> g_logs;
 // route them through this pointer.
 EngineState* g_state = nullptr;
 
+// Box-filtered mip chain, so a texture on a far-away 3D surface averages
+// out instead of shimmering. The 2D sampler clamps to level 0 (max_lod), so
+// sprites draw exactly as they did before mips existed.
+std::vector<std::vector<unsigned char>> build_mips(const unsigned char* px, int w, int h) {
+    std::vector<std::vector<unsigned char>> levels;
+    const unsigned char* src = px;
+    while ((w > 1 || h > 1) && static_cast<int>(levels.size()) + 1 < SG_MAX_MIPMAPS) {
+        const int nw = std::max(1, w / 2), nh = std::max(1, h / 2);
+        std::vector<unsigned char> dst(static_cast<size_t>(nw) * nh * 4);
+        for (int y = 0; y < nh; ++y) {
+            for (int x = 0; x < nw; ++x) {
+                const int x0 = std::min(x * 2, w - 1), x1 = std::min(x * 2 + 1, w - 1);
+                const int y0 = std::min(y * 2, h - 1), y1 = std::min(y * 2 + 1, h - 1);
+                for (int c = 0; c < 4; ++c) {
+                    const int sum = src[(y0 * w + x0) * 4 + c] + src[(y0 * w + x1) * 4 + c] +
+                                    src[(y1 * w + x0) * 4 + c] + src[(y1 * w + x1) * 4 + c];
+                    dst[(static_cast<size_t>(y) * nw + x) * 4 + c] = static_cast<unsigned char>((sum + 2) / 4);
+                }
+            }
+        }
+        levels.push_back(std::move(dst));
+        src = levels.back().data();
+        w = nw;
+        h = nh;
+    }
+    return levels;
+}
+
 void ensure_uploaded(TextureRecord& rec) {
     if (rec.uploaded || rec.pixels == nullptr) return;
+    const std::vector<std::vector<unsigned char>> mips = build_mips(rec.pixels, rec.w, rec.h);
     sg_image_desc desc = {};
     desc.width = rec.w;
     desc.height = rec.h;
+    desc.num_mipmaps = 1 + static_cast<int>(mips.size());
     desc.pixel_format = SG_PIXELFORMAT_RGBA8;
     desc.data.mip_levels[0].ptr = rec.pixels;
     desc.data.mip_levels[0].size = static_cast<size_t>(rec.w) * rec.h * 4;
+    for (size_t i = 0; i < mips.size(); ++i) {
+        desc.data.mip_levels[i + 1].ptr = mips[i].data();
+        desc.data.mip_levels[i + 1].size = mips[i].size();
+    }
     rec.img = sg_make_image(&desc);
 
     sg_view_desc vdesc = {};
@@ -368,6 +405,7 @@ void init_cb() {
     smp.mag_filter = SG_FILTER_LINEAR;
     smp.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
     smp.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
+    smp.max_lod = 0.0f;
     g_state->sampler = sg_make_sampler(&smp);
 
     sg_pipeline_desc pip = {};
@@ -413,6 +451,8 @@ void init_cb() {
     sg_view_desc wv = {};
     wv.texture.image = g_state->white_img;
     g_state->white_view = sg_make_view(&wv);
+
+    detail::three_setup();
 
 #if defined(__APPLE__)
     thistle_ios_init_audio_session(); // no-op on macOS
@@ -797,6 +837,7 @@ void frame_cb() {
     const bool use_post = g_state->post_effect != PostEffect::None && ensure_post(*g_state, w, h);
 
     if (g_state->fons) sfons_flush(g_state->fons); // upload any newly rasterized glyphs
+    detail::three_before_passes();
 
     if (use_post) {
         // Pass 1: render the scene into the offscreen texture.
@@ -806,7 +847,7 @@ void frame_cb() {
         off.attachments.colors[0] = g_state->off_color_att;
         off.attachments.depth_stencil = g_state->off_depth_att;
         sg_begin_pass(&off);
-        sgl_draw();
+        detail::three_draw_layers();
         sg_end_pass();
 
         // Pass 2: composite it to the screen through the post-effect shader.
@@ -835,10 +876,12 @@ void frame_cb() {
         pass.action.colors[0].clear_value = clear;
         pass.swapchain = sglue_swapchain();
         sg_begin_pass(&pass);
-        sgl_draw();
+        detail::three_draw_layers();
         sg_end_pass();
         sg_commit();
     }
+    detail::three_end_frame();
+    ++g_state->frame_index;
 
     // Edge-triggered input is only true for the frame it happened.
     for (bool& p : g_state->key_pressed) p = false;
@@ -863,6 +906,7 @@ void cleanup_cb() {
     if (g_state->sfx_group_ready) ma_sound_group_uninit(&g_state->sfx_group);
     if (g_state->audio_ready) ma_engine_uninit(&g_state->audio);
     if (g_state->fons) sfons_destroy(g_state->fons);
+    detail::three_shutdown();
     sgl_shutdown();
     sg_shutdown();
 }
@@ -3796,6 +3840,21 @@ int App::run() {
     return 0;
 #endif
 }
+
+namespace detail {
+
+sg_view texture_view(Texture tex) {
+    if (!g_state || tex.id < 0 || tex.id >= static_cast<int>(g_state->textures.size())) return {};
+    TextureRecord& rec = g_state->textures[tex.id];
+    ensure_uploaded(rec);
+    return rec.img.id != SG_INVALID_ID ? rec.view : sg_view{};
+}
+
+uint64_t frame_index() { return g_state ? g_state->frame_index : 0; }
+int frame_width() { return sapp_width(); }
+int frame_height() { return sapp_height(); }
+
+} // namespace detail
 
 } // namespace thistle
 
