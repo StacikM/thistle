@@ -3499,6 +3499,13 @@ Font load_font(const std::string& path) {
 
 namespace {
 Texture register_texture(unsigned char* pixels, int w, int h, const std::string& path) {
+    if (!g_state) {
+        // Textures live in the engine state that App's constructor creates;
+        // before that there's nowhere to put one. Say so instead of crashing.
+        log_warn("textures can't be created before an App exists — construct your App first");
+        stbi_image_free(pixels);
+        return Texture{};
+    }
     TextureRecord rec;
     rec.pixels = pixels;
     rec.w = w;
@@ -3533,14 +3540,7 @@ Texture load_texture(const std::string& path) {
     if (pixels == nullptr) {
         return Texture{}; // invalid handle; draws nothing
     }
-    TextureRecord rec;
-    rec.pixels = pixels;
-    rec.w = w;
-    rec.h = h;
-    rec.path = path;
-    const int id = static_cast<int>(g_state->textures.size());
-    g_state->textures.push_back(rec);
-    return Texture{id, w, h};
+    return register_texture(pixels, w, h, path);
 }
 
 namespace {

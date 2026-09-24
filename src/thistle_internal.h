@@ -20,6 +20,12 @@ uint64_t frame_index();            // increments once per rendered frame
 int frame_width();
 int frame_height();
 
+// --- implemented in three_render.cpp ---
+// Swaps a model's parts for new ones, keeping its id — so a mesh that gets
+// rebuilt over and over (a voxel chunk) doesn't grow the model registry.
+// An invalid `model` gets a fresh one; empty `data` unloads it.
+void replace_model(three::Model& model, const three::ModelData& data);
+
 // --- implemented in three_render.cpp, called from thistle.cpp's frame loop ---
 void three_setup();
 void three_shutdown();

@@ -110,6 +110,7 @@ add_library(thistle STATIC
     src/three_mesh.cpp
     src/three_render.cpp
     src/three_model.cpp
+    src/three_voxel.cpp
     src/cgltf_impl.c
     src/sokol_impl.c
     src/stb_impl.c
@@ -244,6 +245,16 @@ if(THISTLE_BUILD_SMOKETEST)
         endif()
     endif()
 
+    # A block world from a generated atlas plus a flat-colored statue.
+    add_executable(thistle_voxel_demo examples/voxel_demo.cpp)
+    target_link_libraries(thistle_voxel_demo PRIVATE thistle)
+    if(WIN32)
+        set_target_properties(thistle_voxel_demo PROPERTIES WIN32_EXECUTABLE ON)
+        if(MSVC)
+            target_link_options(thistle_voxel_demo PRIVATE "/ENTRY:mainCRTStartup")
+        endif()
+    endif()
+
     # A plain console program (no window, no App/Frame) that spins up a real
     # NetServer + NetClient over localhost and checks the results — proof the
     # networking layer actually works, not just compiles. No WIN32_EXECUTABLE
@@ -286,6 +297,10 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_model_smoketest examples/model_smoketest.cpp)
     target_link_libraries(thistle_model_smoketest PRIVATE thistle)
 
+    # three::VoxelWorld storage + mesher, CPU only.
+    add_executable(thistle_voxel_smoketest examples/voxel_smoketest.cpp)
+    target_link_libraries(thistle_voxel_smoketest PRIVATE thistle)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -314,4 +329,6 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(mesh3d_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME model_smoketest COMMAND thistle_model_smoketest)
     set_tests_properties(model_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME voxel_smoketest COMMAND thistle_voxel_smoketest)
+    set_tests_properties(voxel_smoketest PROPERTIES TIMEOUT 30)
 endif()
