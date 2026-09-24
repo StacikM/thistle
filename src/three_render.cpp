@@ -37,7 +37,19 @@ struct WorldImpl {
         float cos_outer = -1.0f;
         float cos_inner = -1.0f;
     };
+    struct Instance {
+        mat4 matrix;
+        float color[4];
+    };
+    struct ManyCmd {
+        int model = -1;
+        uint32_t first = 0; // into `instances`
+        uint32_t count = 0;
+        Bounds bounds;      // world space, all copies
+    };
     std::vector<DrawCmd> draws;
+    std::vector<ManyCmd> many;
+    std::vector<Instance> instances;
     std::vector<Light> lights;
     std::vector<LineVertex> lines;
     std::vector<LineVertex> lines_on_top;
@@ -106,6 +118,9 @@ struct PassRecord {
     mat4 shadow_matrix;       // world -> (u, v, depth) in that shadow map
     float shadow_texel = 0.0f; // world size of one shadow-map texel
     std::vector<WorldImpl::DrawCmd> draws;
+    std::vector<WorldImpl::ManyCmd> many;
+    std::vector<WorldImpl::Instance> instances;
+    uint32_t instance_base = 0; // this pass's first instance in the frame's shared instance buffer
     std::vector<WorldImpl::LineVertex> lines;
     std::vector<WorldImpl::LineVertex> lines_on_top;
     int line_first = 0; // vertex offsets into this frame's shared line buffer
@@ -117,8 +132,12 @@ enum PipelineKind { PipOpaque, PipOpaqueDouble, PipBlend, PipBlendDouble, PipCou
 struct RenderState {
     bool ready = false;
     sg_shader lit_shader = {};
+    sg_shader lit_instanced_shader = {};
     sg_shader background_shader = {};
     sg_pipeline pipelines[PipCount] = {};
+    sg_pipeline instanced_pipelines[PipCount] = {};
+    sg_buffer instance_buffer = {};
+    size_t instance_capacity = 0; // in instances
     sg_pipeline sky_pipeline = {};
     sg_pipeline depth_reset_pipeline = {};
     sg_sampler sampler_linear = {};
@@ -138,6 +157,8 @@ struct RenderState {
     };
     sg_shader shadow_shader = {};
     sg_pipeline shadow_pipeline = {};
+    sg_shader shadow_instanced_shader = {};
+    sg_pipeline shadow_instanced_pipeline = {};
     sg_sampler shadow_sampler = {};
     std::vector<ShadowTarget> shadow_targets; // one per render() that has shadows this frame
     ShadowTarget no_shadow;                   // 1x1, cleared to "far": what passes without shadows bind
@@ -217,13 +238,27 @@ Model unit_model(Model& slot, MeshData (*make)()) {
     return slot;
 }
 
-sg_pipeline make_lit_pipeline(bool blend, bool double_sided) {
+// Per-instance attributes for the *_instanced shaders: four matrix columns
+// and a tint, from vertex buffer 1, advancing once per copy.
+void add_instance_layout(sg_pipeline_desc& pd, int first_attr) {
+    pd.layout.buffers[1].stride = sizeof(WorldImpl::Instance);
+    pd.layout.buffers[1].step_func = SG_VERTEXSTEP_PER_INSTANCE;
+    for (int i = 0; i < 5; ++i) {
+        pd.layout.attrs[first_attr + i].buffer_index = 1;
+        pd.layout.attrs[first_attr + i].offset = static_cast<int>(i * sizeof(vec4));
+        pd.layout.attrs[first_attr + i].format = SG_VERTEXFORMAT_FLOAT4;
+    }
+}
+
+sg_pipeline make_lit_pipeline(bool blend, bool double_sided, bool instanced) {
     sg_pipeline_desc pd = {};
-    pd.shader = g_three.lit_shader;
-    pd.layout.attrs[ATTR_lit_position].format = SG_VERTEXFORMAT_FLOAT3;
-    pd.layout.attrs[ATTR_lit_normal].format = SG_VERTEXFORMAT_FLOAT3;
-    pd.layout.attrs[ATTR_lit_texcoord0].format = SG_VERTEXFORMAT_FLOAT2;
-    pd.layout.attrs[ATTR_lit_color0].format = SG_VERTEXFORMAT_UBYTE4N;
+    pd.shader = instanced ? g_three.lit_instanced_shader : g_three.lit_shader;
+    pd.layout.buffers[0].stride = sizeof(GpuVertex);
+    pd.layout.attrs[ATTR_lit_position] = {0, offsetof(GpuVertex, px), SG_VERTEXFORMAT_FLOAT3};
+    pd.layout.attrs[ATTR_lit_normal] = {0, offsetof(GpuVertex, nx), SG_VERTEXFORMAT_FLOAT3};
+    pd.layout.attrs[ATTR_lit_texcoord0] = {0, offsetof(GpuVertex, u), SG_VERTEXFORMAT_FLOAT2};
+    pd.layout.attrs[ATTR_lit_color0] = {0, offsetof(GpuVertex, color), SG_VERTEXFORMAT_UBYTE4N};
+    if (instanced) add_instance_layout(pd, ATTR_lit_instanced_inst_m0);
     pd.index_type = SG_INDEXTYPE_UINT32;
     pd.face_winding = SG_FACEWINDING_CCW;
     pd.cull_mode = double_sided ? SG_CULLMODE_NONE : SG_CULLMODE_BACK;
@@ -239,7 +274,7 @@ sg_pipeline make_lit_pipeline(bool blend, bool double_sided) {
         pd.colors[0].blend.src_factor_alpha = SG_BLENDFACTOR_ONE;
         pd.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
     }
-    pd.label = "three-lit";
+    pd.label = instanced ? "three-lit-instanced" : "three-lit";
     return sg_make_pipeline(&pd);
 }
 
@@ -362,15 +397,16 @@ void destroy_shadow_target(RenderState::ShadowTarget& t) {
     t = RenderState::ShadowTarget{};
 }
 
-sg_pipeline make_shadow_pipeline() {
+sg_pipeline make_shadow_pipeline(bool instanced) {
     sg_pipeline_desc pd = {};
-    pd.shader = g_three.shadow_shader;
+    pd.shader = instanced ? g_three.shadow_instanced_shader : g_three.shadow_shader;
     // Same vertex buffers as the lit pass, minus the normal, so the offsets
     // and stride are spelled out instead of inferred from the attributes.
     pd.layout.buffers[0].stride = sizeof(GpuVertex);
     pd.layout.attrs[ATTR_shadow_position] = {0, offsetof(GpuVertex, px), SG_VERTEXFORMAT_FLOAT3};
     pd.layout.attrs[ATTR_shadow_texcoord0] = {0, offsetof(GpuVertex, u), SG_VERTEXFORMAT_FLOAT2};
     pd.layout.attrs[ATTR_shadow_color0] = {0, offsetof(GpuVertex, color), SG_VERTEXFORMAT_UBYTE4N};
+    if (instanced) add_instance_layout(pd, ATTR_shadow_instanced_inst_m0);
     pd.index_type = SG_INDEXTYPE_UINT32;
     // Both faces: a single-sided plane (a roof, a billboard) still blocks the sun.
     pd.cull_mode = SG_CULLMODE_NONE;
@@ -459,6 +495,7 @@ void render_shadow_map(PassRecord& pass, int index, int fb_w, int fb_h) {
         target = make_shadow_target(res);
     }
     const bool full = pass.viewport.size.x <= 0.0f || pass.viewport.size.y <= 0.0f;
+    // (Shadow casters: pass.draws with the regular pipeline, then pass.many instanced.)
     const float vw = full ? static_cast<float>(fb_w) : pass.viewport.size.x;
     const float vh = full ? static_cast<float>(fb_h) : pass.viewport.size.y;
     const LightFit fit = fit_sun(pass, vh > 0.0f ? vw / vh : 1.0f, res);
@@ -481,6 +518,7 @@ void render_shadow_map(PassRecord& pass, int index, int fb_w, int fb_h) {
             upload_mesh(mesh);
             if (mesh.index_count == 0) continue;
             const mat4 world = cmd.world * part.local;
+            // (instanced casters are drawn after these, with their own pipeline)
             if (!light_frustum.intersects(mesh.bounds.transformed(world))) continue;
             sg_bindings bind = {};
             bind.vertex_buffers[0] = mesh.vbuf;
@@ -501,6 +539,38 @@ void render_shadow_map(PassRecord& pass, int index, int fb_w, int fb_h) {
             ++s.stats_this_frame.draw_calls;
         }
     }
+    bool instanced_bound = false;
+    for (const WorldImpl::ManyCmd& cmd : pass.many) {
+        ModelRecord* rec = model_record(Model{cmd.model});
+        if (!rec || cmd.count == 0 || !light_frustum.intersects(cmd.bounds)) continue;
+        for (const PartRecord& part : rec->parts) {
+            const Material& mat = part.material;
+            if (!mat.casts_shadow || mat.alpha == AlphaMode::Blend) continue;
+            MeshRecord& mesh = rec->meshes[part.mesh];
+            upload_mesh(mesh);
+            if (mesh.index_count == 0) continue;
+            if (!instanced_bound) { sg_apply_pipeline(s.shadow_instanced_pipeline); instanced_bound = true; }
+            sg_bindings bind = {};
+            bind.vertex_buffers[0] = mesh.vbuf;
+            bind.vertex_buffers[1] = s.instance_buffer;
+            bind.vertex_buffer_offsets[1] = static_cast<int>((pass.instance_base + cmd.first) * sizeof(WorldImpl::Instance));
+            bind.index_buffer = mesh.ibuf;
+            const bool cutout = mat.alpha == AlphaMode::Cutout;
+            sg_view tex = cutout && mat.texture.valid() ? detail::texture_view(mat.texture) : sg_view{};
+            bind.views[VIEW_base_tex] = tex.id != SG_INVALID_ID ? tex : s.white_view;
+            bind.samplers[SMP_base_smp] = mat.filter == TextureFilter::Nearest ? s.sampler_nearest : s.sampler_linear;
+            sg_apply_bindings(&bind);
+            shadow_vs_params_t vs = {};
+            vs.light_mvp = fit.view_proj * part.local;
+            vs.uv_transform = {mat.uv_scale.x, mat.uv_scale.y, 0.0f, 0.0f};
+            sg_apply_uniforms(UB_shadow_vs_params, SG_RANGE(vs));
+            shadow_fs_params_t fs = {};
+            fs.cutout = {cutout ? mat.alpha_cutoff : -1.0f, mat.color.a, 0.0f, 0.0f};
+            sg_apply_uniforms(UB_shadow_fs_params, SG_RANGE(fs));
+            sg_draw(0, mesh.index_count, static_cast<int>(cmd.count));
+            ++s.stats_this_frame.draw_calls;
+        }
+    }
     sg_end_pass();
     pass.shadow_target = index;
     pass.shadow_matrix = shadow_bias_matrix() * fit.view_proj;
@@ -510,10 +580,12 @@ void render_shadow_map(PassRecord& pass, int index, int fb_w, int fb_h) {
 struct DrawItem {
     const MeshRecord* mesh;
     const Material* material;
-    mat4 world;
+    mat4 world;          // for instanced items: the part's placement inside the model
     rgba tint;
     float sort_depth;
     PipelineKind pipeline;
+    uint32_t inst_first = 0; // instanced items: offset into the frame's instance buffer
+    uint32_t inst_count = 0; // 0 = a plain single draw
 };
 
 void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
@@ -584,13 +656,35 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
             items.push_back({&mesh, mat, world, cmd.tint, dot(center - pass.camera.position, pass.camera.forward()), kind});
         }
     }
+    for (const WorldImpl::ManyCmd& cmd : pass.many) {
+        ModelRecord* rec = model_record(Model{cmd.model});
+        if (!rec || cmd.count == 0) continue;
+        if (!frustum.intersects(cmd.bounds)) {
+            stats.culled += static_cast<int>(rec->parts.size());
+            continue;
+        }
+        for (const PartRecord& part : rec->parts) {
+            MeshRecord& mesh = rec->meshes[part.mesh];
+            upload_mesh(mesh);
+            if (mesh.index_count == 0) continue;
+            const Material* mat = &part.material;
+            const bool blend = mat->alpha == AlphaMode::Blend;
+            const PipelineKind kind = blend ? (mat->double_sided ? PipBlendDouble : PipBlend)
+                                            : (mat->double_sided ? PipOpaqueDouble : PipOpaque);
+            DrawItem item{&mesh, mat, part.local, white, dot(cmd.bounds.center() - pass.camera.position, pass.camera.forward()), kind};
+            item.inst_first = pass.instance_base + cmd.first;
+            item.inst_count = cmd.count;
+            items.push_back(item);
+        }
+    }
     // Opaque first (grouped by pipeline to cut state changes), then
     // see-through surfaces far-to-near so they blend over what's behind them.
     std::stable_sort(items.begin(), items.end(), [](const DrawItem& a, const DrawItem& b) {
         const bool ab = a.pipeline >= PipBlend, bb = b.pipeline >= PipBlend;
         if (ab != bb) return !ab;
         if (ab) return a.sort_depth > b.sort_depth;
-        return a.pipeline < b.pipeline;
+        if (a.pipeline != b.pipeline) return a.pipeline < b.pipeline;
+        return (a.inst_count > 0) < (b.inst_count > 0);
     });
 
     lit_scene_params_t scene = {};
@@ -632,14 +726,20 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
             lines_drawn = true;
             bound_pipeline = -1;
         }
-        if (item.pipeline != bound_pipeline) {
-            sg_apply_pipeline(g_three.pipelines[item.pipeline]);
+        const bool instanced = item.inst_count > 0;
+        const int want_pipeline = item.pipeline + (instanced ? PipCount : 0);
+        if (want_pipeline != bound_pipeline) {
+            sg_apply_pipeline(instanced ? g_three.instanced_pipelines[item.pipeline] : g_three.pipelines[item.pipeline]);
             sg_apply_uniforms(UB_lit_scene_params, SG_RANGE(scene));
-            bound_pipeline = item.pipeline;
+            bound_pipeline = want_pipeline;
         }
         const Material& mat = *item.material;
         sg_bindings bind = {};
         bind.vertex_buffers[0] = item.mesh->vbuf;
+        if (instanced) {
+            bind.vertex_buffers[1] = g_three.instance_buffer;
+            bind.vertex_buffer_offsets[1] = static_cast<int>(item.inst_first * sizeof(WorldImpl::Instance));
+        }
         bind.index_buffer = item.mesh->ibuf;
         sg_view tex_view = mat.texture.valid() ? detail::texture_view(mat.texture) : sg_view{};
         bind.views[VIEW_base_tex] = tex_view.id != SG_INVALID_ID ? tex_view : g_three.white_view;
@@ -653,7 +753,7 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
         lit_vs_params_t vs = {};
         vs.model = item.world;
         vs.view_proj = view_proj;
-        vs.normal_matrix = transpose(inverse(item.world));
+        vs.normal_matrix = instanced ? mat4{} : transpose(inverse(item.world)); // instanced: computed per copy in the shader
         vs.uv_transform = {mat.uv_scale.x, mat.uv_scale.y, 0.0f, 0.0f};
         sg_apply_uniforms(UB_lit_vs_params, SG_RANGE(vs));
 
@@ -666,9 +766,10 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
                       mat.alpha == AlphaMode::Cutout ? mat.alpha_cutoff : -1.0f};
         sg_apply_uniforms(UB_lit_material_params, SG_RANGE(mp));
 
-        sg_draw(0, item.mesh->index_count, 1);
+        const int copies = instanced ? static_cast<int>(item.inst_count) : 1;
+        sg_draw(0, item.mesh->index_count, copies);
         ++stats.draw_calls;
-        stats.triangles += item.mesh->index_count / 3;
+        stats.triangles += item.mesh->index_count / 3 * copies;
     }
 
     if (!lines_drawn) draw_lines(g_three.line_pipeline, pass.line_first, static_cast<int>(pass.lines.size()), view_proj);
@@ -791,6 +892,8 @@ WorldImpl& touch(std::unique_ptr<WorldImpl>& impl) {
     const uint64_t frame = detail::frame_index();
     if (impl->frame != frame) {
         impl->draws.clear();
+        impl->many.clear();
+        impl->instances.clear();
         impl->lights.clear();
         impl->lines.clear();
         impl->lines_on_top.clear();
@@ -846,6 +949,26 @@ void World::draw(Model model, const Transform& transform, const Material& materi
     cmd.override_material = true;
     cmd.material = material;
     touch(impl_).draws.push_back(std::move(cmd));
+}
+
+void World::draw_many(Model model, const Transform* transforms, size_t count, const rgba* tints) {
+    const ModelRecord* rec = model_record(model);
+    if (!rec || count == 0 || !transforms) return;
+    WorldImpl& impl = touch(impl_);
+    WorldImpl::ManyCmd cmd;
+    cmd.model = model.id;
+    cmd.first = static_cast<uint32_t>(impl.instances.size());
+    cmd.count = static_cast<uint32_t>(count);
+    for (size_t i = 0; i < count; ++i) {
+        WorldImpl::Instance inst;
+        inst.matrix = transforms[i].matrix();
+        const rgba t = tints ? tints[i] : white;
+        inst.color[0] = t.r; inst.color[1] = t.g; inst.color[2] = t.b; inst.color[3] = t.a;
+        impl.instances.push_back(inst);
+        const Bounds b = rec->bounds.transformed(inst.matrix);
+        if (b.valid()) { cmd.bounds.add(b.min); cmd.bounds.add(b.max); }
+    }
+    impl.many.push_back(cmd);
 }
 
 void World::box(vec3 center, vec3 size, rgba color) {
@@ -945,6 +1068,8 @@ void World::render(const Frame&, const Camera& camera, Rect viewport) {
     pass.ambient = ambient;
     pass.lights = impl.lights;
     pass.draws = impl.draws;
+    pass.many = impl.many;
+    pass.instances = impl.instances;
     pass.lines = impl.lines;
     pass.lines_on_top = impl.lines_on_top;
     g_three.passes.push_back(std::move(pass));
@@ -1035,16 +1160,22 @@ void replace_model(Model& model, const ModelData& data) {
 void three_setup() {
     RenderState& s = g_three;
     s.lit_shader = sg_make_shader(lit_shader_desc(sg_query_backend()));
+    s.lit_instanced_shader = sg_make_shader(lit_instanced_shader_desc(sg_query_backend()));
     s.background_shader = sg_make_shader(background_shader_desc(sg_query_backend()));
     s.ready = true;
-    s.pipelines[PipOpaque] = make_lit_pipeline(false, false);
-    s.pipelines[PipOpaqueDouble] = make_lit_pipeline(false, true);
-    s.pipelines[PipBlend] = make_lit_pipeline(true, false);
-    s.pipelines[PipBlendDouble] = make_lit_pipeline(true, true);
+    for (int instanced = 0; instanced < 2; ++instanced) {
+        sg_pipeline* p = instanced ? s.instanced_pipelines : s.pipelines;
+        p[PipOpaque] = make_lit_pipeline(false, false, instanced);
+        p[PipOpaqueDouble] = make_lit_pipeline(false, true, instanced);
+        p[PipBlend] = make_lit_pipeline(true, false, instanced);
+        p[PipBlendDouble] = make_lit_pipeline(true, true, instanced);
+    }
     s.sky_pipeline = make_background_pipeline(true);
     s.depth_reset_pipeline = make_background_pipeline(false);
     s.shadow_shader = sg_make_shader(shadow_shader_desc(sg_query_backend()));
-    s.shadow_pipeline = make_shadow_pipeline();
+    s.shadow_instanced_shader = sg_make_shader(shadow_instanced_shader_desc(sg_query_backend()));
+    s.shadow_pipeline = make_shadow_pipeline(false);
+    s.shadow_instanced_pipeline = make_shadow_pipeline(true);
     s.no_shadow = make_shadow_target(1);
     sg_sampler_desc cmp = {};
     cmp.min_filter = SG_FILTER_LINEAR;
@@ -1129,6 +1260,11 @@ void three_shutdown() {
     sg_destroy_image(s.black_cube);
     sg_destroy_sampler(s.sky_sampler);
     for (sg_pipeline p : s.pipelines) sg_destroy_pipeline(p);
+    for (sg_pipeline p : s.instanced_pipelines) sg_destroy_pipeline(p);
+    sg_destroy_shader(s.lit_instanced_shader);
+    sg_destroy_pipeline(s.shadow_instanced_pipeline);
+    sg_destroy_shader(s.shadow_instanced_shader);
+    if (s.instance_buffer.id != SG_INVALID_ID) sg_destroy_buffer(s.instance_buffer);
     sg_destroy_pipeline(s.sky_pipeline);
     sg_destroy_pipeline(s.depth_reset_pipeline);
     sg_destroy_shader(s.lit_shader);
@@ -1146,6 +1282,40 @@ void three_shutdown() {
 
 void three_before_passes() {
     RenderState& s = g_three;
+
+    // Transient buffers must be written before anything binds them this
+    // frame — and the shadow passes below already bind the instance buffer.
+    std::vector<WorldImpl::Instance> all_instances;
+    std::vector<WorldImpl::LineVertex> all_lines;
+    for (PassRecord& pass : s.passes) {
+        pass.instance_base = static_cast<uint32_t>(all_instances.size());
+        all_instances.insert(all_instances.end(), pass.instances.begin(), pass.instances.end());
+        pass.line_first = static_cast<int>(all_lines.size());
+        all_lines.insert(all_lines.end(), pass.lines.begin(), pass.lines.end());
+        pass.on_top_first = static_cast<int>(all_lines.size());
+        all_lines.insert(all_lines.end(), pass.lines_on_top.begin(), pass.lines_on_top.end());
+    }
+    auto write_transient = [](sg_buffer& buf, size_t& capacity, const void* data, size_t count, size_t stride, const char* label) {
+        if (count == 0) return;
+        if (count > capacity) {
+            if (buf.id != SG_INVALID_ID) sg_destroy_buffer(buf);
+            capacity = std::max<size_t>(count * 2, 1024);
+            sg_buffer_desc bd = {};
+            bd.size = capacity * stride;
+            bd.usage.immutable = false;
+            bd.usage.write_transient = true;
+            bd.label = label;
+            buf = sg_make_buffer(&bd);
+        }
+        sg_write_buffer_desc wd = {};
+        wd.src.data = {data, count * stride};
+        wd.dst.buffer = buf;
+        sg_write_buffer_transient(&wd);
+    };
+    write_transient(s.instance_buffer, s.instance_capacity, all_instances.data(), all_instances.size(),
+                    sizeof(WorldImpl::Instance), "three-instances");
+    write_transient(s.line_buffer, s.line_capacity, all_lines.data(), all_lines.size(), sizeof(WorldImpl::LineVertex), "three-lines");
+
     if (!s.no_shadow_cleared) {
         sg_pass clear = {};
         clear.action.depth.load_action = SG_LOADACTION_CLEAR;
@@ -1157,36 +1327,10 @@ void three_before_passes() {
     }
     int shadow_index = 0;
     for (PassRecord& pass : s.passes) {
-        if (pass.sun.shadows && pass.sun.intensity > 0.0f && !pass.draws.empty()) {
+        if (pass.sun.shadows && pass.sun.intensity > 0.0f && (!pass.draws.empty() || !pass.many.empty())) {
             render_shadow_map(pass, shadow_index++, frame_width(), frame_height());
         }
     }
-
-    // Every pass's lines go into one transient buffer, written once, before
-    // any pass binds it (sokol only allows transient writes before the
-    // first bind in a frame).
-    std::vector<WorldImpl::LineVertex> all;
-    for (PassRecord& pass : s.passes) {
-        pass.line_first = static_cast<int>(all.size());
-        all.insert(all.end(), pass.lines.begin(), pass.lines.end());
-        pass.on_top_first = static_cast<int>(all.size());
-        all.insert(all.end(), pass.lines_on_top.begin(), pass.lines_on_top.end());
-    }
-    if (all.empty()) return;
-    if (all.size() > s.line_capacity) {
-        if (s.line_buffer.id != SG_INVALID_ID) sg_destroy_buffer(s.line_buffer);
-        s.line_capacity = std::max<size_t>(all.size() * 2, 4096);
-        sg_buffer_desc bd = {};
-        bd.size = s.line_capacity * sizeof(WorldImpl::LineVertex);
-        bd.usage.immutable = false;
-        bd.usage.write_transient = true;
-        bd.label = "three-lines";
-        s.line_buffer = sg_make_buffer(&bd);
-    }
-    sg_write_buffer_desc wd = {};
-    wd.src.data = {all.data(), all.size() * sizeof(WorldImpl::LineVertex)};
-    wd.dst.buffer = s.line_buffer;
-    sg_write_buffer_transient(&wd);
 }
 
 void three_draw_layers() {
