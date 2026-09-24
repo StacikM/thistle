@@ -3915,6 +3915,15 @@ bool read_file_bytes(const std::string& path, std::vector<unsigned char>& out) {
 
 bool read_file_text(const std::string& path, std::string& out) { return thistle_read_text_asset(path, out); }
 
+bool load_image_rgba(const std::string& path, std::vector<unsigned char>& out, int& w, int& h) {
+    int channels = 0;
+    unsigned char* px = thistle_stbi_load(path, &w, &h, &channels, 4);
+    if (!px) return false;
+    out.assign(px, px + static_cast<size_t>(w) * h * 4);
+    stbi_image_free(px);
+    return true;
+}
+
 uint64_t frame_index() { return g_state ? g_state->frame_index : 0; }
 int frame_width() { return sapp_width(); }
 int frame_height() { return sapp_height(); }

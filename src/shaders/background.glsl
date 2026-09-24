@@ -24,19 +24,40 @@ void main() {
 
 @fs background_fs
 layout(binding=1) uniform background_fs_params {
-    vec4 top;     // sRGB
-    vec4 horizon; // sRGB
-    vec4 ground;  // sRGB
+    vec4 top;       // sRGB
+    vec4 horizon;   // sRGB
+    vec4 ground;    // sRGB
+    vec4 to_sun;    // xyz = direction toward the sun, w = draw the disc (0/1)
+    vec4 sun_color; // sRGB
+    vec4 mode;      // x = 1: sample the skybox cube map instead of the gradient
 };
+
+layout(binding=0) uniform textureCube sky_tex;
+layout(binding=0) uniform sampler sky_smp;
 
 in vec3 v_dir;
 out vec4 frag_color;
 
 void main() {
-    float y = normalize(v_dir).y;
-    vec3 c = y >= 0.0
-        ? mix(horizon.rgb, top.rgb, pow(y, 0.6))
-        : mix(horizon.rgb, ground.rgb, pow(-y, 0.4));
+    vec3 dir = normalize(v_dir);
+    vec3 c;
+    if (mode.x > 0.5) {
+        // Cube maps are defined in a left-handed space; this engine is
+        // right-handed (like glTF/Blender). Flipping z is exactly that
+        // conversion: faces come out un-mirrored with seamless edges, and
+        // the "front" face lands in front of a default camera (looking -Z).
+        c = texture(samplerCube(sky_tex, sky_smp), vec3(dir.x, dir.y, -dir.z)).rgb;
+    } else {
+        c = dir.y >= 0.0
+            ? mix(horizon.rgb, top.rgb, pow(dir.y, 0.6))
+            : mix(horizon.rgb, ground.rgb, pow(-dir.y, 0.4));
+    }
+    if (to_sun.w > 0.5) {
+        float d = dot(dir, to_sun.xyz);
+        float disc = smoothstep(0.99955, 0.99975, d);  // ~1 degree across, like the real sun
+        float glow = pow(max(d, 0.0), 350.0) * 0.45 + pow(max(d, 0.0), 12.0) * 0.12;
+        c = mix(c, vec3(1.0), disc) + sun_color.rgb * glow;
+    }
     frag_color = vec4(c, 1.0);
 }
 @end

@@ -1679,14 +1679,62 @@ struct Sun {
     float intensity = 1.0f;
 };
 
-// The background gradient. Its colors also light the scene: surfaces facing
-// up pick up `top`, facing down pick up `ground` (scaled by World::ambient),
-// so shadowed sides are tinted by the sky instead of going flat black.
+// A sky made of 6 square images, one per direction (a cube map). A handle,
+// like Model. Named the way skybox packs name their files: "front" is what a
+// default camera (looking down -Z) sees, "right" is +X. Packs that use axis
+// names map as px = right, nx = left, py = top, ny = bottom, pz = front,
+// nz = back — the usual cube-map convention; the renderer handles the
+// left-handed/right-handed difference so nothing comes out mirrored.
+struct Skybox {
+    int id = -1;
+    bool valid() const { return id >= 0; }
+};
+Skybox load_skybox(const std::string& right, const std::string& left, const std::string& top,
+                   const std::string& bottom, const std::string& front, const std::string& back);
+void unload_skybox(Skybox& skybox);
+
+// The background. Its colors also light the scene: surfaces facing up pick
+// up `top`, facing down pick up `ground` (scaled by World::ambient), so
+// shadowed sides are tinted by the sky instead of going flat black. With a
+// skybox set, the skybox is drawn instead of the gradient and its own
+// average up/down colors do the lighting.
 struct Sky {
     rgba top = rgb(0.30f, 0.52f, 0.85f);
     rgba horizon = rgb(0.72f, 0.82f, 0.92f);
     rgba ground = rgb(0.33f, 0.31f, 0.29f);
-    bool visible = true; // false: no background, whatever 2D was drawn earlier shows through
+    bool visible = true;  // false: no background, whatever 2D was drawn earlier shows through
+    bool sun_disc = true; // draw the sun (from World::sun) as a bright disc with a soft glow
+    Skybox skybox;
+};
+
+// A light bulb: shines in all directions, fading to nothing at `range`.
+struct PointLight {
+    vec3 position;
+    rgba color = white;
+    float range = 10.0f;
+    float intensity = 1.0f;
+};
+
+// A flashlight / stage light: a cone pointing along `direction`.
+struct SpotLight {
+    vec3 position;
+    vec3 direction{0.0f, -1.0f, 0.0f};
+    rgba color = white;
+    float range = 15.0f;
+    float intensity = 1.0f;
+    float angle = radians(30.0f); // half-angle of the cone
+    float softness = 0.25f;       // fraction of the cone's edge that fades out, 0 = hard edge
+};
+
+// Distance fog: things fade into `color` between `start` and `end` meters
+// from the camera. With match_sky the fog takes the sky's horizon color, so
+// distant geometry melts into the horizon instead of ending at a hard edge.
+struct Fog {
+    bool enabled = false;
+    float start = 30.0f;
+    float end = 150.0f;
+    rgba color = rgb(0.72f, 0.82f, 0.92f);
+    bool match_sky = true;
 };
 
 struct RenderStats {
@@ -1711,7 +1759,13 @@ class World {
 public:
     Sun sun;
     Sky sky;
+    Fog fog;
     float ambient = 0.55f; // how strongly the sky/ground colors light everything
+
+    // Up to 16 point/spot lights light each render(); past that, the ones
+    // nearest the camera win (off-screen ones are dropped first). Per frame,
+    // like draw() — call it every frame for every light that's on.
+    static constexpr int max_lights = 16;
 
     World();
     ~World();
@@ -1719,6 +1773,9 @@ public:
     World& operator=(World&&) noexcept;
     World(const World&) = delete;
     World& operator=(const World&) = delete;
+
+    void light(const PointLight& light);
+    void light(const SpotLight& light);
 
     void draw(Model model, const Transform& transform = {}, rgba tint = white);
     // Same, but every part of the model uses `material` instead of its own.
