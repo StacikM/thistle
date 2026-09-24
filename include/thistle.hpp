@@ -1319,6 +1319,10 @@ void set_scene(const std::string& name);
 //
 // Conventions, same as glTF and OpenGL: right-handed, +Y is up, a camera
 // with no rotation looks down -Z, angles are radians, 1 unit = 1 meter.
+namespace thistle::detail {
+struct VoxelWorldAccess; // engine-internal (src/thistle_internal.h)
+}
+
 namespace thistle::three {
 
 // --- math ----------------------------------------------------------------
@@ -1919,6 +1923,7 @@ struct ivec3 {
 };
 inline ivec3 operator+(ivec3 a, ivec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 inline ivec3 operator-(ivec3 a, ivec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+inline ivec3 operator*(ivec3 a, int s) { return {a.x * s, a.y * s, a.z * s}; }
 inline bool operator==(ivec3 a, ivec3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; }
 inline bool operator!=(ivec3 a, ivec3 b) { return !(a == b); }
 
@@ -1988,6 +1993,12 @@ public:
     Bounds bounds() const;                     // world-space box around every non-air block (slow-ish: scans)
 
     int chunk_count() const;
+    int block_count() const; // blocks that aren't air
+    // Every block that isn't air, in no particular order.
+    void each_block(const std::function<void(ivec3 block, BlockId id)>& fn) const;
+    // Takes another world's block types and atlas (replacing this one's), so
+    // ids mean the same in both: for pieces broken off it, copies, previews.
+    void copy_block_types(const VoxelWorld& from);
     // The mesh the renderer draws for one chunk (chunk coordinates, i.e.
     // block / 32), in the chunk's own block units — useful for exporting,
     // or for tests. Parts are split by material (flat vs textured, alpha).
@@ -2051,6 +2062,7 @@ public:
 
 private:
     friend class World;
+    friend struct detail::VoxelWorldAccess;
     std::unique_ptr<struct VoxelWorldImpl> impl_;
 };
 
@@ -2215,11 +2227,15 @@ enum class BodyType {
 // and is still fast. mesh() is the exact triangles, for static and
 // kinematic bodies only: a dynamic body given one uses its convex hull
 // instead. compound() glues several together, each at its own offset.
+// voxels() is a block world's solid blocks, merged into as few boxes as it
+// can — debris, a voxel vehicle, a crate built from blocks.
 struct Collider {
-    enum class Kind { Box, Sphere, Capsule, Cylinder, Convex, Mesh, Compound };
+    enum class Kind { Box, Sphere, Capsule, Cylinder, Convex, Mesh, Compound, Voxels };
     Kind kind = Kind::Box;
-    vec3 size{1.0f, 1.0f, 1.0f}; // Box: full size. Sphere: x = radius. Capsule, Cylinder: x = radius, y = full height
-    std::vector<vec3> points;    // Convex: the cloud. Mesh: 3 per triangle, counter-clockwise from outside
+    vec3 size{1.0f, 1.0f, 1.0f}; // Box: full size. Sphere: x = radius. Capsule, Cylinder: x = radius, y = full height. Voxels: x = voxel size
+    // Convex: the cloud. Mesh: 3 per triangle, counter-clockwise from
+    // outside. Voxels: each box's min and max corner.
+    std::vector<vec3> points;
     std::vector<Collider> parts; // Compound
     vec3 offset;                 // where it sits within its body (or compound)
     quat rotation;
@@ -2234,6 +2250,10 @@ struct Collider {
     static Collider mesh(const MeshData& mesh);
     static Collider mesh(Model model, vec3 scale = {1.0f, 1.0f, 1.0f});
     static Collider compound(std::vector<Collider> parts);
+    // In the grid's own space (block (0,0,0)'s corner at the body's origin),
+    // so a body at voxels.origin with voxels.rotation lines up with the
+    // drawn blocks. Non-solid blocks (water) are left out.
+    static Collider voxels(const VoxelWorld& voxels);
     // This collider moved within its body: box({1, 2, 1}).at({0, 1, 0})
     // puts a box's bottom at the body's origin.
     Collider at(vec3 offset, quat rotation = {}) const;
@@ -2314,8 +2334,14 @@ public:
     // included), as it is now. Static.
     RigidBody add_static(Model model, const Transform& transform = {});
     RigidBody add_static(const Terrain& terrain);
+    // A block world, one static body per chunk, kept up to date: chunks that
+    // changed are rebuilt at the start of the next step(), and bodies resting
+    // there are woken (so a crate on a block you break falls). The world
+    // must outlive this, or be removed first.
+    void add_static(const VoxelWorld& voxels);
+    void remove_static(const VoxelWorld& voxels);
     void remove(RigidBody body);
-    void clear();
+    void clear(); // every body, including block worlds added with add_static()
     bool contains(RigidBody body) const;
     int body_count() const;
 
@@ -2355,6 +2381,9 @@ public:
     void wake(RigidBody body);
     Bounds bounds(RigidBody body) const;
     uint64_t user(RigidBody body) const;
+    // A new shape for an existing body (a piece of debris that got carved).
+    // Mass follows the new volume at the body's current density.
+    void set_collider(RigidBody body, const Collider& collider);
 
     // --- queries ---
     // Nearest body along the ray. Triggers are ignored, and so is `ignore`
@@ -2392,6 +2421,64 @@ public:
 
 private:
     std::unique_ptr<struct Physics3DImpl> impl_;
+};
+
+// --- destruction (Teardown-style) ---------------------------------------------------------
+// Blow holes in a block world, and whatever that leaves hanging breaks off
+// and falls as debris made of the same blocks, which can itself be blown
+// apart again. Needs Physics3D for anything to fall: built without it,
+// carving still works and loose parts just stay where they are.
+//
+//   VoxelDestruction boom(level, physics);
+//   // every frame:
+//   if (f.mouse_pressed(Mouse::Left)) boom.explode(hit.point, 1.5f);
+//   physics.step(f.dt);
+//   boom.update(f.dt);
+//   boom.draw(world); // the level, the debris, and the flying chips
+class VoxelDestruction {
+public:
+    // What holds things up: blocks at or below ground_y (block
+    // coordinates), and blocks of any type listed in `anchors` (bedrock, a
+    // hook in the ceiling). A group of blocks not connected face to face,
+    // through solid blocks, to either of those falls.
+    int ground_y = 0;
+    std::vector<BlockId> anchors;
+    // A loose group bigger than this counts as held up anyway. It keeps the
+    // search cheap in a big world, and a whole hillside sliding off is
+    // rarely what a level wants.
+    int max_piece = 20000;
+    int min_piece = 4;      // smaller loose groups crumble into chips instead of becoming debris
+    int max_debris = 300;   // past this many pieces, the oldest crumble away
+    float density = 800.0f; // kg per m^3 of debris
+    ParticleSystem chips;   // block-colored bits that fly off; set chips.max_particles = 0 for none
+
+    // Also makes `voxels` solid to `physics` (Physics3D::add_static), so
+    // debris lands on it. Both must outlive this.
+    VoxelDestruction(VoxelWorld& voxels, Physics3D& physics);
+    ~VoxelDestruction();
+    VoxelDestruction(const VoxelDestruction&) = delete;
+    VoxelDestruction& operator=(const VoxelDestruction&) = delete;
+
+    // Removes every block within `radius` of `center` (world units), from
+    // the world and from debris, then lets go of whatever that left
+    // unsupported. Returns how many blocks were removed.
+    int carve(vec3 center, float radius);
+    // carve(), plus bodies within twice the radius (debris included) flying
+    // outward at up to `speed` m/s, and more chips.
+    int explode(vec3 center, float radius, float speed = 12.0f);
+
+    // Once per frame, after physics.step(): moves the chips, and removes
+    // debris that fell out of the world.
+    void update(float dt);
+    void draw(World& world); // the world, every piece of debris, and the chips
+
+    int debris_count() const;
+    RigidBody debris_body(int index) const; // e.g. to check what just hit the player
+    const VoxelWorld& debris_blocks(int index) const;
+    bool is_debris(RigidBody body) const;
+
+private:
+    std::unique_ptr<struct VoxelDestructionImpl> impl_;
 };
 
 } // namespace thistle::three

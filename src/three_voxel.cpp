@@ -36,6 +36,7 @@ struct Chunk {
     int non_air = 0;
     bool dirty = true;
     bool modified = false; // changed after generation: streaming must not drop it
+    uint64_t revision = 0; // VoxelWorldImpl::revision at its last change (physics colliders follow it)
     Model model;
 };
 
@@ -65,6 +66,7 @@ struct VoxelWorldImpl {
     bool generating = false;
     ivec3 focus{0, 0, 0}; // block the last stream_around() centered on; re-meshing goes nearest-first
     bool has_focus = false;
+    uint64_t revision = 0; // bumped by every change to any chunk
 
     // Consecutive set()/get() calls almost always hit the same chunk (a
     // generator filling one, a fill() box), so remember the last one.
@@ -107,7 +109,9 @@ VoxelWorld& VoxelWorld::operator=(VoxelWorld&& other) noexcept {
         impl_ = std::move(other.impl_);
         voxel_size = other.voxel_size;
         origin = other.origin;
+        rotation = other.rotation;
         ambient_occlusion = other.ambient_occlusion;
+        max_remesh_per_frame = other.max_remesh_per_frame;
     }
     return *this;
 }
@@ -157,6 +161,7 @@ void VoxelWorld::set(int x, int y, int z, BlockId id) {
     c->non_air += (id != 0) - (slot != 0);
     slot = id;
     c->dirty = true;
+    c->revision = ++impl_->revision;
     if (!impl_->generating) c->modified = true;
     // Faces and corner shading of blocks in neighboring chunks depend on
     // this block too (up to all 26 neighbors, for a corner block).
@@ -200,6 +205,7 @@ void VoxelWorld::fill_sphere(vec3 center, float radius, BlockId id) {
 void VoxelWorld::clear() {
     for (auto& [key, chunk] : impl_->chunks) unload_model(chunk.model);
     impl_->chunks.clear();
+    ++impl_->revision;
     impl_->last = nullptr;
     impl_->generated.clear();
 }
@@ -235,6 +241,31 @@ Bounds VoxelWorld::bounds() const {
 }
 
 int VoxelWorld::chunk_count() const { return static_cast<int>(impl_->chunks.size()); }
+
+int VoxelWorld::block_count() const {
+    int n = 0;
+    for (const auto& [key, chunk] : impl_->chunks) n += chunk.non_air;
+    return n;
+}
+
+void VoxelWorld::each_block(const std::function<void(ivec3, BlockId)>& fn) const {
+    for (const auto& [key, chunk] : impl_->chunks) {
+        if (chunk.non_air == 0) continue;
+        const ivec3 base = key_chunk(key) * CS;
+        for (int i = 0; i < CS3; ++i) {
+            if (chunk.blocks[i] != 0) fn(base + ivec3{i % CS, (i / CS) % CS, i / (CS * CS)}, chunk.blocks[i]);
+        }
+    }
+}
+
+void VoxelWorld::copy_block_types(const VoxelWorld& from) {
+    if (&from == this) return;
+    impl_->types = from.impl_->types;
+    impl_->atlas = from.impl_->atlas;
+    impl_->tile_size = from.impl_->tile_size;
+    impl_->atlas_filter = from.impl_->atlas_filter;
+    for (auto& [key, chunk] : impl_->chunks) chunk.dirty = true;
+}
 
 namespace {
 
@@ -524,6 +555,7 @@ void VoxelWorld::stream_around(vec3 world_position, float radius, int budget) {
         if (it == w.chunks.end()) continue;
         unload_model(it->second.model);
         w.erase(key);
+        ++w.revision;
         const ivec3 c = key_chunk(key);
         for (const ivec3 n : {ivec3{1, 0, 0}, ivec3{-1, 0, 0}, ivec3{0, 1, 0}, ivec3{0, -1, 0}, ivec3{0, 0, 1}, ivec3{0, 0, -1}}) {
             if (Chunk* nc = w.find(c.x + n.x, c.y + n.y, c.z + n.z)) nc->dirty = true;
@@ -647,6 +679,7 @@ bool VoxelWorld::deserialize(const uint8_t* data, size_t size) {
         const uint32_t runs = r.u32();
         if (!r.ok || runs > static_cast<uint32_t>(CS3)) { r.ok = false; break; }
         Chunk& chunk = impl_->chunks[chunk_key(cx, cy, cz)];
+        chunk.revision = ++impl_->revision;
         // Loaded chunks count as generated *and* player-made: a generator
         // must never overwrite them, and streaming must never drop them.
         chunk.modified = true;
@@ -928,3 +961,16 @@ bool VoxelWorld::load_vox(const std::string& path, ivec3 at) {
 }
 
 } // namespace thistle::three
+
+namespace thistle::detail {
+
+uint64_t VoxelWorldAccess::revision(const three::VoxelWorld& world) { return world.impl_->revision; }
+
+void VoxelWorldAccess::chunks(const three::VoxelWorld& world, std::vector<std::pair<three::ivec3, uint64_t>>& out) {
+    out.clear();
+    for (const auto& [key, chunk] : world.impl_->chunks) {
+        if (chunk.non_air > 0) out.push_back({three::key_chunk(key), chunk.revision});
+    }
+}
+
+} // namespace thistle::detail

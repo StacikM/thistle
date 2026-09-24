@@ -169,6 +169,7 @@ add_library(thistle STATIC
     src/three_noise.cpp
     src/three_terrain.cpp
     src/three_collider.cpp
+    src/three_destruction.cpp
     src/cgltf_impl.c
     src/sokol_impl.c
     src/stb_impl.c
@@ -355,6 +356,18 @@ if(THISTLE_BUILD_SMOKETEST)
         endif()
     endif()
 
+    # VoxelDestruction: a voxel town to blow apart (Jolt builds only).
+    if(THISTLE_PHYSICS3D)
+        add_executable(thistle_destruction_demo examples/destruction_demo.cpp)
+        target_link_libraries(thistle_destruction_demo PRIVATE thistle)
+        if(WIN32)
+            set_target_properties(thistle_destruction_demo PROPERTIES WIN32_EXECUTABLE ON)
+            if(MSVC)
+                target_link_options(thistle_destruction_demo PRIVATE "/ENTRY:mainCRTStartup")
+            endif()
+        endif()
+    endif()
+
     # VoxelWorld streaming: an endless generated block world.
     add_executable(thistle_endless_demo examples/endless_demo.cpp)
     target_link_libraries(thistle_endless_demo PRIVATE thistle)
@@ -426,6 +439,11 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_physics3d_smoketest examples/physics3d_smoketest.cpp)
     target_link_libraries(thistle_physics3d_smoketest PRIVATE thistle)
 
+    # VoxelDestruction + voxel colliders; like physics3d_smoketest, built
+    # either way (without Jolt it checks that carving works and nothing falls).
+    add_executable(thistle_destruction_smoketest examples/destruction_smoketest.cpp)
+    target_link_libraries(thistle_destruction_smoketest PRIVATE thistle)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -464,4 +482,6 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(terrain_smoketest PROPERTIES TIMEOUT 60)
     add_test(NAME physics3d_smoketest COMMAND thistle_physics3d_smoketest)
     set_tests_properties(physics3d_smoketest PROPERTIES TIMEOUT 60)
+    add_test(NAME destruction_smoketest COMMAND thistle_destruction_smoketest)
+    set_tests_properties(destruction_smoketest PROPERTIES TIMEOUT 60)
 endif()

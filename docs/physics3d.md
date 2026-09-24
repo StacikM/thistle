@@ -1,4 +1,4 @@
-# 3D physics — `three::Physics3D` (Jolt)
+# 3D physics — `three::Physics3D` (Jolt) and Teardown-style destruction
 
 Rigid bodies that fall, stack, tumble, bounce and get knocked over, on [Jolt Physics](https://github.com/jrouwe/JoltPhysics) `v5.6.0`. Meters, kilograms, seconds, +Y up, the same as the rest of `thistle::three`.
 
@@ -127,6 +127,39 @@ physics.set_layers_collide(PLAYER_SHOTS, PLAYER_SHOTS, false);
 
 Triggers go by layers too: a trigger only notices bodies on layers it collides with.
 
+## Block worlds
+
+`physics.add_static(voxels)` makes a `VoxelWorld` solid: one static body per chunk, its solid blocks merged into boxes (a flat 32×32 floor is one box, not a thousand). It **stays in sync**. Chunks you edit are rebuilt at the start of the next `step()`, before anything simulates against stale blocks. Bodies resting on a changed chunk get woken, so a crate on a block you break falls instead of hovering asleep. Moving the world (`origin`, `rotation`) moves its colliders. The world must outlive the `Physics3D`, or be taken out with `remove_static()`.
+
+For moving things made of blocks (a voxel crate, a cart, debris), `Collider::voxels(world)` builds the same merged boxes in the grid's own space. Put the body at `world.origin` with `world.rotation`, then copy the body's transform back into those two fields every frame, and the blocks are drawn where the body is. `set_collider()` swaps a body's shape (after carving a piece, say) and keeps its density.
+
+## Destruction (Teardown-style)
+
+`VoxelDestruction` puts the two together. Blow holes in a block world, and whatever that leaves hanging breaks off and falls as debris made of the same blocks. Debris can be blown apart again.
+
+```cpp
+VoxelDestruction boom(town, physics);   // also does physics.add_static(town)
+
+// every frame:
+if (clicked) {
+    if (PhysicsHit hit = physics.raycast(aim)) boom.explode(hit.point, 1.2f);
+}
+physics.step(f.dt);
+boom.update(f.dt);
+boom.draw(world);   // the town, the debris, and the flying chips
+```
+
+- `carve(center, radius)` removes blocks (world units) from the level *and* from any debris in reach. `explode()` is carve plus a kick: everything within twice the radius flies outward.
+- **What falls is decided by connectivity, not stress.** After a carve, every block next to the hole starts a search through solid neighbors. Reaching the ground (`ground_y`, in block coordinates) or a block type in `anchors` means held up; not reaching either means loose. A tower with one wall blown out still stands, the same as in Teardown. Cut through the whole base and it comes down. The search tries downward first, so "this wall still stands on the floor" is found in a few dozen steps, not by walking the whole building.
+- Loose groups bigger than `max_piece` (20,000 blocks) count as held up. That caps the search in a huge world, and a whole hillside sliding away is rarely what a level wants. Groups smaller than `min_piece` (4) crumble into chips instead of becoming bodies.
+- Debris: `density` (800 kg/m³) sets its mass, one piece is one body, and pieces carved again split into several. Past `max_debris` (300) the oldest crumble away. Pieces that fall 100 m below the ground level are removed.
+- `chips` is an ordinary `ParticleSystem` of block-colored squares; set `chips.max_particles = 0` for none.
+- Without Physics3D in the build, carving still works and loose parts stay where they are.
+
+What it doesn't do (yet): **debris doesn't block a `CharacterController`**. The character walks through fallen pieces, though it does fall into holes in the level itself, since `CollisionWorld` reads the level live. A cheap way to get pushed-around debris is a kinematic capsule body that follows the player with `move_kinematic()`. There's also no structural stress (overhangs never sag or snap on their own), and debris never merges back into the level.
+
+`examples/destruction_demo.cpp`: a small town at 25 cm per block (a brick house, a stone tower, a bridge, a tree) to take apart.
+
 ## Debug view
 
 `physics.draw_debug(world)` draws every collider as wireframe: **green** awake, **gray** asleep, **blue** static, **yellow** triggers. Boxes, spheres, capsules, cylinders and hulls are drawn as their real shape; triangle meshes just as their bounds (all of a level's triangles would bury everything). `F` in the demo.
@@ -164,8 +197,16 @@ Joints and constraints (hinges, ropes, ragdolls), vehicles, soft bodies, and sav
   - stale and made-up handles, `clear()`, and a second `Physics3D` alongside the first
 
   Without Jolt, the same test checks the stand-in does nothing, safely. It passed repeatedly (Jolt is multithreaded, so flakiness was the worry) on Linux, GCC, Release.
+- **`destruction_smoketest`** (a ctest, also built both ways) covers:
+  - `Collider::voxels` merging (a cube is 1 box; chunk borders split boxes; water left out)
+  - a static block world colliding, its colliders following edits and moves, and a sleeping box dropping when the blocks under it are dug out
+  - what falls: a cut pillar drops its roof as one 28-block piece, a hole through a wall doesn't, `max_piece`, `min_piece`, anchors on and off
+  - debris mass, a flying beam carved in two (8 + 5 blocks, each with the right mass), `max_debris`, and debris falling off the world being removed
+
+  It passed 8 runs out of 8. Without Jolt it checks that carving works and nothing falls.
+- **`destruction_demo`** was played under Xvfb + llvmpipe. Blasting a tree's trunk dropped the canopy as one piece. Blasting the fallen canopy split it and threw chips. A tower with one side blown out stayed up. Cutting one bridge pier left its top hanging from the deck; cutting the other dropped the whole deck. About 30 fps with 32,000 blocks on a software renderer.
 - **`physics_demo`** was run and played on Linux under Xvfb with Mesa's llvmpipe software renderer, driven by xdotool and screenshotted. Throwing balls, the domino chain, the goal counting 5 balls in, a blast collapsing the pyramid, and the debug colors all behaved. That's a software GL driver, not a real GPU: it proves the simulation and drawing, not driver compatibility.
 - **The CLI flow** was run end to end in a fresh `thistle new` project: enable → build → `THISTLE_PHYSICS3D` set and a box landing at 0.495. Disable → the next build reconfigures by itself → the stand-in and its log line. And the warning for an old project's `CMakeLists.txt`.
-- **Windows**: cross-compiled and linked with MinGW-w64 (GCC) with physics on. **Not run**: there was no Windows machine or Wine here. MSVC, macOS (Clang, Apple Silicon) and the stand-in build are covered by CI's `physics3d: [OFF, ON]` matrix, which builds everything and runs the ctests there. That proves compiling and headless simulation, not the demo on screen.
+- **Windows**: cross-compiled and linked with MinGW-w64 (GCC) with physics on. **Not run**: there was no Windows machine or Wine here. MSVC, macOS (Clang, Apple Silicon) and the stand-in build are covered by CI's `physics3d: [OFF, ON]` matrix, which builds everything and runs the ctests there; it went green on all six for the physics commit. That proves compiling and headless simulation, not the demos on screen.
 - **iOS: not built yet** with physics on. Jolt supports it (ARM64, NEON), but nobody has tried it here, and it's listed as a gap until someone does.
 - **Web: not supported.** Jolt's thread pool needs pthreads under Emscripten, and nobody has tried it.
