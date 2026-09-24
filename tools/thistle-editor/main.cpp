@@ -168,17 +168,6 @@ bool is_ancestor_of(Node* ancestor, Node* node) {
     return false;
 }
 
-// --- small vec3 math, local to this file: dot/cross/normalize aren't part
-// of the engine's public vec3 (see include/thistle.hpp), and a general
-// linear-algebra library isn't worth adding for what's ultimately one
-// camera's worth of ray-casting. ---
-float dot(vec3 a, vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-vec3 cross(vec3 a, vec3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
-vec3 normalize(vec3 v) {
-    const float len = std::sqrt(dot(v, v));
-    return len > 1e-8f ? vec3{v.x / len, v.y / len, v.z / len} : vec3{0, 0, 0};
-}
-
 // Node::draw_meshes() composes a child's mesh_pos/rotation/scale onto its
 // parent's (see its doc comment in thistle.hpp) — this mirrors that exact
 // math to find a node's actual WORLD transform, purely for editor-side needs

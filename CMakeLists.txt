@@ -52,11 +52,16 @@ endfunction()
 
 include(FetchContent)
 
-# sokol — windowing + graphics (header-only).
+# sokol — windowing + graphics (header-only). Pinned, unlike the other
+# header-only deps: the 3D renderer's shaders are pre-compiled by sokol-shdc
+# into src/shaders/*.glsl.h, and that generated code has to match the
+# sg_shader_desc layout of the exact sokol_gfx.h it's built against. Bump
+# this together with SOKOL_TOOLS_COMMIT in tools/shaders/build_shaders.py,
+# then rerun that script.
 FetchContent_Declare(
     sokol
     GIT_REPOSITORY https://github.com/floooh/sokol.git
-    GIT_TAG        master
+    GIT_TAG        2e75443dbd4940b5aa8d76a8e479f8e4b270b9a3
 )
 # stb — image loading (header-only).
 FetchContent_Declare(
@@ -94,6 +99,7 @@ FetchContent_MakeAvailable(sokol stb fontstash box2d miniaudio)
 
 add_library(thistle STATIC
     src/thistle.cpp
+    src/three_math.cpp
     src/sokol_impl.c
     src/stb_impl.c
     src/audio_impl.c
@@ -222,6 +228,10 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_collision_smoketest examples/collision_smoketest.cpp)
     target_link_libraries(thistle_collision_smoketest PRIVATE thistle)
 
+    # thistle::three's quat/mat4/Transform against hand-computed results.
+    add_executable(thistle_math3d_smoketest examples/math3d_smoketest.cpp)
+    target_link_libraries(thistle_math3d_smoketest PRIVATE thistle)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -244,4 +254,6 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(scene_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME collision_smoketest COMMAND thistle_collision_smoketest)
     set_tests_properties(collision_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME math3d_smoketest COMMAND thistle_math3d_smoketest)
+    set_tests_properties(math3d_smoketest PROPERTIES TIMEOUT 30)
 endif()

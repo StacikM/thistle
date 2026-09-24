@@ -49,6 +49,19 @@ inline vec3 operator+(vec3 a, vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}
 inline vec3 operator-(vec3 a, vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 inline vec3 operator*(vec3 v, float s) { return {v.x * s, v.y * s, v.z * s}; }
 inline vec3 operator*(float s, vec3 v) { return {v.x * s, v.y * s, v.z * s}; }
+inline vec3 operator/(vec3 v, float s) { return {v.x / s, v.y / s, v.z / s}; }
+inline vec3 operator-(vec3 v) { return {-v.x, -v.y, -v.z}; }
+// Component-wise, like GLSL's vec3 * vec3 — handy for scaling by a vec3.
+inline vec3 operator*(vec3 a, vec3 b) { return {a.x * b.x, a.y * b.y, a.z * b.z}; }
+inline bool operator==(vec3 a, vec3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; }
+inline bool operator!=(vec3 a, vec3 b) { return !(a == b); }
+
+float dot(vec3 a, vec3 b);
+vec3  cross(vec3 a, vec3 b);
+float length(vec3 v);
+float distance(vec3 a, vec3 b);
+vec3  normalize(vec3 v); // a zero vector stays zero instead of becoming NaN
+inline vec3 lerp(vec3 a, vec3 b, float t) { return a + (b - a) * t; }
 
 inline void to_json(nlohmann::json& j, const vec3& v) { j = {v.x, v.y, v.z}; }
 inline void from_json(const nlohmann::json& j, vec3& v) { v.x = j.at(0).get<float>(); v.y = j.at(1).get<float>(); v.z = j.at(2).get<float>(); }
@@ -1261,6 +1274,126 @@ public:
 void set_scene(const std::string& name);
 
 } // namespace thistle
+
+// =========================================================================
+//  THISTLE 3D  —  namespace thistle::three
+// =========================================================================
+// The real 3D engine: GPU-resident meshes, lit shaders, models, shadows,
+// and the rest. Everything 3D lives in `thistle::three` so it never tangles
+// with the 2D API above — `using namespace thistle::three;` next to
+// `using namespace thistle;` is safe, because nothing in here reuses a name
+// from up there (the old sokol_gl "minor 3D" calls — Frame::cube(),
+// load_mesh(), Camera3D — are a separate, older thing and keep working).
+//
+// Conventions, same as glTF and OpenGL: right-handed, +Y is up, a camera
+// with no rotation looks down -Z, angles are radians, 1 unit = 1 meter.
+namespace thistle::three {
+
+// --- math ----------------------------------------------------------------
+
+inline constexpr float pi = 3.14159265358979323846f;
+inline constexpr float radians(float degrees) { return degrees * (pi / 180.0f); }
+inline constexpr float degrees(float radians) { return radians * (180.0f / pi); }
+
+struct vec4 {
+    float x = 0.0f, y = 0.0f, z = 0.0f, w = 0.0f;
+};
+
+// A rotation. Build one with the static helpers, never by filling x/y/z/w
+// by hand; the default is "no rotation".
+struct quat {
+    float x = 0.0f, y = 0.0f, z = 0.0f, w = 1.0f;
+
+    // Not an aggregate on purpose: with both `using namespace` lines in
+    // effect, dot({1, 2, 3}, {4, 5, 6}) would otherwise be ambiguous between
+    // the vec3 and quat overloads, since {1, 2, 3} could also build a quat.
+    constexpr quat() = default;
+    constexpr quat(float x_, float y_, float z_, float w_) : x(x_), y(y_), z(z_), w(w_) {}
+
+    static quat axis_angle(vec3 axis, float radians);
+    // Yaw around world +Y, then pitch around the (yawed) +X, then roll around
+    // the resulting +Z: exactly an FPS camera's mouse-look. Positive pitch
+    // looks up, positive yaw turns left. euler(0, 0, 0) is no rotation.
+    static quat euler(float pitch, float yaw, float roll = 0.0f);
+    // Rotation that points -Z (the "forward" axis) along `forward`.
+    static quat look_rotation(vec3 forward, vec3 up = {0.0f, 1.0f, 0.0f});
+    // Shortest rotation taking direction `from` onto direction `to`.
+    static quat from_to(vec3 from, vec3 to);
+
+    vec3 forward() const; // -Z rotated
+    vec3 right() const;   // +X rotated
+    vec3 up() const;      // +Y rotated
+    quat inverse() const { return {-x, -y, -z, w}; } // valid for unit quats, which is all this API makes
+};
+
+quat operator*(quat a, quat b); // a * b applies b first, then a
+vec3 operator*(quat q, vec3 v); // rotate v
+float dot(quat a, quat b);
+quat normalize(quat q);
+quat slerp(quat a, quat b, float t); // takes the short way around
+
+// 4x4 matrix, column-major (m[column * 4 + row]) — the same memory layout
+// the GPU shaders expect, so it goes straight into a uniform.
+struct mat4 {
+    float m[16] = {1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1};
+
+    static mat4 identity() { return {}; }
+    static mat4 translate(vec3 t);
+    static mat4 scale(vec3 s);
+    static mat4 rotate(quat q);
+    static mat4 trs(vec3 translation, quat rotation, vec3 scale);
+    // OpenGL-style clip space (z in -1..1). The renderer converts for
+    // Metal/D3D11 itself, so you never pick a convention per platform.
+    static mat4 perspective(float fovy_radians, float aspect, float near_z, float far_z);
+    static mat4 ortho(float left, float right, float bottom, float top, float near_z, float far_z);
+    static mat4 look_at(vec3 eye, vec3 target, vec3 up = {0.0f, 1.0f, 0.0f});
+
+    float& operator()(int row, int col) { return m[col * 4 + row]; }
+    float operator()(int row, int col) const { return m[col * 4 + row]; }
+
+    vec3 transform_point(vec3 p) const;     // includes the perspective divide
+    vec3 transform_direction(vec3 d) const; // ignores translation
+};
+
+mat4 operator*(const mat4& a, const mat4& b); // a * b applies b first, then a
+vec4 operator*(const mat4& a, vec4 v);
+mat4 transpose(const mat4& a);
+mat4 inverse(const mat4& a); // returns identity for a singular matrix
+
+// Position + rotation + scale — what every object in a 3D scene has.
+struct Transform {
+    vec3 position{0.0f, 0.0f, 0.0f};
+    quat rotation{};
+    vec3 scale{1.0f, 1.0f, 1.0f};
+
+    mat4 matrix() const { return mat4::trs(position, rotation, scale); }
+    vec3 forward() const { return rotation.forward(); }
+    vec3 right() const { return rotation.right(); }
+    vec3 up() const { return rotation.up(); }
+    // Converts a point/direction from this object's local space to the world.
+    vec3 apply(vec3 local_point) const { return position + rotation * (scale * local_point); }
+    void look_at(vec3 target, vec3 up_dir = {0.0f, 1.0f, 0.0f}) {
+        rotation = quat::look_rotation(target - position, up_dir);
+    }
+};
+
+// parent * child = the child's transform in the parent's space, flattened.
+// Exact for uniform scale; with non-uniform parent scale plus a rotated
+// child it's the usual TRS approximation (no shear), same as most engines.
+Transform operator*(const Transform& parent, const Transform& child);
+
+inline void to_json(nlohmann::json& j, const quat& q) { j = {q.x, q.y, q.z, q.w}; }
+inline void from_json(const nlohmann::json& j, quat& q) {
+    q.x = j.at(0).get<float>(); q.y = j.at(1).get<float>(); q.z = j.at(2).get<float>(); q.w = j.at(3).get<float>();
+}
+inline void to_json(nlohmann::json& j, const Transform& t) {
+    j = {{"position", t.position}, {"rotation", t.rotation}, {"scale", t.scale}};
+}
+inline void from_json(const nlohmann::json& j, Transform& t) {
+    j.at("position").get_to(t.position); j.at("rotation").get_to(t.rotation); j.at("scale").get_to(t.scale);
+}
+
+} // namespace thistle::three
 
 // --- entry point ---------------------------------------------------------
 // Everywhere except Android, a Thistle game is a plain `int main()` that ends
