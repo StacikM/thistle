@@ -1,5 +1,6 @@
-// The main 3D surface shader: hemisphere ambient (sky above, ground below)
-// plus one directional sun with a Blinn-Phong highlight. All lighting math
+// The main 3D surface shader: hemisphere ambient (sky above, ground below),
+// one directional sun and up to 16 point/spot lights, each with a
+// Blinn-Phong highlight, then distance fog. All lighting math
 // happens in linear space; colors come in as sRGB (what you'd pick in a
 // color picker, same as the 2D API) and go back out as sRGB.
 @ctype mat4 thistle::three::mat4
@@ -40,6 +41,12 @@ layout(binding=1) uniform lit_scene_params {
     vec4 sun_color;      // rgb = linear color * intensity
     vec4 sky_ambient;    // rgb = linear, already scaled by the ambient amount
     vec4 ground_ambient; // rgb = linear, already scaled by the ambient amount
+    vec4 fog_color;      // rgb = linear
+    vec4 fog_params;     // x = start, y = 1 / (end - start), z = enabled (0/1)
+    vec4 light_count;    // x = number of lights in use
+    vec4 light_pos[16];  // xyz = position, w = range
+    vec4 light_color[16];// rgb = linear color * intensity, w = cos(outer cone angle), or -2 for a point light
+    vec4 light_dir[16];  // xyz = spot direction, w = cos(inner cone angle)
 };
 
 layout(binding=2) uniform lit_material_params {
@@ -83,9 +90,33 @@ void main() {
         vec3 v = normalize(camera_pos.xyz - v_world_pos);
         vec3 h = normalize(l + v);
         float spec = ndotl > 0.0 ? pow(max(dot(n, h), 0.0), surface.y) * surface.x : 0.0;
-        color = albedo * (ambient + sun_color.rgb * ndotl) + sun_color.rgb * spec;
+        vec3 diffuse = ambient + sun_color.rgb * ndotl;
+        vec3 highlight = sun_color.rgb * spec;
+        int count = int(light_count.x);
+        for (int i = 0; i < count; i++) {
+            vec3 to_light = light_pos[i].xyz - v_world_pos;
+            float dist = length(to_light);
+            vec3 ll = to_light / max(dist, 1e-4);
+            // Reaches exactly zero at the range, so a light's influence ends
+            // where the game says it does instead of trailing off forever.
+            float fade = clamp(1.0 - dist / light_pos[i].w, 0.0, 1.0);
+            float atten = fade * fade;
+            if (light_color[i].w > -1.5) {
+                float cos_angle = dot(-ll, light_dir[i].xyz);
+                atten *= smoothstep(light_color[i].w, light_dir[i].w, cos_angle);
+            }
+            float nl = max(dot(n, ll), 0.0);
+            diffuse += light_color[i].rgb * (nl * atten);
+            vec3 hl = normalize(ll + v);
+            highlight += nl > 0.0 ? light_color[i].rgb * (pow(max(dot(n, hl), 0.0), surface.y) * surface.x * atten) : vec3(0.0);
+        }
+        color = albedo * diffuse + highlight;
     }
     color += to_linear(emissive.rgb * texture(sampler2D(emissive_tex, base_smp), v_uv).rgb);
+    if (fog_params.z > 0.5) {
+        float d = length(camera_pos.xyz - v_world_pos);
+        color = mix(color, fog_color.rgb, clamp((d - fog_params.x) * fog_params.y, 0.0, 1.0));
+    }
     frag_color = vec4(to_srgb(color), srgb.a);
 }
 @end

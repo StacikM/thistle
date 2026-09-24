@@ -25,7 +25,18 @@ struct WorldImpl {
         float x, y, z;
         uint32_t color;
     };
+    struct Light {
+        vec3 position;
+        float range = 10.0f;
+        rgba color = white;
+        float intensity = 1.0f;
+        bool spot = false;
+        vec3 direction{0.0f, -1.0f, 0.0f};
+        float cos_outer = -1.0f;
+        float cos_inner = -1.0f;
+    };
     std::vector<DrawCmd> draws;
+    std::vector<Light> lights;
     std::vector<LineVertex> lines;
     std::vector<LineVertex> lines_on_top;
     uint64_t frame = ~0ull;
@@ -71,12 +82,24 @@ struct ModelRecord {
     bool alive = true;
 };
 
+struct SkyboxRecord {
+    std::vector<unsigned char> faces; // 6 tightly packed RGBA faces, dropped after upload
+    int size = 0;
+    sg_image image = {};
+    sg_view view = {};
+    bool uploaded = false;
+    bool alive = true;
+    rgba average_up, average_down, average_side;
+};
+
 struct PassRecord {
     Camera camera;
     Rect viewport;
     Sun sun;
     Sky sky;
+    Fog fog;
     float ambient = 0.0f;
+    std::vector<WorldImpl::Light> lights;
     std::vector<WorldImpl::DrawCmd> draws;
     std::vector<WorldImpl::LineVertex> lines;
     std::vector<WorldImpl::LineVertex> lines_on_top;
@@ -97,6 +120,10 @@ struct RenderState {
     sg_sampler sampler_nearest = {};
     sg_image white_image = {};
     sg_view white_view = {};
+    sg_image black_cube = {};
+    sg_view black_cube_view = {};
+    sg_sampler sky_sampler = {};
+    std::vector<SkyboxRecord> skyboxes;
     sg_shader lines_shader = {};
     sg_pipeline line_pipeline = {};
     sg_pipeline line_on_top_pipeline = {};
@@ -248,6 +275,48 @@ vec4 to_linear4(rgba c, float scale) {
     return {lin(c.r) * scale, lin(c.g) * scale, lin(c.b) * scale, 1.0f};
 }
 
+SkyboxRecord* skybox_record(Skybox s) {
+    if (s.id < 0 || s.id >= static_cast<int>(g_three.skyboxes.size())) return nullptr;
+    SkyboxRecord& rec = g_three.skyboxes[s.id];
+    return rec.alive ? &rec : nullptr;
+}
+
+void upload_skybox(SkyboxRecord& rec) {
+    if (rec.uploaded || !g_three.ready) return;
+    rec.uploaded = true;
+    sg_image_desc d = {};
+    d.type = SG_IMAGETYPE_CUBE;
+    d.width = rec.size;
+    d.height = rec.size;
+    d.num_slices = 6;
+    d.pixel_format = SG_PIXELFORMAT_RGBA8;
+    d.data.mip_levels[0] = {rec.faces.data(), rec.faces.size()};
+    d.label = "three-skybox";
+    rec.image = sg_make_image(&d);
+    sg_view_desc v = {};
+    v.texture.image = rec.image;
+    rec.view = sg_make_view(&v);
+    rec.faces.clear();
+    rec.faces.shrink_to_fit();
+}
+
+// The lights that fit in the shader's 16 slots: off-screen ones first go,
+// then the ones whose reach starts furthest from the camera.
+std::vector<WorldImpl::Light> pick_lights(const std::vector<WorldImpl::Light>& all, const Frustum& frustum, vec3 eye) {
+    std::vector<WorldImpl::Light> visible;
+    for (const WorldImpl::Light& l : all) {
+        if (l.range > 0.0f && l.intensity > 0.0f && frustum.intersects_sphere(l.position, l.range)) visible.push_back(l);
+    }
+    if (static_cast<int>(visible.size()) > World::max_lights) {
+        std::partial_sort(visible.begin(), visible.begin() + World::max_lights, visible.end(),
+                          [&](const WorldImpl::Light& a, const WorldImpl::Light& b) {
+                              return distance(a.position, eye) - a.range < distance(b.position, eye) - b.range;
+                          });
+        visible.resize(World::max_lights);
+    }
+    return visible;
+}
+
 struct DrawItem {
     const MeshRecord* mesh;
     const Material* material;
@@ -273,8 +342,22 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
     const mat4 view_proj = clip_fix(proj_gl) * view;
     RenderStats& stats = g_three.stats_this_frame;
 
+    SkyboxRecord* skybox = skybox_record(pass.sky.skybox);
+    if (skybox) upload_skybox(*skybox);
+    const bool use_skybox = skybox && skybox->image.id != SG_INVALID_ID;
+    // With a skybox, its own average colors drive ambient and fog, so a
+    // sunset skybox actually tints the scene like a sunset.
+    const rgba amb_top = use_skybox ? skybox->average_up : pass.sky.top;
+    const rgba amb_ground = use_skybox ? skybox->average_down : pass.sky.ground;
+    const rgba horizon = use_skybox ? skybox->average_side : pass.sky.horizon;
+    const vec3 sun_dir = normalize(pass.sun.direction);
+
     // Background: sky (or nothing) plus a depth reset for this pass.
     sg_apply_pipeline(pass.sky.visible ? g_three.sky_pipeline : g_three.depth_reset_pipeline);
+    sg_bindings bg_bind = {};
+    bg_bind.views[VIEW_sky_tex] = use_skybox ? skybox->view : g_three.black_cube_view;
+    bg_bind.samplers[SMP_sky_smp] = g_three.sky_sampler;
+    sg_apply_bindings(&bg_bind);
     background_vs_params_t bvs = {};
     bvs.inv_view_proj = inverse(view_proj_gl);
     sg_apply_uniforms(UB_background_vs_params, SG_RANGE(bvs));
@@ -282,6 +365,9 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
     bfs.top = to_vec4(pass.sky.top);
     bfs.horizon = to_vec4(pass.sky.horizon);
     bfs.ground = to_vec4(pass.sky.ground);
+    bfs.to_sun = {-sun_dir.x, -sun_dir.y, -sun_dir.z, pass.sky.sun_disc ? 1.0f : 0.0f};
+    bfs.sun_color = to_vec4(pass.sun.color);
+    bfs.mode = {use_skybox ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
     sg_apply_uniforms(UB_background_fs_params, SG_RANGE(bfs));
     sg_draw(0, 3, 1);
     ++stats.draw_calls;
@@ -319,11 +405,24 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
 
     lit_scene_params_t scene = {};
     scene.camera_pos = {pass.camera.position.x, pass.camera.position.y, pass.camera.position.z, 1.0f};
-    const vec3 sun_dir = normalize(pass.sun.direction);
     scene.sun_dir = {sun_dir.x, sun_dir.y, sun_dir.z, 0.0f};
     scene.sun_color = to_linear4(pass.sun.color, pass.sun.intensity);
-    scene.sky_ambient = to_linear4(pass.sky.top, pass.ambient);
-    scene.ground_ambient = to_linear4(pass.sky.ground, pass.ambient);
+    scene.sky_ambient = to_linear4(amb_top, pass.ambient);
+    scene.ground_ambient = to_linear4(amb_ground, pass.ambient);
+    if (pass.fog.enabled) {
+        scene.fog_color = to_linear4(pass.fog.match_sky ? horizon : pass.fog.color, 1.0f);
+        const float span = std::max(pass.fog.end - pass.fog.start, 1e-3f);
+        scene.fog_params = {pass.fog.start, 1.0f / span, 1.0f, 0.0f};
+    }
+    const std::vector<WorldImpl::Light> lights = pick_lights(pass.lights, frustum, pass.camera.position);
+    scene.light_count = {static_cast<float>(lights.size()), 0.0f, 0.0f, 0.0f};
+    for (size_t i = 0; i < lights.size(); ++i) {
+        const WorldImpl::Light& l = lights[i];
+        scene.light_pos[i] = {l.position.x, l.position.y, l.position.z, std::max(l.range, 1e-3f)};
+        const vec4 c = to_linear4(l.color, l.intensity);
+        scene.light_color[i] = {c.x, c.y, c.z, l.spot ? l.cos_outer : -2.0f};
+        scene.light_dir[i] = {l.direction.x, l.direction.y, l.direction.z, l.cos_inner};
+    }
 
     int bound_pipeline = -1;
     bool lines_drawn = false;
@@ -480,6 +579,7 @@ WorldImpl& touch(std::unique_ptr<WorldImpl>& impl) {
     const uint64_t frame = detail::frame_index();
     if (impl->frame != frame) {
         impl->draws.clear();
+        impl->lights.clear();
         impl->lines.clear();
         impl->lines_on_top.clear();
         impl->frame = frame;
@@ -492,6 +592,30 @@ World::World() : impl_(std::make_unique<WorldImpl>()) {}
 World::~World() = default;
 World::World(World&&) noexcept = default;
 World& World::operator=(World&&) noexcept = default;
+
+void World::light(const PointLight& light) {
+    WorldImpl::Light l;
+    l.position = light.position;
+    l.range = light.range;
+    l.color = light.color;
+    l.intensity = light.intensity;
+    touch(impl_).lights.push_back(l);
+}
+
+void World::light(const SpotLight& light) {
+    WorldImpl::Light l;
+    l.position = light.position;
+    l.range = light.range;
+    l.color = light.color;
+    l.intensity = light.intensity;
+    l.spot = true;
+    l.direction = normalize(light.direction);
+    const float outer = std::clamp(light.angle, 0.001f, pi * 0.5f);
+    const float inner = outer * (1.0f - std::clamp(light.softness, 0.0f, 1.0f));
+    l.cos_outer = std::cos(outer);
+    l.cos_inner = std::max(std::cos(inner), l.cos_outer + 1e-4f); // smoothstep needs edge0 < edge1
+    touch(impl_).lights.push_back(l);
+}
 
 void World::draw(Model model, const Transform& transform, rgba tint) {
     if (!model_record(model)) return;
@@ -605,7 +729,9 @@ void World::render(const Frame&, const Camera& camera, Rect viewport) {
     pass.viewport = viewport;
     pass.sun = sun;
     pass.sky = sky;
+    pass.fog = fog;
     pass.ambient = ambient;
+    pass.lights = impl.lights;
     pass.draws = impl.draws;
     pass.lines = impl.lines;
     pass.lines_on_top = impl.lines_on_top;
@@ -616,6 +742,53 @@ void World::render(const Frame&, const Camera& camera, Rect viewport) {
 }
 
 RenderStats render_stats() { return g_three.stats_last_frame; }
+
+Skybox load_skybox(const std::string& right, const std::string& left, const std::string& top,
+                   const std::string& bottom, const std::string& front, const std::string& back) {
+    // sokol's cube face order (+X, -X, +Y, -Y, +Z, -Z) in the cube map's own
+    // left-handed space, where +Z is "front".
+    const std::string* paths[6] = {&right, &left, &top, &bottom, &front, &back};
+    SkyboxRecord rec;
+    rgba averages[6];
+    for (int i = 0; i < 6; ++i) {
+        std::vector<unsigned char> px_data;
+        int w = 0, h = 0;
+        if (!detail::load_image_rgba(*paths[i], px_data, w, h)) {
+            log_warn("load_skybox: could not load " + *paths[i]);
+            return Skybox{};
+        }
+        if (w != h || (i > 0 && w != rec.size)) {
+            log_warn("load_skybox: every face must be square and the same size (" + *paths[i] + " is " +
+                     std::to_string(w) + "x" + std::to_string(h) + ")");
+            return Skybox{};
+        }
+        rec.size = w;
+        double sum[3] = {0, 0, 0};
+        for (size_t p = 0; p < px_data.size(); p += 4) {
+            for (int c = 0; c < 3; ++c) sum[c] += px_data[p + c];
+        }
+        const double n = static_cast<double>(w) * h * 255.0;
+        averages[i] = rgba{static_cast<float>(sum[0] / n), static_cast<float>(sum[1] / n), static_cast<float>(sum[2] / n), 1.0f};
+        rec.faces.insert(rec.faces.end(), px_data.begin(), px_data.end());
+    }
+    rec.average_up = averages[2];
+    rec.average_down = averages[3];
+    rec.average_side = rgba{(averages[0].r + averages[1].r + averages[4].r + averages[5].r) * 0.25f,
+                            (averages[0].g + averages[1].g + averages[4].g + averages[5].g) * 0.25f,
+                            (averages[0].b + averages[1].b + averages[4].b + averages[5].b) * 0.25f, 1.0f};
+    g_three.skyboxes.push_back(std::move(rec));
+    return Skybox{static_cast<int>(g_three.skyboxes.size()) - 1};
+}
+
+void unload_skybox(Skybox& skybox) {
+    if (SkyboxRecord* rec = skybox_record(skybox)) {
+        if (rec->view.id != SG_INVALID_ID) sg_destroy_view(rec->view);
+        if (rec->image.id != SG_INVALID_ID) sg_destroy_image(rec->image);
+        *rec = SkyboxRecord{};
+        rec->alive = false;
+    }
+    skybox = Skybox{};
+}
 
 } // namespace thistle::three
 
@@ -663,6 +836,30 @@ void three_setup() {
     sg_view_desc wv = {};
     wv.texture.image = s.white_image;
     s.white_view = sg_make_view(&wv);
+
+    // The background shader always has a cube map bound (sokol validates
+    // every declared binding), so there's a 1x1 black one for "no skybox".
+    const uint32_t black_faces[6] = {0xFF000000u, 0xFF000000u, 0xFF000000u, 0xFF000000u, 0xFF000000u, 0xFF000000u};
+    sg_image_desc cd = {};
+    cd.type = SG_IMAGETYPE_CUBE;
+    cd.width = 1;
+    cd.height = 1;
+    cd.num_slices = 6;
+    cd.data.mip_levels[0] = {black_faces, sizeof(black_faces)};
+    cd.label = "three-no-skybox";
+    s.black_cube = sg_make_image(&cd);
+    sg_view_desc cv = {};
+    cv.texture.image = s.black_cube;
+    s.black_cube_view = sg_make_view(&cv);
+
+    sg_sampler_desc sky = {};
+    sky.min_filter = SG_FILTER_LINEAR;
+    sky.mag_filter = SG_FILTER_LINEAR;
+    sky.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
+    sky.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
+    sky.wrap_w = SG_WRAP_CLAMP_TO_EDGE;
+    sky.label = "three-sky";
+    s.sky_sampler = sg_make_sampler(&sky);
 }
 
 void three_shutdown() {
@@ -672,6 +869,13 @@ void three_shutdown() {
     }
     s.models.clear();
     s.passes.clear();
+    for (SkyboxRecord& rec : s.skyboxes) {
+        if (rec.view.id != SG_INVALID_ID) sg_destroy_view(rec.view);
+        if (rec.image.id != SG_INVALID_ID) sg_destroy_image(rec.image);
+    }
+    sg_destroy_view(s.black_cube_view);
+    sg_destroy_image(s.black_cube);
+    sg_destroy_sampler(s.sky_sampler);
     for (sg_pipeline p : s.pipelines) sg_destroy_pipeline(p);
     sg_destroy_pipeline(s.sky_pipeline);
     sg_destroy_pipeline(s.depth_reset_pipeline);
