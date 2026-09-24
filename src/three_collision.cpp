@@ -20,9 +20,12 @@ VoxelWorld::Hit VoxelWorld::raycast(const Ray& ray, float max_distance, bool sol
     // Amanatides & Woo: step from cell to cell across whichever grid plane
     // the ray reaches next, so no block is ever skipped or visited twice.
     Hit hit;
-    const vec3 dir = normalize(ray.direction);
-    if (dir == vec3{0, 0, 0} || voxel_size <= 0.0f) return hit;
-    const vec3 o = (ray.origin - origin) / voxel_size;
+    const vec3 world_dir = normalize(ray.direction);
+    if (world_dir == vec3{0, 0, 0} || voxel_size <= 0.0f) return hit;
+    // Walk the grid in its own (unrotated, unscaled) space.
+    const quat to_local = rotation.inverse();
+    const vec3 dir = to_local * world_dir;
+    const vec3 o = (to_local * (ray.origin - origin)) / voxel_size;
     const float max_t = max_distance / voxel_size;
     ivec3 cell{ifloor(o.x), ifloor(o.y), ifloor(o.z)};
     ivec3 step;
@@ -50,7 +53,7 @@ VoxelWorld::Hit VoxelWorld::raycast(const Ray& ray, float max_distance, bool sol
             hit.normal = normal;
             hit.id = id;
             hit.distance = t * voxel_size;
-            hit.point = ray.origin + dir * hit.distance;
+            hit.point = ray.origin + world_dir * hit.distance;
             return hit;
         }
         int a = 0;
@@ -68,7 +71,15 @@ VoxelWorld::Hit VoxelWorld::raycast(const Ray& ray, float max_distance, bool sol
 bool VoxelWorld::overlaps_solid(const Bounds& box) const {
     if (!box.valid()) return false;
     constexpr float eps = 1e-4f;
-    const vec3 lo = (box.min - origin) / voxel_size, hi = (box.max - origin) / voxel_size;
+    // For a rotated grid this tests the box's local-space bounds, which is
+    // conservative (may report a touch that isn't quite there).
+    Bounds local;
+    const quat to_local = rotation.inverse();
+    for (int i = 0; i < 8; ++i) {
+        const vec3 c{(i & 1) ? box.max.x : box.min.x, (i & 2) ? box.max.y : box.min.y, (i & 4) ? box.max.z : box.min.z};
+        local.add((to_local * (c - origin)) / voxel_size);
+    }
+    const vec3 lo = local.min, hi = local.max;
     for (int z = ifloor(lo.z + eps); z <= ifloor(hi.z - eps); ++z)
         for (int y = ifloor(lo.y + eps); y <= ifloor(hi.y - eps); ++y)
             for (int x = ifloor(lo.x + eps); x <= ifloor(hi.x - eps); ++x) {

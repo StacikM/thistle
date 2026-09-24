@@ -8,6 +8,7 @@
 #include <thistle.hpp>
 #include <cmath>
 #include <cstdio>
+#include <vector>
 #include <string>
 using namespace thistle;
 using namespace thistle::three;
@@ -141,6 +142,97 @@ int main() {
     const Bounds b = w.bounds();
     check(std::fabs(b.min.x - 10.0f) < 1e-4f && std::fabs(b.max.x - 12.0f) < 1e-4f && std::fabs(b.max.y - 1.0f) < 1e-4f,
           "bounds() applies voxel_size and origin");
+
+    // --- save / load round trip ---
+    {
+        VoxelWorld a;
+        a.voxel_size = 0.25f;
+        a.origin = {1, 2, 3};
+        const BlockId s1 = a.add_block({.name = "stone", .color = rgb(0.5f, 0.5f, 0.5f)});
+        const BlockId s2 = a.add_block(BlockType{.name = "glow", .alpha = AlphaMode::Cutout, .emissive = coral, .solid = false}.set_tiles(1, 2, 3));
+        a.fill({-40, -3, -40}, {40, 3, 40}, s1); // spans many chunks, negative ones too
+        a.set(7, 100, -9, s2);
+        const std::vector<uint8_t> bytes = a.serialize();
+        check(bytes.size() < 20000, "a 81x7x81 slab serializes compactly (" + std::to_string(bytes.size()) + " bytes, run-length)");
+        VoxelWorld b;
+        check(b.deserialize(bytes.data(), bytes.size()), "deserialize accepts what serialize wrote");
+        check(b.get(-40, -3, -40) == s1 && b.get(40, 3, 40) == s1 && b.get(0, 4, 0) == 0 && b.get(7, 100, -9) == s2,
+              "every block survives the round trip");
+        const BlockType& t = b.block_type(s2);
+        check(t.name == "glow" && t.alpha == AlphaMode::Cutout && !t.solid && t.tile_top == 1 && t.tile_bottom == 3 &&
+              std::fabs(t.emissive.r - coral.r) < 1e-6f, "block types survive the round trip");
+        check(std::fabs(b.voxel_size - 0.25f) < 1e-6f && b.origin == vec3{1, 2, 3}, "voxel_size and origin survive");
+        std::vector<uint8_t> cut(bytes.begin(), bytes.begin() + bytes.size() / 2);
+        check(!b.deserialize(cut.data(), cut.size()) && b.chunk_count() == 0, "truncated data is rejected and leaves the world empty");
+        std::vector<uint8_t> bad = bytes;
+        bad[0] ^= 0xFF;
+        check(!b.deserialize(bad.data(), bad.size()), "wrong magic is rejected");
+    }
+
+    // --- MagicaVoxel .vox ---
+    {
+        std::vector<uint8_t> v;
+        auto u32 = [&](uint32_t x) { for (int i = 0; i < 4; ++i) v.push_back(static_cast<uint8_t>(x >> (8 * i))); };
+        auto tag = [&](const char* t) { v.insert(v.end(), t, t + 4); };
+        auto str = [&](const std::string& s2) { u32(static_cast<uint32_t>(s2.size())); v.insert(v.end(), s2.begin(), s2.end()); };
+        auto chunk = [&](const char* id, const std::vector<uint8_t>& body) { tag(id); u32(static_cast<uint32_t>(body.size())); u32(0); v.insert(v.end(), body.begin(), body.end()); };
+        auto body = [&](auto fill) { std::vector<uint8_t> saved; saved.swap(v); fill(); std::vector<uint8_t> b; b.swap(v); v.swap(saved); return b; };
+        tag("VOX "); u32(150);
+        tag("MAIN"); u32(0); u32(0);
+        chunk("SIZE", body([&] { u32(2); u32(3); u32(4); }));
+        // Three voxels: (0,0,0) red, (1,0,0) glass, (0,2,3) glowing. MagicaVoxel is Z-up.
+        chunk("XYZI", body([&] { u32(3); v.insert(v.end(), {0, 0, 0, 1, 1, 0, 0, 2, 0, 2, 3, 3}); }));
+        chunk("RGBA", body([&] {
+            for (int i = 0; i < 256; ++i) {
+                const uint8_t c[4] = {static_cast<uint8_t>(i == 0 ? 255 : 10), static_cast<uint8_t>(i == 1 ? 255 : 10), static_cast<uint8_t>(i == 2 ? 255 : 10), 255};
+                v.insert(v.end(), c, c + 4);
+            }
+        }));
+        chunk("MATL", body([&] { u32(2); u32(2); str("_type"); str("_glass"); str("_trans"); str("0.75"); }));
+        chunk("MATL", body([&] { u32(3); u32(2); str("_type"); str("_emit"); str("_emit"); str("1.0"); }));
+        // Scene: root transform -> group -> transform (moved +10 on MagicaVoxel X) -> shape(model 0).
+        chunk("nTRN", body([&] { u32(0); u32(0); u32(1); u32(0xFFFFFFFF); u32(0xFFFFFFFF); u32(1); u32(0); }));
+        chunk("nGRP", body([&] { u32(1); u32(0); u32(1); u32(2); }));
+        chunk("nTRN", body([&] { u32(2); u32(0); u32(3); u32(0xFFFFFFFF); u32(0); u32(1); u32(1); str("_t"); str("10 0 0"); }));
+        chunk("nSHP", body([&] { u32(3); u32(0); u32(1); u32(0); u32(0); }));
+        const std::string path = "thistle_voxel_smoketest.vox";
+        if (std::FILE* f = std::fopen(path.c_str(), "wb")) { std::fwrite(v.data(), 1, v.size(), f); std::fclose(f); }
+
+        VoxelWorld w2;
+        check(w2.load_vox(path, {100, 0, 100}), "load_vox reads a hand-built .vox file");
+        // MagicaVoxel pivots a model on size/2: (0,0,0)-(1,1,2) moved +10 on X is (9,-1,-2),
+        // which is (9,-2,1) once Z-up becomes Y-up via (x, z, -y); the lowest corner of all three
+        // voxels is (9,-2,-1), so this one lands at `at` + (0, 0, 2).
+        const BlockId red = w2.get(100, 0, 102);
+        check(red != 0 && std::fabs(w2.block_type(red).color.r - 1.0f) < 1e-3f && std::fabs(w2.block_type(red).color.g - 10 / 255.0f) < 1e-3f,
+              "palette slot 1 -> the red block, placed with Z-up turned to Y-up (min corner at `at`)");
+        const BlockId glass2 = w2.get(101, 0, 102);
+        check(glass2 != 0 && w2.block_type(glass2).alpha == AlphaMode::Blend && std::fabs(w2.block_type(glass2).color.a - 0.25f) < 1e-3f,
+              "a _glass material becomes a see-through block (alpha = 1 - _trans)");
+        const BlockId glow2 = w2.get(100, 3, 100);
+        check(glow2 != 0 && w2.block_type(glow2).emissive.b > 0.9f, "an _emit material glows");
+        check(w2.block_type_count() == 3, "one block type per palette slot used");
+        VoxelWorld w3;
+        w3.load_vox(path, {0, 0, 0});
+        w3.load_vox(path, {20, 0, 0});
+        check(w3.block_type_count() == 3, "importing twice reuses the same block types");
+        std::remove(path.c_str());
+        check(!w3.load_vox("does_not_exist.vox"), "a missing .vox file fails cleanly");
+    }
+
+    // --- a rotated grid ---
+    {
+        VoxelWorld r;
+        const BlockId s1 = r.add_block({.name = "s"});
+        r.set(2, 0, 0, s1);
+        r.origin = {10, 0, 0};
+        r.rotation = quat::axis_angle({0, 1, 0}, radians(90)); // grid +X now points along world -Z
+        const vec3 c = r.block_center({2, 0, 0});
+        check(std::fabs(c.x - 10.5f) < 1e-4f && std::fabs(c.z + 2.5f) < 1e-4f, "block_center follows the rotation");
+        check(r.to_block(c) == ivec3{2, 0, 0}, "to_block undoes it");
+        const auto h = r.raycast(Ray{{10.5f, 0.5f, 5.0f}, {0, 0, -1}});
+        check(h.hit && h.block == ivec3{2, 0, 0} && std::fabs(h.distance - 7.0f) < 1e-3f, "raycast walks the rotated grid");
+    }
 
     if (g_failures) { std::printf("%d check(s) failed\n", g_failures); return 1; }
     std::printf("all voxel checks passed\n");

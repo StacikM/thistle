@@ -1,7 +1,11 @@
 #include "thistle_internal.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <functional>
 #include <map>
 #include <unordered_map>
 
@@ -175,17 +179,18 @@ void VoxelWorld::clear() {
 }
 
 ivec3 VoxelWorld::to_block(vec3 p) const {
-    const vec3 b = (p - origin) / voxel_size;
+    const vec3 b = (rotation.inverse() * (p - origin)) / voxel_size;
     return {static_cast<int>(std::floor(b.x)), static_cast<int>(std::floor(b.y)), static_cast<int>(std::floor(b.z))};
 }
 
 vec3 VoxelWorld::block_center(ivec3 b) const {
-    return origin + vec3{b.x + 0.5f, b.y + 0.5f, b.z + 0.5f} * voxel_size;
+    return origin + rotation * (vec3{b.x + 0.5f, b.y + 0.5f, b.z + 0.5f} * voxel_size);
 }
 
 Bounds VoxelWorld::block_bounds(ivec3 b) const {
-    const vec3 lo = origin + vec3{static_cast<float>(b.x), static_cast<float>(b.y), static_cast<float>(b.z)} * voxel_size;
-    return Bounds{lo, lo + vec3{voxel_size, voxel_size, voxel_size}};
+    const vec3 lo = vec3{static_cast<float>(b.x), static_cast<float>(b.y), static_cast<float>(b.z)} * voxel_size;
+    const Bounds local{lo, lo + vec3{voxel_size, voxel_size, voxel_size}};
+    return local.transformed(Transform{origin, rotation}.matrix());
 }
 
 Bounds VoxelWorld::bounds() const {
@@ -196,12 +201,11 @@ Bounds VoxelWorld::bounds() const {
         for (int i = 0; i < CS3; ++i) {
             if (chunk.blocks[i] == 0) continue;
             const ivec3 b{c.x * CS + i % CS, c.y * CS + (i / CS) % CS, c.z * CS + i / (CS * CS)};
-            const Bounds bb = block_bounds(b);
-            out.add(bb.min);
-            out.add(bb.max);
+            out.add(vec3{static_cast<float>(b.x), static_cast<float>(b.y), static_cast<float>(b.z)} * voxel_size);
+            out.add(vec3{b.x + 1.0f, b.y + 1.0f, b.z + 1.0f} * voxel_size);
         }
     }
-    return out;
+    return out.transformed(Transform{origin, rotation}.matrix());
 }
 
 int VoxelWorld::chunk_count() const { return static_cast<int>(impl_->chunks.size()); }
@@ -444,9 +448,390 @@ void World::draw(VoxelWorld& voxels) {
     for (const auto& [key, chunk] : voxels.impl_->chunks) {
         if (!chunk.model.valid()) continue;
         const ivec3 c = key_chunk(key);
-        const vec3 at = voxels.origin + vec3{static_cast<float>(c.x * CS), static_cast<float>(c.y * CS), static_cast<float>(c.z * CS)} * s;
-        draw(chunk.model, Transform{at, {}, {s, s, s}});
+        const vec3 offset = vec3{static_cast<float>(c.x * CS), static_cast<float>(c.y * CS), static_cast<float>(c.z * CS)} * s;
+        draw(chunk.model, Transform{voxels.origin + voxels.rotation * offset, voxels.rotation, {s, s, s}});
     }
+}
+
+} // namespace thistle::three
+
+// --- save / load ----------------------------------------------------------------------
+
+namespace thistle::three {
+
+namespace {
+
+constexpr uint32_t kVoxelMagic = 0x31585654; // "TVX1" little-endian
+constexpr uint32_t kVoxelVersion = 1;
+
+struct Writer {
+    std::vector<uint8_t> out;
+    void bytes(const void* p, size_t n) { const auto* b = static_cast<const uint8_t*>(p); out.insert(out.end(), b, b + n); }
+    void u8(uint8_t v) { out.push_back(v); }
+    void u16(uint16_t v) { u8(static_cast<uint8_t>(v)); u8(static_cast<uint8_t>(v >> 8)); }
+    void u32(uint32_t v) { for (int i = 0; i < 4; ++i) u8(static_cast<uint8_t>(v >> (8 * i))); }
+    void i32(int32_t v) { u32(static_cast<uint32_t>(v)); }
+    void f32(float v) { uint32_t u; std::memcpy(&u, &v, 4); u32(u); }
+    void color(rgba c) { f32(c.r); f32(c.g); f32(c.b); f32(c.a); }
+    void str(const std::string& s) { u16(static_cast<uint16_t>(std::min<size_t>(s.size(), 0xFFFF))); bytes(s.data(), std::min<size_t>(s.size(), 0xFFFF)); }
+};
+
+struct Reader {
+    const uint8_t* p;
+    const uint8_t* end;
+    bool ok = true;
+    bool need(size_t n) { if (static_cast<size_t>(end - p) < n) ok = false; return ok; }
+    uint8_t u8() { if (!need(1)) return 0; return *p++; }
+    uint16_t u16() { const uint16_t a = u8(); return static_cast<uint16_t>(a | (u8() << 8)); }
+    uint32_t u32() { uint32_t v = 0; for (int i = 0; i < 4; ++i) v |= static_cast<uint32_t>(u8()) << (8 * i); return v; }
+    int32_t i32() { return static_cast<int32_t>(u32()); }
+    float f32() { const uint32_t u = u32(); float v; std::memcpy(&v, &u, 4); return v; }
+    rgba color() { rgba c; c.r = f32(); c.g = f32(); c.b = f32(); c.a = f32(); return c; }
+    std::string str() { const uint16_t n = u16(); if (!need(n)) return {}; std::string s(reinterpret_cast<const char*>(p), n); p += n; return s; }
+};
+
+} // namespace
+
+std::vector<uint8_t> VoxelWorld::serialize() const {
+    Writer w;
+    w.u32(kVoxelMagic);
+    w.u32(kVoxelVersion);
+    w.f32(voxel_size);
+    w.f32(origin.x); w.f32(origin.y); w.f32(origin.z);
+    w.f32(rotation.x); w.f32(rotation.y); w.f32(rotation.z); w.f32(rotation.w);
+    w.u32(static_cast<uint32_t>(impl_->types.size() - 1));
+    for (size_t i = 1; i < impl_->types.size(); ++i) {
+        const BlockType& t = impl_->types[i];
+        w.str(t.name);
+        w.color(t.color);
+        w.i32(t.tile_top); w.i32(t.tile_side); w.i32(t.tile_bottom);
+        w.u8(static_cast<uint8_t>(t.alpha));
+        w.color(t.emissive);
+        w.u8(t.solid ? 1 : 0);
+    }
+    uint32_t chunks = 0;
+    for (const auto& [key, chunk] : impl_->chunks) chunks += chunk.non_air > 0;
+    w.u32(chunks);
+    for (const auto& [key, chunk] : impl_->chunks) {
+        if (chunk.non_air == 0) continue;
+        const ivec3 c = key_chunk(key);
+        w.i32(c.x); w.i32(c.y); w.i32(c.z);
+        // Runs of equal ids: a mostly-solid or mostly-empty chunk (which is
+        // nearly every chunk) comes down to a handful of runs.
+        std::vector<std::pair<BlockId, uint16_t>> runs;
+        for (int i = 0; i < CS3; ++i) {
+            const BlockId id = chunk.blocks[i];
+            if (!runs.empty() && runs.back().first == id && runs.back().second < 0xFFFF) ++runs.back().second;
+            else runs.push_back({id, 1});
+        }
+        w.u32(static_cast<uint32_t>(runs.size()));
+        for (const auto& [id, n] : runs) { w.u16(id); w.u16(n); }
+    }
+    return std::move(w.out);
+}
+
+bool VoxelWorld::deserialize(const uint8_t* data, size_t size) {
+    clear();
+    impl_->types.resize(1);
+    Reader r{data, data + size};
+    if (r.u32() != kVoxelMagic || r.u32() != kVoxelVersion) return false;
+    const float vs = r.f32();
+    const vec3 org{r.f32(), r.f32(), r.f32()};
+    quat rot;
+    rot.x = r.f32(); rot.y = r.f32(); rot.z = r.f32(); rot.w = r.f32();
+    const uint32_t type_count = r.u32();
+    if (!r.ok || type_count > 0xFFFE) return false;
+    for (uint32_t i = 0; i < type_count && r.ok; ++i) {
+        BlockType t;
+        t.name = r.str();
+        t.color = r.color();
+        t.tile_top = r.i32(); t.tile_side = r.i32(); t.tile_bottom = r.i32();
+        const uint8_t alpha = r.u8();
+        t.alpha = alpha <= static_cast<uint8_t>(AlphaMode::Blend) ? static_cast<AlphaMode>(alpha) : AlphaMode::Opaque;
+        t.emissive = r.color();
+        t.solid = r.u8() != 0;
+        impl_->types.push_back(t);
+    }
+    const uint32_t chunk_count = r.u32();
+    for (uint32_t c = 0; c < chunk_count && r.ok; ++c) {
+        const int cx = r.i32(), cy = r.i32(), cz = r.i32();
+        const uint32_t runs = r.u32();
+        if (!r.ok || runs > static_cast<uint32_t>(CS3)) { r.ok = false; break; }
+        Chunk& chunk = impl_->chunks[chunk_key(cx, cy, cz)];
+        int at = 0;
+        for (uint32_t i = 0; i < runs && r.ok; ++i) {
+            const BlockId id = r.u16();
+            const uint16_t n = r.u16();
+            if (at + n > CS3 || id > type_count) { r.ok = false; break; }
+            std::fill_n(chunk.blocks.begin() + at, n, id);
+            if (id != 0) chunk.non_air += n;
+            at += n;
+        }
+        if (at != CS3) r.ok = false;
+    }
+    if (!r.ok) {
+        clear();
+        impl_->types.resize(1);
+        return false;
+    }
+    voxel_size = vs > 0.0f ? vs : 1.0f;
+    origin = org;
+    rotation = normalize(rot);
+    return true;
+}
+
+bool VoxelWorld::save(const std::string& path) const {
+    const std::vector<uint8_t> bytes = serialize();
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) {
+        log_warn("VoxelWorld::save: can't write " + path);
+        return false;
+    }
+    const bool ok = std::fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
+    std::fclose(f);
+    return ok;
+}
+
+bool VoxelWorld::load(const std::string& path) {
+    std::vector<unsigned char> bytes;
+    if (!detail::read_file_bytes(path, bytes)) {
+        log_warn("VoxelWorld::load: can't read " + path);
+        return false;
+    }
+    if (!deserialize(bytes.data(), bytes.size())) {
+        log_warn("VoxelWorld::load: " + path + " isn't a valid voxel world file");
+        return false;
+    }
+    return true;
+}
+
+// --- MagicaVoxel .vox --------------------------------------------------------------------
+
+namespace {
+
+struct VoxModel {
+    int sx = 0, sy = 0, sz = 0;
+    std::vector<std::array<uint8_t, 4>> voxels; // x, y, z, palette index
+};
+
+struct VoxNode {
+    enum Kind { Transform, Group, Shape } kind = Transform;
+    int child = -1;                 // Transform
+    std::vector<int> children;      // Group
+    std::vector<int> models;        // Shape
+    int t[3] = {0, 0, 0};           // Transform translation (MagicaVoxel space)
+    int r[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+};
+
+using VoxDict = std::vector<std::pair<std::string, std::string>>;
+
+VoxDict read_dict(Reader& rd) {
+    VoxDict d;
+    const int32_t n = rd.i32();
+    for (int32_t i = 0; i < n && rd.ok; ++i) {
+        auto read_str = [&] {
+            const int32_t len = rd.i32();
+            if (len < 0 || !rd.need(static_cast<size_t>(len))) { rd.ok = false; return std::string(); }
+            std::string s(reinterpret_cast<const char*>(rd.p), static_cast<size_t>(len));
+            rd.p += len;
+            return s;
+        };
+        std::string k = read_str();
+        std::string v = read_str();
+        d.push_back({std::move(k), std::move(v)});
+    }
+    return d;
+}
+
+std::string dict_get(const VoxDict& d, const std::string& key) {
+    for (const auto& [k, v] : d) if (k == key) return v;
+    return {};
+}
+
+// MagicaVoxel packs a rotation (a signed permutation matrix) into one byte:
+// bits 0-1 = which column row 0's nonzero is in, bits 2-3 = row 1's, row 2
+// takes the remaining column; bits 4/5/6 = the sign of each row.
+void decode_rotation(uint8_t bits, int out[3][3]) {
+    const int c0 = bits & 3, c1 = (bits >> 2) & 3;
+    const int c2 = 3 - c0 - c1;
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) out[i][j] = 0;
+    if (c0 > 2 || c1 > 2 || c2 < 0 || c2 > 2) { out[0][0] = out[1][1] = out[2][2] = 1; return; }
+    out[0][c0] = (bits >> 4) & 1 ? -1 : 1;
+    out[1][c1] = (bits >> 5) & 1 ? -1 : 1;
+    out[2][c2] = (bits >> 6) & 1 ? -1 : 1;
+}
+
+} // namespace
+
+bool VoxelWorld::load_vox(const std::string& path, ivec3 at) {
+    std::vector<unsigned char> bytes;
+    if (!detail::read_file_bytes(path, bytes)) {
+        log_warn("load_vox: can't read " + path);
+        return false;
+    }
+    Reader rd{bytes.data(), bytes.data() + bytes.size()};
+    auto tag = [&] { if (!rd.need(4)) return std::string(); std::string t(reinterpret_cast<const char*>(rd.p), 4); rd.p += 4; return t; };
+    if (tag() != "VOX ") { log_warn("load_vox: " + path + " is not a MagicaVoxel file"); return false; }
+    rd.i32(); // version
+    if (tag() != "MAIN") { log_warn("load_vox: " + path + " has no MAIN chunk"); return false; }
+    rd.i32(); rd.i32(); // MAIN content / children sizes
+
+    std::vector<VoxModel> models;
+    std::array<rgba, 256> palette;
+    bool has_palette = false;
+    struct Mat { bool glass = false; float alpha = 1.0f; float emit = 0.0f; };
+    std::array<Mat, 256> mats{};
+    std::unordered_map<int, VoxNode> nodes;
+
+    while (rd.ok && rd.p + 12 <= rd.end) {
+        const std::string id = tag();
+        const int32_t content = rd.i32();
+        rd.i32(); // children size (children follow inline, handled by the loop)
+        if (content < 0 || !rd.need(static_cast<size_t>(content))) break;
+        Reader c{rd.p, rd.p + content};
+        rd.p += content;
+        if (id == "SIZE") {
+            VoxModel m;
+            m.sx = c.i32(); m.sy = c.i32(); m.sz = c.i32();
+            models.push_back(m);
+        } else if (id == "XYZI" && !models.empty()) {
+            const int32_t n = c.i32();
+            for (int32_t i = 0; i < n && c.need(4); ++i) {
+                models.back().voxels.push_back({c.p[0], c.p[1], c.p[2], c.p[3]});
+                c.p += 4;
+            }
+        } else if (id == "RGBA") {
+            has_palette = true;
+            // Palette slot i (1..255) is stored at entry i - 1.
+            for (int i = 0; i < 256 && c.need(4); ++i) {
+                palette[(i + 1) & 0xFF] = rgba{c.p[0] / 255.0f, c.p[1] / 255.0f, c.p[2] / 255.0f, c.p[3] / 255.0f};
+                c.p += 4;
+            }
+        } else if (id == "MATL") {
+            const int32_t mid = c.i32();
+            const VoxDict d = read_dict(c);
+            if (mid > 0 && mid < 256) {
+                Mat& m = mats[mid];
+                const std::string type = dict_get(d, "_type");
+                if (type == "_glass" || type == "_blend") {
+                    m.glass = true;
+                    const std::string trans = dict_get(d, "_trans");
+                    m.alpha = trans.empty() ? 0.5f : std::clamp(1.0f - static_cast<float>(std::atof(trans.c_str())), 0.05f, 1.0f);
+                } else if (type == "_emit") {
+                    const std::string e = dict_get(d, "_emit");
+                    m.emit = e.empty() ? 1.0f : static_cast<float>(std::atof(e.c_str()));
+                }
+            }
+        } else if (id == "nTRN") {
+            const int32_t nid = c.i32();
+            read_dict(c);
+            VoxNode n;
+            n.kind = VoxNode::Transform;
+            n.child = c.i32();
+            c.i32(); c.i32(); // reserved, layer
+            const int32_t frames = c.i32();
+            for (int32_t f = 0; f < frames && c.ok; ++f) {
+                const VoxDict fd = read_dict(c);
+                if (f != 0) continue;
+                const std::string t = dict_get(fd, "_t");
+                if (!t.empty()) std::sscanf(t.c_str(), "%d %d %d", &n.t[0], &n.t[1], &n.t[2]);
+                const std::string r = dict_get(fd, "_r");
+                if (!r.empty()) decode_rotation(static_cast<uint8_t>(std::atoi(r.c_str())), n.r);
+            }
+            nodes[nid] = n;
+        } else if (id == "nGRP") {
+            const int32_t nid = c.i32();
+            read_dict(c);
+            VoxNode n;
+            n.kind = VoxNode::Group;
+            const int32_t k = c.i32();
+            for (int32_t i = 0; i < k && c.ok; ++i) n.children.push_back(c.i32());
+            nodes[nid] = n;
+        } else if (id == "nSHP") {
+            const int32_t nid = c.i32();
+            read_dict(c);
+            VoxNode n;
+            n.kind = VoxNode::Shape;
+            const int32_t k = c.i32();
+            for (int32_t i = 0; i < k && c.ok; ++i) { n.models.push_back(c.i32()); read_dict(c); }
+            nodes[nid] = n;
+        }
+    }
+    if (models.empty()) { log_warn("load_vox: no models in " + path); return false; }
+    if (!has_palette) {
+        // Files without an RGBA chunk use MagicaVoxel's built-in palette,
+        // which isn't reproduced here; a gray ramp at least keeps the shape.
+        log_warn("load_vox: " + path + " has no palette; using grays");
+        for (int i = 0; i < 256; ++i) palette[i] = rgba{i / 255.0f, i / 255.0f, i / 255.0f, 1.0f};
+    }
+
+    // Place every model instance in MagicaVoxel space (walking the scene
+    // graph when there is one), then turn Z-up into Y-up: (x, y, z) -> (x, z, -y).
+    std::vector<std::array<int, 4>> placed; // x, y, z (ours), palette index
+    auto place_model = [&](const VoxModel& m, const int t[3], const int r[3][3]) {
+        const int pivot[3] = {m.sx / 2, m.sy / 2, m.sz / 2};
+        for (const auto& v : m.voxels) {
+            const int local[3] = {v[0] - pivot[0], v[1] - pivot[1], v[2] - pivot[2]};
+            int w[3];
+            for (int i = 0; i < 3; ++i) w[i] = t[i] + r[i][0] * local[0] + r[i][1] * local[1] + r[i][2] * local[2];
+            placed.push_back({w[0], w[2], -w[1], v[3]});
+        }
+    };
+    if (nodes.count(0)) {
+        std::function<void(int, const int*, const int (*)[3], int)> walk = [&](int nid, const int* t, const int (*r)[3], int depth) {
+            auto it = nodes.find(nid);
+            if (it == nodes.end() || depth > 64) return;
+            const VoxNode& n = it->second;
+            if (n.kind == VoxNode::Transform) {
+                int nt[3], nr[3][3];
+                for (int i = 0; i < 3; ++i) {
+                    nt[i] = t[i] + r[i][0] * n.t[0] + r[i][1] * n.t[1] + r[i][2] * n.t[2];
+                    for (int j = 0; j < 3; ++j) nr[i][j] = r[i][0] * n.r[0][j] + r[i][1] * n.r[1][j] + r[i][2] * n.r[2][j];
+                }
+                walk(n.child, nt, nr, depth + 1);
+            } else if (n.kind == VoxNode::Group) {
+                for (int ch : n.children) walk(ch, t, r, depth + 1);
+            } else {
+                for (int mid : n.models) if (mid >= 0 && mid < static_cast<int>(models.size())) place_model(models[mid], t, r);
+            }
+        };
+        const int t0[3] = {0, 0, 0};
+        const int r0[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        walk(0, t0, r0, 0);
+    } else {
+        const int t0[3] = {models[0].sx / 2, models[0].sy / 2, models[0].sz / 2};
+        const int r0[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        place_model(models[0], t0, r0);
+    }
+    if (placed.empty()) { log_warn("load_vox: " + path + " contains no voxels"); return true; }
+
+    ivec3 lo{placed[0][0], placed[0][1], placed[0][2]};
+    for (const auto& p : placed) lo = {std::min(lo.x, p[0]), std::min(lo.y, p[1]), std::min(lo.z, p[2])};
+
+    // One block type per palette slot actually used, found by name so
+    // several imports share types instead of piling up duplicates.
+    std::array<BlockId, 256> ids{};
+    for (const auto& p : placed) {
+        const int slot = p[3];
+        if (ids[slot] != 0) continue;
+        const rgba c = palette[slot];
+        const Mat& m = mats[slot];
+        char name[48];
+        std::snprintf(name, sizeof(name), "vox:%02x%02x%02x%s%s", static_cast<int>(c.r * 255 + 0.5f), static_cast<int>(c.g * 255 + 0.5f),
+                      static_cast<int>(c.b * 255 + 0.5f), m.glass ? ":glass" : "", m.emit > 0.0f ? ":emit" : "");
+        BlockId id = find_block(name);
+        if (id == 0) {
+            BlockType t;
+            t.name = name;
+            t.color = rgba{c.r, c.g, c.b, m.glass ? m.alpha : 1.0f};
+            if (m.glass) t.alpha = AlphaMode::Blend;
+            if (m.emit > 0.0f) t.emissive = rgba{c.r * std::min(m.emit, 1.0f), c.g * std::min(m.emit, 1.0f), c.b * std::min(m.emit, 1.0f), 1.0f};
+            id = add_block(t);
+        }
+        ids[slot] = id;
+    }
+    for (const auto& p : placed) set(at.x + p[0] - lo.x, at.y + p[1] - lo.y, at.z + p[2] - lo.z, ids[p[3]]);
+    return true;
 }
 
 } // namespace thistle::three
