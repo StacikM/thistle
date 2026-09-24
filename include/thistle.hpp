@@ -1396,6 +1396,10 @@ vec3 operator*(quat q, vec3 v); // rotate v
 float dot(quat a, quat b);
 quat normalize(quat q);
 quat slerp(quat a, quat b, float t); // takes the short way around
+// Back to angles: {pitch, yaw, roll} (radians) such that quat::euler(pitch,
+// yaw, roll) gives the same rotation. For showing and editing rotations as
+// numbers; keep doing the math with quats.
+vec3 to_euler(quat q);
 
 // 4x4 matrix, column-major (m[column * 4 + row]) — the same memory layout
 // the GPU shaders expect, so it goes straight into a uniform.
@@ -2029,6 +2033,8 @@ public:
     void cylinder(const T& transform, rgba color = white) { shape(2, transform, color); }
     template <class T> requires std::is_same_v<T, Transform>
     void cone(const T& transform, rgba color = white) { shape(3, transform, color); }
+    template <class T> requires std::is_same_v<T, Transform>
+    void plane(const T& transform, rgba color = white) { shape(4, transform, color); } // 1x1 m, facing +Y
 
     // Debug lines: 1 pixel wide, unlit. on_top draws them through everything
     // (gizmos, selection outlines); otherwise they're hidden behind solid objects.
@@ -2042,7 +2048,7 @@ public:
     void render(const Frame& f, const Camera& camera, Rect viewport); // viewport in pixels, top-left origin
 
 private:
-    void shape(int kind, const Transform& transform, rgba color); // 0 box, 1 sphere, 2 cylinder, 3 cone
+    void shape(int kind, const Transform& transform, rgba color); // 0 box, 1 sphere, 2 cylinder, 3 cone, 4 plane
     std::unique_ptr<struct WorldImpl> impl_;
 };
 
@@ -2741,6 +2747,76 @@ private:
         Transform transform;
     };
     std::vector<Sample> samples_;
+};
+
+// --- scenes (what the Thistle Editor saves) ------------------------------------------------------
+// A level: named things, each with a transform relative to its parent, that
+// are a model, a built-in shape, a light, a trigger volume, a spawn point,
+// or an empty used as a group. Plus the environment (sun, sky, fog). The
+// Thistle Editor saves these as .scene.json; a game loads one and either
+// draws it as is, or reads it to place its own things: that's what spawn
+// points, triggers and each entity's free-form properties are for.
+//
+//   Scene3D level;
+//   level.load("assets/scenes/level1.scene.json");
+//   int start = level.find("player_start");
+//   player.position = level.world_transform(start).position;
+//   // every frame:
+//   level.draw(world);
+struct SceneEntity {
+    enum class Kind { Empty, Model, Box, Sphere, Cylinder, Cone, Plane, PointLight, SpotLight, Trigger, Spawn };
+    std::string name;
+    Kind kind = Kind::Empty;
+    int parent = -1;       // index into Scene3D::entities, -1 = at the top
+    Transform transform;   // relative to the parent
+    std::string model;     // Kind::Model: its file, as load_model() takes it
+    rgba color = white;    // shapes: their color; models: a tint; lights: the light's color
+    float intensity = 1.0f; // lights
+    float range = 10.0f;    // lights
+    float spot_angle = radians(30.0f); // spot lights: half the cone's opening
+    // Anything the game needs to know: {"health", "100"}, {"door", "exit"}.
+    std::vector<std::pair<std::string, std::string>> properties;
+
+    std::string property(const std::string& key, const std::string& fallback = {}) const;
+    void set_property(const std::string& key, const std::string& value);
+};
+
+class Scene3D {
+public:
+    std::vector<SceneEntity> entities;
+    Sun sun;
+    Sky sky;
+    Fog fog;
+    float ambient = 0.55f;
+
+    // The file's text, and back. Paths inside stay as they were written.
+    bool save(const std::string& path) const;
+    bool load(const std::string& path); // false (and an empty scene) if it can't be read
+    std::string to_json() const;
+    bool from_json(const std::string& text);
+
+    int add(const SceneEntity& entity);  // returns its index
+    void remove(int index);              // and everything under it; later indices shift down
+    // Moves `child` under `parent` (-1: the top), keeping where it is in the
+    // world. Refused (false) if that would put it under itself.
+    bool set_parent(int child, int parent);
+    std::vector<int> children(int index) const; // -1: the top-level ones
+    int find(const std::string& name) const;    // -1 if none
+
+    Transform world_transform(int index) const;
+    void set_world_transform(int index, const Transform& world);
+    // Its own box, before its transform: the model's, a unit shape's, or a
+    // small one for lights, spawns and empties.
+    Bounds local_bounds(int index) const;
+    // Whether a point in the world is inside its box (local_bounds() placed by
+    // world_transform(), rotation included): "is the player in this trigger".
+    bool inside(int index, vec3 point) const;
+    Model model(int index) const; // the loaded model of a Kind::Model entity (loaded once per file, shared)
+
+    // Draws every model and shape and adds every light to `world`; with
+    // `environment`, also sets its sun, sky, fog and ambient. Triggers,
+    // spawns and empties don't draw (they're for the game to read).
+    void draw(World& world, bool environment = true) const;
 };
 
 } // namespace thistle::three

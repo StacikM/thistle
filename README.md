@@ -40,12 +40,12 @@ Requires a consumer project (game) that adds this as a subdirectory and links ag
 
 ## Thistle Editor
 
-A GUI tool for placing minor-3D props (built-in primitives, invisible Trigger volumes, or `.obj` meshes) with the mouse or keyboard, grouping them into real parent/child hierarchies, and saving/loading the layout — see [tools/thistle-editor](tools/thistle-editor/README.md). Not a level compiler; it's a placement tool on top of `Node`'s save/load, nothing more.
+A 3D level editor for `thistle::three`: place models, shapes, lights, trigger volumes and spawn points with move/rotate/scale gizmos, group them, give them properties your game reads, set the sun, sky and fog, with undo for all of it. Levels save as `.scene.json` in your game's `assets/scenes/`, and the game loads them with `three::Scene3D` ([docs/scene3d.md](docs/scene3d.md)). It's drawn with the engine itself, not ImGui. See [tools/thistle-editor](tools/thistle-editor/README.md) for how to use it and exactly what's been tested.
 
 ```bash
 thistle editor install   # build it and put `thistle-editor` on your PATH
 thistle editor update    # pull the latest engine source, rebuild, reinstall
-thistle editor run       # build (if needed) and run it without installing
+thistle editor run       # build (if needed) and run it on the project you're in, without installing
 ```
 
 ## Contributing

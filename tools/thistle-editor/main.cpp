@@ -1,867 +1,1454 @@
-// Thistle Editor — a prop-placement tool: right-click the Outliner (empty
-// space to add at the scene root, an existing row to add a child of it or
-// delete it) to spawn a built-in primitive (including an invisible Trigger
-// volume) or an .obj file under assets/, move/select things with the mouse
-// (click to select+drag along the ground, right-drag empty viewport space to
-// orbit the camera, scroll to zoom) or the keyboard (WASD/R/F/Q/E/Z/X, still
-// there for precise nudging), group props into real parent/child
-// hierarchies, save/load the layout as a Node tree via save_scene()/
-// load_scene(). Ctrl+click a different Outliner row re-parents the current
-// selection onto it.
+// Thistle Editor — a 3D level editor for thistle::three scenes (Scene3D).
 //
-// Layout takes real inspiration from Blender's default window (an actual
-// screenshot of it — docs.blender.org's Window System Introduction page —
-// was checked before writing this, not worked from memory): a dark
-// neutral-gray theme, a viewport grid with colored X/Z axis lines instead of
-// a flat-shaded ground plane, an Outliner-style indented hierarchy tree on
-// the left, and a Properties-style Transform panel with per-axis numeric
-// fields on the right. The Inspector's Name field uses Thistle's real
-// begin_text_input()/text_input() capture (there IS text input in the
-// engine, just no built-in visual widget for it — this is that widget, for
-// exactly one field); the numeric Position/Rotation/Scale fields stay
-// steppers rather than click-to-type, since a mouse-drag already covers
-// coarse repositioning and steppers are enough for fine nudges. There's
-// still no orbiting 3D gizmo ball (no way to draw a fixed screen-space
-// overlay independent of the main camera) — just the axis-colored grid
-// lines for orientation.
+// Place models, shapes, lights, trigger volumes and spawn points; move,
+// rotate and scale them with gizmos; group them into hierarchies; give
+// them properties your game reads; set the sun, sky and fog; save as
+// .scene.json, which a game loads with Scene3D::load() and draws with
+// Scene3D::draw() (or reads to place its own things).
 //
-// This is NOT a level compiler (no BSP, no lighting bake, nothing Hammer's
-// actual value proposition rests on) — see docs/ui-and-scenes.md's "Placing
-// minor-3D props on a Node" section for what save_scene() actually captures.
-// The Trigger primitive is the same story as a Hammer brush on its own: it's
-// geometry (a position + size) and a name, nothing more. Thistle does have
-// basic 3D overlap tests now (Box3D/Sphere3D, box3d_sphere3d_overlap(), etc.
-// — see docs/drawing.md's "3D collision" section), but nothing calls them
-// automatically — no "on enter" callback, no event. Your own game code
-// builds a Box3D from a mesh_prim == Prim::Trigger node's
-// world_mesh_transform() and calls the overlap test itself, every frame,
-// exactly the way Source (not Hammer) is what actually processes a trigger
-// brush at runtime.
+//   thistle-editor [project folder]
+//
+// It works inside a project: models come from its assets/ folder (.glb,
+// .gltf, .obj), scenes are saved to assets/scenes/, so they ship with the
+// game like everything else in assets/. Without a folder it uses the
+// current one when that looks like a project (has assets/ or thistle.json),
+// else the folder the editor itself is in. If the editor
+// that came before this one (a prop placer that saved a Node tree to one
+// file in the save folder) left a layout behind, Open offers to import it.
+//
+// Navigation is Blender's (middle-drag orbits, Shift+middle-drag pans, the
+// wheel zooms; Alt+left-drag orbits too, for laptops) plus Unity's/Unreal's
+// fly mode (hold the right button: mouse looks, WASD/QE move). F frames the
+// selection, numpad 1/3/7 look from the front/right/top. W/E/R pick the
+// move/rotate/scale gizmo; holding Ctrl while dragging one snaps. Every
+// change can be undone (Ctrl+Z / Ctrl+Shift+Z): the whole scene is
+// snapshotted as its JSON before each change, which is simple enough to be
+// obviously right, and small enough at editor-sized scenes.
+//
+// The UI is drawn with Thistle's own 2D API (no Dear ImGui): the editor
+// should look like a tool made with the engine, not a debug overlay.
 #include <thistle.hpp>
+
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <string>
-#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #if defined(__APPLE__)
-#include <mach-o/dyld.h>
 #include <climits>
+#include <mach-o/dyld.h>
 #elif defined(_WIN32)
+#ifndef NOMINMAX // windows.h's min/max macros would break std::min/std::max
+#define NOMINMAX
+#endif
 #include <windows.h>
 #elif defined(__linux__)
-#include <unistd.h>
 #include <climits>
+#include <unistd.h>
 #endif
 
 using namespace thistle;
+using namespace thistle::three;
 namespace fs = std::filesystem;
 
 namespace {
 
-// Launching via a terminal already `cd`'d into the build output leaves the
-// working directory right where "assets/"/"editor_assets/..." expect it —
-// but launching the same binary via Finder/double-click (the normal way an
-// end user runs a .app) starts it with an arbitrary working directory (the
-// user's home directory, typically), not the bundle's own folder. Every
-// relative path in this file silently resolves against the wrong place in
-// that case. Fix it once, here, by finding the actual running executable
-// and chdir'ing next to it, instead of assuming the caller got cwd right.
-void chdir_to_executable_dir() {
+// Where the editor's own files (its UI font) are: next to the executable,
+// wherever the project being edited is.
+fs::path executable_dir() {
 #if defined(__APPLE__)
     char path[PATH_MAX];
     uint32_t size = sizeof(path);
-    if (_NSGetExecutablePath(path, &size) != 0) return;
     char resolved[PATH_MAX];
-    if (!realpath(path, resolved)) return;
-    std::error_code ec;
-    fs::current_path(fs::path(resolved).parent_path(), ec);
+    if (_NSGetExecutablePath(path, &size) == 0 && realpath(path, resolved)) return fs::path(resolved).parent_path();
 #elif defined(_WIN32)
     char path[MAX_PATH];
-    if (GetModuleFileNameA(nullptr, path, MAX_PATH) == 0) return;
-    std::error_code ec;
-    fs::current_path(fs::path(path).parent_path(), ec);
+    if (GetModuleFileNameA(nullptr, path, MAX_PATH) != 0) return fs::path(path).parent_path();
 #elif defined(__linux__)
     char path[PATH_MAX];
     const ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
-    if (len <= 0) return;
-    path[len] = '\0';
-    std::error_code ec;
-    fs::current_path(fs::path(path).parent_path(), ec);
+    if (len > 0) {
+        path[len] = '\0';
+        return fs::path(path).parent_path();
+    }
 #endif
+    return fs::current_path();
 }
 
-// A spawnable palette entry — either a file-based prop (prim == Prim::None,
-// obj_path/texture_path used) or a built-in primitive/Trigger (prim set,
-// obj_path/texture_path unused, tint used instead since generated shapes
-// have no natural texture atlas convention).
-struct PaletteEntry {
-    Prim prim = Prim::None;
-    std::string obj_path;
-    std::string texture_path;
-    std::string label;
-    rgba tint = white;
-};
+namespace theme {
+const rgba chrome = rgb(0.10f, 0.10f, 0.11f);
+const rgba panel = rgb(0.16f, 0.16f, 0.17f);
+const rgba field = rgb(0.22f, 0.22f, 0.24f);
+const rgba field_hover = rgb(0.27f, 0.27f, 0.30f);
+const rgba field_active = rgb(0.18f, 0.30f, 0.40f);
+const rgba text = rgb(0.88f, 0.88f, 0.88f);
+const rgba dim = rgb(0.58f, 0.58f, 0.62f);
+const rgba faint = rgb(0.42f, 0.42f, 0.45f);
+const rgba accent = rgb(0.95f, 0.55f, 0.18f); // Blender-ish orange: the selection
+const rgba axis_x = rgb(0.92f, 0.28f, 0.30f);
+const rgba axis_y = rgb(0.45f, 0.82f, 0.25f);
+const rgba axis_z = rgb(0.25f, 0.52f, 0.95f);
+const rgba hover = rgb(1.0f, 0.88f, 0.25f);
+} // namespace theme
 
-// Scans `dir` for .obj files. Texture for each is resolved by convention,
-// since load_mesh() doesn't read .mtl: same-basename .png next to the .obj
-// first (chest.obj -> chest.png), else a shared atlas.png/colormap.png in
-// that same folder (the common case for a kit like Kenney's, one atlas
-// shared across many props), else no texture at all.
-std::vector<PaletteEntry> scan_palette(const std::string& dir) {
-    std::vector<PaletteEntry> out;
-    if (!fs::exists(dir)) return out;
-    for (const auto& entry : fs::recursive_directory_iterator(dir)) {
-        if (!entry.is_regular_file() || entry.path().extension() != ".obj") continue;
-        PaletteEntry pe;
-        pe.obj_path = entry.path().string();
-        pe.label = entry.path().stem().string();
-        fs::path same_name = entry.path(); same_name.replace_extension(".png");
-        fs::path atlas_a = entry.path().parent_path() / "atlas.png";
-        fs::path atlas_b = entry.path().parent_path() / "colormap.png";
-        if (fs::exists(same_name)) pe.texture_path = same_name.string();
-        else if (fs::exists(atlas_a)) pe.texture_path = atlas_a.string();
-        else if (fs::exists(atlas_b)) pe.texture_path = atlas_b.string();
-        out.push_back(std::move(pe));
+const char* kind_label(SceneEntity::Kind k) {
+    switch (k) {
+        case SceneEntity::Kind::Empty: return "Empty";
+        case SceneEntity::Kind::Model: return "Model";
+        case SceneEntity::Kind::Box: return "Box";
+        case SceneEntity::Kind::Sphere: return "Sphere";
+        case SceneEntity::Kind::Cylinder: return "Cylinder";
+        case SceneEntity::Kind::Cone: return "Cone";
+        case SceneEntity::Kind::Plane: return "Plane";
+        case SceneEntity::Kind::PointLight: return "Point light";
+        case SceneEntity::Kind::SpotLight: return "Spot light";
+        case SceneEntity::Kind::Trigger: return "Trigger";
+        case SceneEntity::Kind::Spawn: return "Spawn point";
     }
-    std::sort(out.begin(), out.end(), [](const PaletteEntry& a, const PaletteEntry& b) { return a.label < b.label; });
+    return "?";
+}
+
+std::string fmt(float v, int decimals = 2) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.*f", decimals, static_cast<double>(v));
+    std::string s = buf;
+    if (s[0] == '-' && s.find_first_not_of("-0.") == std::string::npos) s.erase(0, 1); // "-0.0" -> "0.0"
+    return s;
+}
+
+float parse_float(const std::string& s, float fallback) {
+    try {
+        size_t used = 0;
+        const float v = std::stof(s, &used);
+        return used > 0 ? v : fallback;
+    } catch (...) {
+        return fallback;
+    }
+}
+
+double now_seconds() {
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now().time_since_epoch()).count();
+}
+
+// Every file under `dir` (recursively) with one of these extensions, as
+// paths relative to the project folder — the form saved into scenes.
+std::vector<std::string> scan(const fs::path& dir, std::initializer_list<const char*> exts) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    if (!fs::exists(dir, ec)) return out;
+    for (auto it = fs::recursive_directory_iterator(dir, ec); it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (ec || !it->is_regular_file()) continue;
+        const std::string name = it->path().filename().string();
+        for (const char* ext : exts) {
+            const std::string e = ext;
+            if (name.size() > e.size() && name.compare(name.size() - e.size(), e.size(), e) == 0) {
+                out.push_back(fs::relative(it->path(), fs::current_path(), ec).generic_string());
+                break;
+            }
+        }
+    }
+    std::sort(out.begin(), out.end());
     return out;
 }
 
-// Always-available built-in shapes — these don't depend on assets/ at all.
-// Trigger is last and visually distinct (cyan, not one of the "real shape"
-// colors) since it's a different kind of thing: pure data, never drawn as a
-// solid mesh by Node::draw_meshes(), just a named volume your own game code
-// interprets — see the Prim::Trigger doc comment in thistle.hpp.
-std::vector<PaletteEntry> primitive_palette() {
-    return {
-        {Prim::Cube,     "", "", "Cube",     rgb(0.85f, 0.35f, 0.3f)},
-        {Prim::Sphere,   "", "", "Sphere",   rgb(0.9f, 0.8f, 0.2f)},
-        {Prim::Cylinder, "", "", "Cylinder", rgb(0.4f, 0.7f, 0.9f)},
-        {Prim::Cone,     "", "", "Cone",     rgb(0.8f, 0.4f, 0.8f)},
-        {Prim::Plane,    "", "", "Plane",    rgb(0.4f, 0.7f, 0.4f)},
-        {Prim::Trigger,  "", "", "Trigger",  rgb(0.25f, 0.9f, 0.85f)},
-    };
+// Closest approach between a ray and an infinite line: the parameter along
+// the line (from `origin`, in units of `dir`).
+float ray_line_param(const Ray& ray, vec3 origin, vec3 dir) {
+    const vec3 w = origin - ray.origin;
+    const float a = dot(dir, dir), b = dot(dir, ray.direction), c = dot(ray.direction, ray.direction);
+    const float d = dot(dir, w), e = dot(ray.direction, w);
+    const float denom = a * c - b * b;
+    if (std::fabs(denom) < 1e-8f) return 0.0f; // parallel
+    return (b * e - c * d) / denom;
 }
 
-// Flattens a tree into visitation order (depth-first, children after their
-// parent), recording each node's depth for the Outliner's indentation.
-void flatten(Node* n, int depth, std::vector<std::pair<Node*, int>>& out) {
-    for (std::size_t i = 0; i < n->child_count(); ++i) {
-        Node* c = n->child(i);
-        out.emplace_back(c, depth);
-        flatten(c, depth + 1, out);
-    }
+float point_segment_distance(vec2 p, vec2 a, vec2 b) {
+    const vec2 ab{b.x - a.x, b.y - a.y};
+    const float len2 = ab.x * ab.x + ab.y * ab.y;
+    float t = len2 > 0.0f ? ((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / len2 : 0.0f;
+    t = std::clamp(t, 0.0f, 1.0f);
+    const float dx = p.x - (a.x + ab.x * t), dy = p.y - (a.y + ab.y * t);
+    return std::sqrt(dx * dx + dy * dy);
 }
 
-// True if `ancestor` is somewhere above `node` in the tree — checked before
-// letting a Ctrl+click reparent `node` onto one of its own descendants,
-// which would otherwise orphan a whole subtree (or, if the reparent target
-// IS a descendant of the thing being moved, silently create a cycle).
-bool is_ancestor_of(Node* ancestor, Node* node) {
-    for (Node* cur = node->parent(); cur; cur = cur->parent()) {
-        if (cur == ancestor) return true;
-    }
-    return false;
+bool point_in_triangle(vec2 p, vec2 a, vec2 b, vec2 c) {
+    auto side = [](vec2 p1, vec2 p2, vec2 p3) { return (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y); };
+    const float d1 = side(p, a, b), d2 = side(p, b, c), d3 = side(p, c, a);
+    const bool neg = d1 < 0 || d2 < 0 || d3 < 0, pos = d1 > 0 || d2 > 0 || d3 > 0;
+    return !(neg && pos);
 }
-
-// Node::draw_meshes() composes a child's mesh_pos/rotation/scale onto its
-// parent's (see its doc comment in thistle.hpp) — this mirrors that exact
-// math to find a node's actual WORLD transform, purely for editor-side needs
-// (the selection cage, mouse picking, drag math). Duplicated rather than
-// exposed from the engine: it's editor-specific, not something worth new
-// public API for.
-vec3 rotate_euler(vec3 v, vec3 rot) {
-    const float cx = std::cos(rot.x), sx = std::sin(rot.x);
-    const float cy = std::cos(rot.y), sy = std::sin(rot.y);
-    const float cz = std::cos(rot.z), sz = std::sin(rot.z);
-    const vec3 after_x{v.x, v.y * cx - v.z * sx, v.y * sx + v.z * cx};
-    const vec3 after_y{after_x.x * cy + after_x.z * sy, after_x.y, -after_x.x * sy + after_x.z * cy};
-    const vec3 after_z{after_y.x * cz - after_y.y * sz, after_y.x * sz + after_y.y * cz, after_y.z};
-    return after_z;
-}
-
-// The exact inverse of rotate_euler() — undoes Z, then Y, then X (reverse
-// order, negated angles), which is what correctly undoes a forward X-then-Y-
-// then-Z rotation. Verified against rotate_euler() with a standalone
-// round-trip test (36 rotation/vector combinations) before this was wired
-// into any drag/reparent math, since rotation order is exactly the kind of
-// thing that's easy to get subtly backwards.
-vec3 rotate_euler_inverse(vec3 v, vec3 rot) {
-    const float cz = std::cos(-rot.z), sz = std::sin(-rot.z);
-    const float cy = std::cos(-rot.y), sy = std::sin(-rot.y);
-    const float cx = std::cos(-rot.x), sx = std::sin(-rot.x);
-    const vec3 after_z{v.x * cz - v.y * sz, v.x * sz + v.y * cz, v.z};
-    const vec3 after_y{after_z.x * cy + after_z.z * sy, after_z.y, -after_z.x * sy + after_z.z * cy};
-    const vec3 after_x{after_y.x, after_y.y * cx - after_y.z * sx, after_y.y * sx + after_y.z * cx};
-    return after_x;
-}
-
-// Inverse of the composition Node::world_mesh_transform() performs one level at a
-// time: given a WORLD point and a parent's already-known world transform,
-// finds the parent-relative mesh_pos that would produce it. Used for both
-// mouse-dragging (convert a ground-plane hit back into the selected node's
-// own mesh_pos) and reparenting (keep an object's world position stable
-// across a parent change). Verified via rotate_euler_inverse()'s own
-// round-trip test — this is just that plus un-scaling.
-vec3 world_to_local(vec3 world_point, const WorldMeshTransform& parent) {
-    const vec3 rotated = world_point - parent.pos;
-    const vec3 scaled_local = rotate_euler_inverse(rotated, parent.rotation);
-    return {
-        parent.scale.x != 0.0f ? scaled_local.x / parent.scale.x : scaled_local.x,
-        parent.scale.y != 0.0f ? scaled_local.y / parent.scale.y : scaled_local.y,
-        parent.scale.z != 0.0f ? scaled_local.z / parent.scale.z : scaled_local.z,
-    };
-}
-
-// --- camera-basis ray casting, for mouse picking/dragging. Built directly
-// from the camera's own eye/target/up/fov rather than a general 4x4 matrix
-// (projection + inverse) — there's exactly one camera here, so a matrix
-// library would be a lot of new code to do the same job. Both directions
-// (world_to_screen and screen_to_ray) were checked together with a
-// standalone round-trip test (project a point, unproject the resulting
-// screen position, confirm it lands back on the original point) before
-// being wired into anything, for the same reason as the rotation inverse
-// above: this is exactly the kind of math that silently comes out backwards.
-struct CameraBasis { vec3 eye, forward, right, up; float tan_half_fov, aspect; };
-
-CameraBasis compute_camera_basis(const Camera3D& cam, float aspect) {
-    const vec3 f = normalize(cam.target - cam.eye);
-    const vec3 r = normalize(cross(f, cam.up));
-    const vec3 u = cross(r, f);
-    const float tan_half = std::tan(cam.fov_deg * (3.14159265f / 180.0f) * 0.5f);
-    return {cam.eye, f, r, u, tan_half, aspect};
-}
-
-struct Ray { vec3 origin, dir; };
-
-Ray screen_to_ray(const CameraBasis& cb, float sx, float sy, float width, float height) {
-    const float ndc_x = (2.0f * sx / width - 1.0f) * cb.aspect * cb.tan_half_fov;
-    const float ndc_y = (1.0f - 2.0f * sy / height) * cb.tan_half_fov;
-    const vec3 dir = normalize(cb.forward + cb.right * ndc_x + cb.up * ndc_y);
-    return {cb.eye, dir};
-}
-
-bool world_to_screen(const CameraBasis& cb, vec3 p, float width, float height, vec2& out) {
-    const vec3 v = p - cb.eye;
-    const float d = dot(v, cb.forward);
-    if (d <= 0.01f) return false; // behind the camera
-    const float x_view = dot(v, cb.right);
-    const float y_view = dot(v, cb.up);
-    const float ndc_x = x_view / (d * cb.tan_half_fov * cb.aspect);
-    const float ndc_y = y_view / (d * cb.tan_half_fov);
-    out = {(ndc_x * 0.5f + 0.5f) * width, (1.0f - (ndc_y * 0.5f + 0.5f)) * height};
-    return true;
-}
-
-bool ray_plane_y(const Ray& ray, float plane_y, vec3& out) {
-    if (std::fabs(ray.dir.y) < 1e-5f) return false; // parallel to the plane
-    const float t = (plane_y - ray.origin.y) / ray.dir.y;
-    if (t < 0.0f) return false; // plane is behind the ray's origin
-    out = ray.origin + ray.dir * t;
-    return true;
-}
-
-// A wireframe box, rotation-aware (unlike a naive axis-aligned cage) — used
-// for both the selection highlight (stands in for Blender's orange outline;
-// there's no outline-shader equivalent here, no shader stage at all) and
-// every Trigger volume's visualization, since a trigger that's been rotated
-// needs to visibly LOOK rotated or its bounds are actively misleading.
-void draw_wire_box(Frame& f, vec3 center, vec3 rot, vec3 half_extent, rgba color) {
-    const float hx = half_extent.x, hy = half_extent.y, hz = half_extent.z;
-    const vec3 local[8] = {
-        {-hx, -hy, -hz}, {hx, -hy, -hz}, {hx, hy, -hz}, {-hx, hy, -hz},
-        {-hx, -hy, hz}, {hx, -hy, hz}, {hx, hy, hz}, {-hx, hy, hz},
-    };
-    vec3 c[8];
-    for (int i = 0; i < 8; ++i) c[i] = center + rotate_euler(local[i], rot);
-    static constexpr int edges[12][2] = {
-        {0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6}, {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7},
-    };
-    for (const auto& e : edges) f.line3d(c[e[0]], c[e[1]], color);
-}
-
-// A viewport grid instead of a flat-shaded ground plane — closer to how
-// Blender's/Unity's viewports actually read at a glance. X is red, Z is
-// blue (this engine is Y-up, so the ground plane is XZ, not Blender's XY —
-// colors otherwise follow the same red/green/blue = X/Y/Z convention every
-// one of these tools uses). The short green stub at the origin stands in
-// for Y, which has no ground line of its own.
-void draw_grid(Frame& f, float half_size, float step) {
-    const rgba line_color = rgb(0.32f, 0.32f, 0.35f);
-    for (float v = -half_size; v <= half_size + 0.001f; v += step) {
-        if (std::fabs(v) < 0.001f) continue; // the two axis lines are drawn separately, in color
-        f.line3d({v, 0, -half_size}, {v, 0, half_size}, line_color);
-        f.line3d({-half_size, 0, v}, {half_size, 0, v}, line_color);
-    }
-    f.line3d({-half_size, 0, 0}, {half_size, 0, 0}, rgb(0.75f, 0.28f, 0.28f)); // X
-    f.line3d({0, 0, -half_size}, {0, 0, half_size}, rgb(0.3f, 0.45f, 0.85f)); // Z
-    f.line3d({0, 0, 0}, {0, half_size * 0.1f, 0}, rgb(0.35f, 0.75f, 0.4f));   // Y stub
-}
-
-// One-line display label for a node, used by both the Outliner and the
-// Inspector: the shape/kind, plus ": name" if one's been set via the
-// Inspector's Name field.
-std::string node_label(Node* n) {
-    std::string base;
-    if (n->mesh_prim == Prim::Trigger) {
-        base = "Trigger";
-    } else if (n->mesh_prim != Prim::None) {
-        base = n->mesh_prim == Prim::Cube ? "Cube" : n->mesh_prim == Prim::Sphere ? "Sphere"
-             : n->mesh_prim == Prim::Cylinder ? "Cylinder" : n->mesh_prim == Prim::Cone ? "Cone" : "Plane";
-        if (!n->mesh.valid()) base = "(invalid) " + base;
-    } else {
-        base = fs::path(n->mesh_path).stem().string();
-        if (base.empty()) base = "(unnamed)";
-    }
-    return n->name.empty() ? base : base + ": " + n->name;
-}
-
-// Dark neutral-gray palette (sampled from an actual Blender screenshot, not
-// guessed from memory) plus one warm accent color for selection/primary
-// actions — Blender's own selection color is closer to orange, used here too.
-namespace theme {
-const rgba chrome   = rgb(0.09f, 0.09f, 0.10f);  // top bar, outer panel background
-const rgba panel    = rgb(0.15f, 0.15f, 0.16f);  // hierarchy/inspector body
-const rgba viewport_clear = rgb(0.14f, 0.15f, 0.17f);
-const rgba text_dim = rgb(0.6f, 0.6f, 0.65f);
-const rgba text_dim2 = rgb(0.5f, 0.5f, 0.5f);
-const rgba accent   = rgb(0.85f, 0.5f, 0.18f);   // Blender-orange selection accent
-} // namespace theme
 
 } // namespace
 
-int main() {
-    chdir_to_executable_dir();
+int main(int argc, char** argv) {
+    const fs::path editor_dir = executable_dir();
+    {
+        std::error_code ec;
+        const fs::path cwd = fs::current_path(ec);
+        // A folder on the command line is the game to edit. (Finder may add a
+        // "-psn_..." argument to an app it launches; that isn't one.)
+        if (argc >= 2 && std::string(argv[1]).rfind("-psn", 0) != 0) fs::current_path(argv[1], ec);
+        else if (!(fs::exists(cwd / "assets") || fs::exists(cwd / "thistle.json"))) fs::current_path(editor_dir, ec);
+        if (ec) log_warn("Thistle Editor: couldn't open the project folder: " + ec.message());
+    }
 
-    App app{{.title = "Thistle Editor", .width = 1280, .height = 800}};
+    App app{{.title = "Thistle Editor", .width = 1440, .height = 860}};
+    load_font((editor_dir / "editor_assets" / "inter-regular.ttf").string());
 
-    // Without a loaded font, f.text()/f.button() silently draw nothing —
-    // there's no built-in fallback font anywhere in Thistle, by design (see
-    // docs/drawing.md), so every real UI has to bring its own. This is the
-    // editor's own UI font (Inter Regular, OFL — the same font Blender's own
-    // UI uses), unrelated to whatever font the props being placed might want.
-    load_font("editor_assets/inter-regular.ttf");
-
-    const std::vector<PaletteEntry> file_palette = scan_palette("assets");
-    const std::vector<PaletteEntry> primitives = primitive_palette();
-    // What the right-click context menu offers to spawn — primitives first,
-    // then whatever real models were found under assets/.
-    std::vector<PaletteEntry> spawnable = primitives;
-    spawnable.insert(spawnable.end(), file_palette.begin(), file_palette.end());
-
-    // Dedups GPU uploads across repeated spawns of the same palette entry —
-    // load_scene() keeps its own separate caches internally, so a loaded
-    // prop and a palette-spawned one sharing a path may double-upload; a
-    // cosmetic inefficiency, not a correctness issue (same as sprite_path).
-    // Primitives aren't cached here — each spawn gets a fresh generated Mesh,
-    // same as load_scene() does for a mesh_prim node.
-    std::unordered_map<std::string, Mesh> mesh_cache;
-    std::unordered_map<std::string, Texture> tex_cache;
-    auto get_mesh = [&](const std::string& path) {
-        auto it = mesh_cache.find(path);
-        if (it == mesh_cache.end()) it = mesh_cache.emplace(path, load_mesh(path)).first;
-        return it->second;
-    };
-    auto get_tex = [&](const std::string& path) -> Texture {
-        if (path.empty()) return Texture{};
-        auto it = tex_cache.find(path);
-        if (it == tex_cache.end()) it = tex_cache.emplace(path, load_texture(path)).first;
-        return it->second;
+    // ---------------------------------------------------------------- state
+    Scene3D scene;
+    std::vector<int> selection;
+    enum class Tool { Move, Rotate, Scale } tool = Tool::Move;
+    std::string file_path;
+    bool dirty = false;
+    std::string status;
+    double status_time = 0.0;
+    auto say = [&](const std::string& s) {
+        status = s;
+        status_time = now_seconds();
+        log_info("Thistle Editor: " + s);
     };
 
-    auto scene = std::make_unique<Node>();
-    Node* selected = nullptr;
+    // Camera: orbits `target` (Blender), or flies (right button held).
+    vec3 target{0, 0.5f, 0};
+    float yaw = radians(35.0f), pitch = radians(-28.0f), distance = 14.0f;
+    bool flying = false;
+    Camera camera;
 
-    const std::string save_file = save::path();
-    const std::string scene_path = save_file.substr(0, save_file.find_last_of("/\\")) + "/thistle_editor_scene.json";
+    // Undo: whole-scene JSON snapshots.
+    std::vector<std::string> undo_stack, redo_stack;
+    std::string edit_before; // snapshot taken when a drag/edit began
+    bool editing = false;
+    auto record = [&] { // call right before a one-shot change
+        undo_stack.push_back(scene.to_json());
+        if (undo_stack.size() > 200) undo_stack.erase(undo_stack.begin());
+        redo_stack.clear();
+        dirty = true;
+    };
+    auto begin_edit = [&] {
+        if (editing) return;
+        edit_before = scene.to_json();
+        editing = true;
+    };
+    auto end_edit = [&] {
+        if (!editing) return;
+        editing = false;
+        if (scene.to_json() == edit_before) return; // a click without a change
+        undo_stack.push_back(edit_before);
+        if (undo_stack.size() > 200) undo_stack.erase(undo_stack.begin());
+        redo_stack.clear();
+        dirty = true;
+    };
+    auto clamp_selection = [&] {
+        const int n = static_cast<int>(scene.entities.size());
+        selection.erase(std::remove_if(selection.begin(), selection.end(), [&](int i) { return i < 0 || i >= n; }), selection.end());
+    };
+    auto undo = [&] {
+        if (undo_stack.empty()) return say("nothing to undo");
+        redo_stack.push_back(scene.to_json());
+        scene.from_json(undo_stack.back());
+        undo_stack.pop_back();
+        clamp_selection();
+        dirty = true;
+    };
+    auto redo = [&] {
+        if (redo_stack.empty()) return say("nothing to redo");
+        undo_stack.push_back(scene.to_json());
+        scene.from_json(redo_stack.back());
+        redo_stack.pop_back();
+        clamp_selection();
+        dirty = true;
+    };
 
-    auto spawn = [&](const PaletteEntry& pe, Node* parent) {
-        Node* n = parent->add_child();
-        if (pe.prim != Prim::None) {
-            n->mesh_prim = pe.prim;
-            switch (pe.prim) {
-                case Prim::Cube:     n->mesh = make_cube_mesh(); break;
-                case Prim::Sphere:   n->mesh = make_sphere_mesh(); break;
-                case Prim::Cylinder: n->mesh = make_cylinder_mesh(); break;
-                case Prim::Cone:     n->mesh = make_cone_mesh(); break;
-                case Prim::Plane:    n->mesh = make_plane_mesh(); break;
-                case Prim::Trigger:  break; // pure data — no geometry, ever
-                case Prim::None:     break;
-            }
-            n->mesh_tint = pe.tint;
-        } else {
-            n->mesh_path = pe.obj_path;
-            n->mesh_texture_path = pe.texture_path;
-            n->mesh = get_mesh(pe.obj_path);
-            n->mesh_texture = get_tex(pe.texture_path);
+    std::vector<std::string> model_files = scan("assets", {".glb", ".gltf", ".obj"});
+    std::vector<std::string> scene_files;
+    auto rescan = [&] {
+        model_files = scan("assets", {".glb", ".gltf", ".obj"});
+        // Scenes live in assets/ so they ship with the game (only assets/ is
+        // bundled). Also any lying right in the project folder, but not deeper:
+        // build folders hold far too many files to walk every time.
+        scene_files = scan("assets", {".scene.json"});
+        std::error_code ec;
+        for (auto it = fs::directory_iterator(".", ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+            const std::string name = it->path().filename().string();
+            if (it->is_regular_file(ec) && name.size() > 11 && name.compare(name.size() - 11, 11, ".scene.json") == 0) scene_files.push_back(name);
         }
-        if (parent == scene.get()) {
-            // Fan root-level spawns out in a grid instead of stacking them
-            // all at the origin, so the last-placed one isn't hidden inside
-            // the others.
-            const int i = static_cast<int>(parent->child_count()) - 1;
-            n->mesh_pos = {static_cast<float>(i % 5) * 1.5f - 3.0f, 0.0f, static_cast<float>(i / 5) * 1.5f};
-        } else {
-            // Child spawns are relative to the parent (see Node::draw_meshes()) —
-            // a small offset so it's visibly next to its parent, not exactly
-            // overlapping it.
-            n->mesh_pos = {0.4f, 0.4f, 0.0f};
+    };
+    rescan();
+
+    auto unique_name = [&](const std::string& base) {
+        if (scene.find(base) < 0) return base;
+        for (int i = 2;; ++i) {
+            const std::string n = base + " " + std::to_string(i);
+            if (scene.find(n) < 0) return n;
         }
-        selected = n;
     };
 
-    // Re-parents `child` onto `new_parent`, preserving its world position
-    // (rotation/scale are NOT re-based — child keeps its own mesh_rotation/
-    // mesh_scale values, which now apply on top of new_parent's, so its
-    // world rotation/scale can visibly shift if new_parent has a non-
-    // identity one; fixing that too means solving for a compensating local
-    // rotation/scale, which is real extra math for a case that's not the
-    // common one — reparenting under a plain, unrotated/unscaled group node
-    // works exactly as expected).
-    auto reparent = [&](Node* child, Node* new_parent) {
-        const WorldMeshTransform child_world = child->world_mesh_transform();
-        Node* old_parent = child->parent();
-        std::unique_ptr<Node> detached = old_parent->detach_child(child);
-        if (!detached) return;
-        Node* raw = new_parent->add_child(std::move(detached));
-        const WorldMeshTransform new_parent_world = new_parent->world_mesh_transform();
-        raw->mesh_pos = world_to_local(child_world.pos, new_parent_world);
-        selected = raw;
+    auto new_scene = [&] {
+        scene = Scene3D{};
+        SceneEntity ground;
+        ground.name = "Ground";
+        ground.kind = SceneEntity::Kind::Plane;
+        ground.transform.scale = {30, 1, 30};
+        ground.color = rgb(0.42f, 0.55f, 0.36f);
+        scene.add(ground);
+        SceneEntity start;
+        start.name = "player_start";
+        start.kind = SceneEntity::Kind::Spawn;
+        start.color = rgb(0.3f, 0.9f, 0.4f);
+        start.transform.position = {0, 0, 4};
+        scene.add(start);
+        selection.clear();
+        file_path.clear();
+        undo_stack.clear();
+        redo_stack.clear();
+        dirty = false;
     };
+    new_scene();
 
-    auto do_save = [&] {
-        const bool ok = save_scene(*scene, scene_path);
-        log_info(std::string("Thistle Editor: save ") + (ok ? "ok -> " : "FAILED -> ") + scene_path);
+    auto save_to = [&](const std::string& path) {
+        std::error_code ec;
+        if (fs::path(path).has_parent_path()) fs::create_directories(fs::path(path).parent_path(), ec);
+        if (scene.save(path)) {
+            file_path = path;
+            dirty = false;
+            say("saved " + path);
+            rescan();
+        } else {
+            say("couldn't save " + path);
+        }
     };
-    auto do_load = [&] {
-        std::unique_ptr<Node> loaded = load_scene(scene_path);
-        if (!loaded) { log_info("Thistle Editor: nothing to load at " + scene_path); return; }
+    auto open_file = [&](const std::string& path) {
+        Scene3D loaded;
+        if (!loaded.load(path)) return say("couldn't read " + path + " as a scene");
         scene = std::move(loaded);
-        selected = nullptr;
-        log_info("Thistle Editor: loaded " + scene_path);
+        file_path = path;
+        selection.clear();
+        undo_stack.clear();
+        redo_stack.clear();
+        dirty = false;
+        say("opened " + path);
     };
 
-    float cam_yaw = 0.6f;
-    float cam_pitch = 0.5236f; // ~30 degrees, matches the old fixed-eye-height default view
-    float cam_dist = 9.0f;
-    bool orbiting = false;
-    vec2 orbit_last_mouse{};
-    bool dragging_object = false;
-    vec3 drag_offset{};   // world-space offset between the ground hit and the object's position, captured at drag start
-    float drag_plane_y = 0.0f;
-    bool editing_name = false; // begin_text_input() is active for selected->name
+    // The editor before this one placed minor-3D props as a Node tree, one
+    // layout kept in the save folder. Offer to bring that across.
+    const std::string old_layout = [] {
+        const std::string s = save::path();
+        return s.substr(0, s.find_last_of("/\\") + 1) + "thistle_editor_scene.json";
+    }();
+    const std::string import_label = "Import the old editor's layout";
+    auto import_old_layout = [&] {
+        std::unique_ptr<Node> root;
+        try {
+            root = load_scene(old_layout);
+        } catch (const std::exception&) { // load_scene() throws on a malformed file
+        }
+        if (!root) return say("couldn't read the old layout (" + old_layout + ")");
+        Scene3D s;
+        // Node meshes turn X, then Y, then Z (Frame::mesh3d's sgl_rotate order).
+        auto old_rotation = [](vec3 e) {
+            return quat::axis_angle({1, 0, 0}, e.x) * quat::axis_angle({0, 1, 0}, e.y) * quat::axis_angle({0, 0, 1}, e.z);
+        };
+        std::function<void(const Node&, int)> walk = [&](const Node& n, int parent) {
+            for (size_t i = 0; i < n.child_count(); ++i) {
+                const Node& c = *n.child(i);
+                SceneEntity e;
+                e.parent = parent;
+                e.color = c.mesh_tint;
+                switch (c.mesh_prim) {
+                    case Prim::Cube: e.kind = SceneEntity::Kind::Box; break;
+                    case Prim::Sphere: e.kind = SceneEntity::Kind::Sphere; break;
+                    case Prim::Cylinder: e.kind = SceneEntity::Kind::Cylinder; break;
+                    case Prim::Cone: e.kind = SceneEntity::Kind::Cone; break;
+                    case Prim::Plane: e.kind = SceneEntity::Kind::Plane; break;
+                    case Prim::Trigger: e.kind = SceneEntity::Kind::Trigger; break;
+                    case Prim::None: e.kind = c.mesh_path.empty() ? SceneEntity::Kind::Empty : SceneEntity::Kind::Model; break;
+                }
+                if (e.kind == SceneEntity::Kind::Model) {
+                    std::error_code ec;
+                    const fs::path rel = fs::path(c.mesh_path).is_absolute() ? fs::relative(c.mesh_path, fs::current_path(), ec) : fs::path(c.mesh_path);
+                    e.model = (ec || rel.empty() ? fs::path(c.mesh_path) : rel).generic_string();
+                }
+                e.name = !c.name.empty() ? c.name : e.kind == SceneEntity::Kind::Model ? fs::path(c.mesh_path).stem().string() : kind_label(e.kind);
+                const int idx = s.add(e);
+                // Node trees add rotations per axis down the chain; Scene3D
+                // composes them properly. Placing each one at the world
+                // transform the old editor showed keeps things where they were.
+                const WorldMeshTransform w = c.world_mesh_transform();
+                s.set_world_transform(idx, Transform{w.pos, old_rotation(w.rotation), w.scale});
+                walk(c, idx);
+            }
+        };
+        walk(*root, -1);
+        scene = std::move(s);
+        file_path.clear();
+        selection.clear();
+        undo_stack.clear();
+        redo_stack.clear();
+        dirty = true;
+        say("imported " + std::to_string(scene.entities.size()) + " things from the old editor: Save as to keep them");
+    };
 
-    // Right-click context menu state (Outliner only). AddAtRoot: right-
-    // clicked empty Outliner space, menu offers every spawnable entry,
-    // spawning at the scene root. NodeContext: right-clicked an existing
-    // row, menu offers Delete plus every spawnable entry as a child of
-    // that row specifically (not necessarily the current selection).
-    enum class MenuKind { None, AddAtRoot, NodeContext };
-    MenuKind menu_kind = MenuKind::None;
-    vec2 menu_pos{};
-    Node* menu_target = nullptr;
+    // Selected entities whose ancestors aren't also selected: moving a
+    // parent already moves its children.
+    auto selection_roots = [&] {
+        std::vector<int> roots;
+        std::unordered_set<int> sel(selection.begin(), selection.end());
+        for (int i : selection) {
+            bool covered = false;
+            for (int p = scene.entities[static_cast<size_t>(i)].parent, steps = 0; p >= 0 && steps < 10000; p = scene.entities[static_cast<size_t>(p)].parent, ++steps) {
+                if (sel.count(p)) { covered = true; break; }
+            }
+            if (!covered) roots.push_back(i);
+        }
+        return roots;
+    };
+    auto world_box = [&](int i) { // the entity's box in the world (axis-aligned around its oriented box)
+        const Transform t = scene.world_transform(i);
+        return scene.local_bounds(i).transformed(t.matrix());
+    };
+    auto selection_bounds = [&] {
+        Bounds b;
+        for (int i : selection) {
+            const Bounds w = world_box(i);
+            if (w.valid()) { b.add(w.min); b.add(w.max); }
+        }
+        return b;
+    };
 
-    // Layout constants — sized for the 1280x800 default window; everything
-    // below is computed off f.width/f.height so it still lays out sanely if
-    // the window is resized.
-    constexpr float TOP_H = 42.0f;
-    constexpr float LEFT_W = 230.0f;
-    constexpr float RIGHT_W = 260.0f;
+    auto add_entity = [&](SceneEntity e) {
+        record();
+        e.name = unique_name(e.name.empty() ? kind_label(e.kind) : e.name);
+        // Dropped where the view is centered, resting on the ground.
+        const vec3 at{target.x, 0.0f, target.z};
+        Bounds lb;
+        const int index = scene.add(e);
+        lb = scene.local_bounds(index);
+        const float lift = e.kind == SceneEntity::Kind::PointLight || e.kind == SceneEntity::Kind::SpotLight ? 3.0f
+                           : lb.valid() ? -lb.min.y * e.transform.scale.y : 0.0f;
+        scene.entities.back().transform.position = at + vec3{0, lift, 0};
+        selection = {index};
+    };
+    auto add_kind = [&](SceneEntity::Kind k) {
+        SceneEntity e;
+        e.kind = k;
+        switch (k) {
+            case SceneEntity::Kind::Box: e.color = rgb(0.75f, 0.6f, 0.45f); break;
+            case SceneEntity::Kind::Sphere: e.color = rgb(0.85f, 0.35f, 0.3f); break;
+            case SceneEntity::Kind::Cylinder: e.color = rgb(0.4f, 0.6f, 0.85f); break;
+            case SceneEntity::Kind::Cone: e.color = rgb(0.8f, 0.7f, 0.3f); break;
+            case SceneEntity::Kind::Plane: e.color = rgb(0.6f, 0.6f, 0.6f); e.transform.scale = {4, 1, 4}; break;
+            case SceneEntity::Kind::PointLight: e.color = rgb(1.0f, 0.85f, 0.6f); e.intensity = 2.0f; break;
+            case SceneEntity::Kind::SpotLight:
+                e.color = rgb(1.0f, 0.95f, 0.85f);
+                e.intensity = 3.0f;
+                e.range = 15.0f;
+                e.transform.rotation = quat::euler(radians(-60.0f), 0);
+                break;
+            case SceneEntity::Kind::Trigger: e.color = rgb(0.25f, 0.9f, 0.85f); e.transform.scale = {3, 2, 3}; break;
+            case SceneEntity::Kind::Spawn: e.color = rgb(0.3f, 0.9f, 0.4f); break;
+            default: break;
+        }
+        add_entity(e);
+    };
+    auto add_model = [&](const std::string& path) {
+        SceneEntity e;
+        e.kind = SceneEntity::Kind::Model;
+        e.model = path;
+        e.name = fs::path(path).stem().string();
+        add_entity(e);
+    };
+
+    auto delete_selection = [&] {
+        if (selection.empty()) return;
+        record();
+        std::vector<int> doomed = selection;
+        std::sort(doomed.begin(), doomed.end(), std::greater<int>());
+        for (int i : doomed) {
+            if (i < static_cast<int>(scene.entities.size())) scene.remove(i); // (a child may already be gone with its parent)
+        }
+        selection.clear();
+    };
+    auto duplicate_selection = [&] {
+        const std::vector<int> roots = selection_roots();
+        if (roots.empty()) return;
+        record();
+        std::vector<int> fresh;
+        std::function<void(int, int)> copy = [&](int src, int parent) {
+            SceneEntity e = scene.entities[static_cast<size_t>(src)];
+            e.name = unique_name(e.name);
+            const int kept_parent = e.parent;
+            e.parent = parent == -2 ? kept_parent : parent;
+            const int dst = scene.add(e);
+            if (parent == -2) fresh.push_back(dst);
+            for (int c : scene.children(src)) {
+                if (c != dst) copy(c, dst);
+            }
+        };
+        for (int r : roots) copy(r, -2); // -2: keep the original's parent
+        selection = fresh;
+        say("duplicated " + std::to_string(fresh.size()) + " (move them with the gizmo)");
+    };
+    auto frame_selection = [&] {
+        const Bounds b = selection.empty() ? Bounds{} : selection_bounds();
+        if (!b.valid()) {
+            target = {0, 0.5f, 0};
+            distance = 14.0f;
+            return;
+        }
+        target = b.center();
+        const vec3 s = b.size();
+        distance = std::clamp(std::max({s.x, s.y, s.z}) * 1.6f + 1.5f, 1.5f, 400.0f);
+    };
+
+    // ------------------------------------------------------ gizmo state
+    enum Handle { None = -1, AxisX, AxisY, AxisZ, PlaneYZ, PlaneXZ, PlaneXY, Uniform };
+    int hot_handle = None, active_handle = None;
+    struct DragStart {
+        vec2 mouse;
+        vec3 pivot;
+        float axis_param = 0.0f;
+        vec3 plane_hit;
+        std::vector<std::pair<int, Transform>> worlds;
+    } drag;
+
+    // --------------------------------------------------- widget state
+    std::string active_field;   // a number field being dragged
+    std::string text_field;     // a text field being typed into ("" = none)
+    std::function<void(const std::string&)> text_commit;
+    Rect text_rect{};           // where the field being typed into is, this frame
+    // A typed number goes back to its field by id and is applied there, the
+    // way a drag is: some fields edit values rebuilt every frame (rotation
+    // as angles, the sun's direction), so there's nothing lasting to point at.
+    std::string typed_id, typed_text;
+    double last_click = 0.0;
+    std::string last_click_id;
+    enum class Popup { None, Open, Add, AddModel, SaveAs, Context, ChangeModel, Confirm } popup = Popup::None;
+    vec2 popup_at{};
+    int context_entity = -1;
+    // New/Open with unsaved changes asks first: they clear the undo history,
+    // so there'd be no getting the changes back.
+    std::string confirm_text;
+    std::function<void()> confirm_action;
+    auto unless_unsaved = [&](const std::string& what, std::function<void()> action) {
+        if (!dirty) return action();
+        confirm_text = what;
+        confirm_action = std::move(action);
+        popup = Popup::Confirm;
+    };
+    int outliner_drag = -1;
+    vec2 outliner_press{};
+    bool outliner_dragging = false;
+    float outliner_scroll = 0.0f;
+    bool prev_left = false;
 
     app.update([&](Frame f) {
-        const float win_w = static_cast<float>(f.width);
-        const float win_h = static_cast<float>(f.height);
-        const auto in_viewport = [&](vec2 p) {
-            return p.x > LEFT_W && p.x < win_w - RIGHT_W && p.y > TOP_H;
-        };
+        const float W = static_cast<float>(f.width), H = static_cast<float>(f.height);
+        constexpr float TOP = 40.0f, LEFT = 250.0f, RIGHT = 310.0f, BOTTOM = 26.0f;
+        const Rect view{{LEFT, TOP}, {std::max(W - LEFT - RIGHT, 50.0f), std::max(H - TOP - BOTTOM, 50.0f)}};
+        const vec2 m = f.mouse();
+        const bool left_down = f.mouse_down(Mouse::Left);
+        const bool left_pressed = f.mouse_pressed(Mouse::Left);
+        const bool left_released = prev_left && !left_down;
+        prev_left = left_down;
+        const Popup popup_before = popup; // a popup opened by this frame's click mustn't close on that same click
+        const bool ctrl = f.key_down(Key::LeftControl) || f.key_down(Key::RightControl) || f.key_down(Key::LeftSuper);
+        const bool shift = f.key_down(Key::LeftShift) || f.key_down(Key::RightShift);
+        const bool alt = f.key_down(Key::LeftAlt) || f.key_down(Key::RightAlt);
+        const bool typing = !text_field.empty();
+        const bool popup_open = popup != Popup::None;
+        const bool over_view = view.contains(m) && !popup_open;
 
-        f.clear(theme::viewport_clear);
-
-        // Whole-tree flatten (with depth, for the Outliner's indentation) —
-        // needed before mouse picking below, not just for the Outliner
-        // itself further down. Cheap at editor-scale prop counts.
-        std::vector<std::pair<Node*, int>> all;
-        flatten(scene.get(), 0, all);
-
-        // ---- camera: spherical orbit around the origin. Left/Right/Up/Down
-        // keys or right-click-drag for yaw/pitch, scroll wheel or Up/Down
-        // for zoom. ----
-        cam_pitch = std::max(-1.5f, std::min(1.5f, cam_pitch));
-        Camera3D cam;
-        cam.eye = {
-            cam_dist * std::cos(cam_pitch) * std::sin(cam_yaw),
-            cam_dist * std::sin(cam_pitch),
-            cam_dist * std::cos(cam_pitch) * std::cos(cam_yaw),
-        };
-        cam.target = {0.0f, 0.0f, 0.0f};
-        const float aspect = win_h > 0.0f ? win_w / win_h : 1.0f;
-        const CameraBasis basis = compute_camera_basis(cam, aspect);
-
-        const bool ctrl = f.key_down(Key::LeftControl);
-
-        // A text field (the Inspector's Name box) is capturing keystrokes —
-        // suppress every other keyboard/mouse shortcut below so typing a
-        // name doesn't also move the selected prop, delete it, save, etc.
-        // The engine's own text_capturing mechanism keeps accumulating
-        // characters into text_input() regardless of what we do here.
-        if (!editing_name) {
-            if (f.key_down(Key::Left))  cam_yaw -= f.dt * 1.5f;
-            if (f.key_down(Key::Right)) cam_yaw += f.dt * 1.5f;
-            if (f.key_down(Key::Up))    cam_dist = std::max(2.0f, cam_dist - f.dt * 6.0f);
-            if (f.key_down(Key::Down))  cam_dist = std::min(30.0f, cam_dist + f.dt * 6.0f);
-
-            const float scroll = f.mouse_scroll();
-            if (scroll != 0.0f) cam_dist = std::max(2.0f, std::min(30.0f, cam_dist - scroll * 0.5f));
-
-            if (f.mouse_pressed(Mouse::Right)) { orbiting = true; orbit_last_mouse = f.mouse(); }
-            if (!f.mouse_down(Mouse::Right)) orbiting = false;
-            if (orbiting) {
-                const vec2 m = f.mouse();
-                cam_yaw += (m.x - orbit_last_mouse.x) * 0.005f;
-                cam_pitch = std::max(-1.5f, std::min(1.5f, cam_pitch - (m.y - orbit_last_mouse.y) * 0.005f));
-                orbit_last_mouse = m;
+        // ------------------------------------------------------ camera
+        const vec2 d = f.mouse_delta();
+        if (f.mouse_pressed(Mouse::Right) && over_view) {
+            flying = true;
+            lock_mouse(true);
+        }
+        if (flying && !f.mouse_down(Mouse::Right)) {
+            flying = false;
+            lock_mouse(false);
+        }
+        if (flying) {
+            yaw -= d.x * 0.0035f;
+            pitch = std::clamp(pitch - d.y * 0.0035f, radians(-89.0f), radians(89.0f));
+            const quat r = quat::euler(pitch, yaw);
+            vec3 move{};
+            if (f.key_down(Key::W)) move = move + r.forward();
+            if (f.key_down(Key::S)) move = move - r.forward();
+            if (f.key_down(Key::D)) move = move + r.right();
+            if (f.key_down(Key::A)) move = move - r.right();
+            if (f.key_down(Key::E)) move = move + vec3{0, 1, 0};
+            if (f.key_down(Key::Q)) move = move - vec3{0, 1, 0};
+            const float speed = std::max(3.0f, distance * 0.9f) * (shift ? 3.0f : 1.0f);
+            if (length(move) > 0.0f) target = target + normalize(move) * (speed * f.dt);
+        } else if (over_view || active_field == "#orbit" || active_field == "#pan") {
+            const bool mid = f.mouse_down(Mouse::Middle);
+            const bool orbit_drag = (mid && !shift) || (alt && left_down && !shift);
+            const bool pan_drag = (mid && shift) || (alt && left_down && shift);
+            if (orbit_drag) {
+                yaw -= d.x * 0.006f;
+                pitch = std::clamp(pitch - d.y * 0.006f, radians(-89.0f), radians(89.0f));
+            } else if (pan_drag) {
+                const quat r = quat::euler(pitch, yaw);
+                const float k = distance * 0.0016f;
+                target = target - r.right() * (d.x * k) + r.up() * (d.y * k);
             }
+            if (over_view && f.mouse_scroll() != 0.0f) distance = std::clamp(distance * (1.0f - f.mouse_scroll() * 0.12f), 0.5f, 800.0f);
+        }
+        if (!typing && !flying && over_view) {
+            if (f.key_pressed(Key::Keypad1)) { yaw = 0; pitch = 0; }
+            if (f.key_pressed(Key::Keypad3)) { yaw = radians(90.0f); pitch = 0; }
+            if (f.key_pressed(Key::Keypad7)) { yaw = 0; pitch = radians(-89.9f); }
+        }
+        camera.rotation = quat::euler(pitch, yaw);
+        camera.position = target - camera.rotation.forward() * distance;
+        camera.near_z = std::max(0.02f, distance * 0.005f);
+        camera.far_z = std::max(500.0f, distance * 20.0f);
 
-            // ---- mouse: click to select (nearest projected node within a
-            // pixel threshold) + drag along the ground plane at the node's
-            // current height. Clicking empty viewport space deselects,
-            // matching Blender's/Unity's own convention. ----
-            if (f.mouse_pressed(Mouse::Left) && in_viewport(f.mouse())) {
-                Node* best = nullptr;
-                float best_dist = 40.0f; // px
-                for (auto& [node, depth] : all) {
-                    const WorldMeshTransform wt = node->world_mesh_transform();
-                    vec2 screen;
-                    if (!world_to_screen(basis, wt.pos, win_w, win_h, screen)) continue;
-                    const float dx = screen.x - f.mouse().x, dy = screen.y - f.mouse().y;
-                    const float d = std::sqrt(dx * dx + dy * dy);
-                    if (d < best_dist) { best_dist = d; best = node; }
-                }
-                selected = best;
-                dragging_object = false;
-                if (selected) {
-                    const WorldMeshTransform wt = selected->world_mesh_transform();
-                    drag_plane_y = wt.pos.y;
-                    const Ray ray = screen_to_ray(basis, f.mouse().x, f.mouse().y, win_w, win_h);
-                    vec3 hit;
-                    if (ray_plane_y(ray, drag_plane_y, hit)) {
-                        drag_offset = wt.pos - hit;
-                        dragging_object = true;
+        // ------------------------------------------------------ gizmo geometry
+        const std::vector<int> roots = selection_roots();
+        vec3 pivot{};
+        for (int i : roots) pivot = pivot + scene.world_transform(i).position;
+        if (!roots.empty()) pivot = pivot / static_cast<float>(roots.size());
+        vec2 pivot_s{};
+        const bool gizmo_visible = !roots.empty() && camera.world_to_screen(pivot, view, pivot_s);
+        const float gizmo_len = length(camera.position - pivot) * 0.17f;
+        // Move and rotate go along the world's axes; scale along the object's
+        // own (a single selection's), since that's what scale means.
+        vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        if (tool == Tool::Scale && roots.size() == 1) {
+            const quat r = scene.world_transform(roots[0]).rotation;
+            axes[0] = r * vec3{1, 0, 0};
+            axes[1] = r * vec3{0, 1, 0};
+            axes[2] = r * vec3{0, 0, 1};
+        }
+        auto project = [&](vec3 p) {
+            vec2 s;
+            return camera.world_to_screen(p, view, s) ? s : pivot_s;
+        };
+        auto ring_points = [&](int axis) {
+            std::vector<vec2> pts;
+            const vec3 a = axes[(axis + 1) % 3], b = axes[(axis + 2) % 3];
+            for (int k = 0; k <= 48; ++k) {
+                const float t = 2.0f * pi * k / 48.0f;
+                pts.push_back(project(pivot + (a * std::cos(t) + b * std::sin(t)) * gizmo_len));
+            }
+            return pts;
+        };
+        auto plane_corners = [&](int handle, vec2 out[4]) {
+            const int n = handle - PlaneYZ; // the axis the plane is perpendicular to
+            const vec3 a = axes[(n + 1) % 3], b = axes[(n + 2) % 3];
+            const float s0 = gizmo_len * 0.22f, s1 = gizmo_len * 0.42f;
+            out[0] = project(pivot + a * s0 + b * s0);
+            out[1] = project(pivot + a * s1 + b * s0);
+            out[2] = project(pivot + a * s1 + b * s1);
+            out[3] = project(pivot + a * s0 + b * s1);
+        };
+        auto handle_under = [&](vec2 p) -> int {
+            if (!gizmo_visible) return None;
+            if (tool == Tool::Rotate) {
+                int best = None;
+                float best_d = 8.0f;
+                for (int axis = 0; axis < 3; ++axis) {
+                    const std::vector<vec2> pts = ring_points(axis);
+                    for (size_t k = 0; k + 1 < pts.size(); ++k) {
+                        const float dd = point_segment_distance(p, pts[k], pts[k + 1]);
+                        if (dd < best_d) { best_d = dd; best = axis; }
                     }
                 }
+                return best;
             }
-            if (!f.mouse_down(Mouse::Left)) dragging_object = false;
-            if (dragging_object && selected) {
-                const Ray ray = screen_to_ray(basis, f.mouse().x, f.mouse().y, win_w, win_h);
-                vec3 hit;
-                if (ray_plane_y(ray, drag_plane_y, hit)) {
-                    const vec3 new_world_pos = hit + drag_offset;
-                    const WorldMeshTransform parent_wt = selected->parent()->world_mesh_transform();
-                    const vec3 local = world_to_local(new_world_pos, parent_wt);
-                    selected->mesh_pos.x = local.x;
-                    selected->mesh_pos.z = local.z;
+            if (tool == Tool::Scale && std::hypot(p.x - pivot_s.x, p.y - pivot_s.y) < 11.0f) return Uniform;
+            if (tool == Tool::Move) {
+                for (int h = PlaneYZ; h <= PlaneXY; ++h) {
+                    vec2 c[4];
+                    plane_corners(h, c);
+                    if (point_in_triangle(p, c[0], c[1], c[2]) || point_in_triangle(p, c[0], c[2], c[3])) return h;
                 }
             }
+            int best = None;
+            float best_d = 9.0f;
+            for (int axis = 0; axis < 3; ++axis) {
+                const float dd = point_segment_distance(p, pivot_s, project(pivot + axes[axis] * gizmo_len));
+                if (dd < best_d) { best_d = dd; best = axis; }
+            }
+            return best;
+        };
 
-            // ---- keyboard: manipulate the selected prop (relative to its
-            // own parent, per Node::draw_meshes()'s composition — moving a
-            // group's parent moves the whole group) ----
-            if (selected) {
-                const float move_speed = 2.5f * f.dt;
-                const float rot_speed = 1.8f * f.dt;
-                if (f.key_down(Key::W)) selected->mesh_pos.z -= move_speed;
-                if (f.key_down(Key::S)) selected->mesh_pos.z += move_speed;
-                if (f.key_down(Key::A)) selected->mesh_pos.x -= move_speed;
-                if (f.key_down(Key::D)) selected->mesh_pos.x += move_speed;
-                if (f.key_down(Key::R)) selected->mesh_pos.y += move_speed;
-                if (f.key_down(Key::F)) selected->mesh_pos.y -= move_speed;
-                if (f.key_down(Key::Q)) selected->mesh_rotation.y -= rot_speed;
-                if (f.key_down(Key::E)) selected->mesh_rotation.y += rot_speed;
-                if (f.key_down(Key::Z)) selected->mesh_scale = selected->mesh_scale * (1.0f - f.dt);
-                if (f.key_down(Key::X)) selected->mesh_scale = selected->mesh_scale * (1.0f + f.dt);
-                if (f.key_pressed(Key::Backspace)) {
-                    // Deletes the whole subtree, not just the one node —
-                    // Node owns its children via unique_ptr.
-                    selected->parent()->remove_child(selected);
-                    selected = nullptr;
+        // ------------------------------------------------------ viewport clicks
+        hot_handle = active_handle != None ? active_handle : (over_view && !flying && !alt ? handle_under(m) : None);
+        if (left_pressed && over_view && !flying && !alt && !typing) {
+            if (hot_handle != None) {
+                // Start dragging a gizmo handle.
+                active_handle = hot_handle;
+                begin_edit();
+                drag = DragStart{};
+                drag.mouse = m;
+                drag.pivot = pivot;
+                const Ray ray = camera.screen_ray(m, view);
+                if (tool == Tool::Move && active_handle <= AxisZ) drag.axis_param = ray_line_param(ray, pivot, axes[active_handle]);
+                if (tool == Tool::Move && active_handle >= PlaneYZ && active_handle <= PlaneXY) {
+                    const RaycastHit h = raycast_plane(ray, pivot, axes[active_handle - PlaneYZ]);
+                    drag.plane_hit = h ? h.point : pivot;
                 }
-            }
-
-            if (f.key_pressed(Key::Tab) && !all.empty()) {
-                std::size_t next = 0;
-                for (std::size_t i = 0; i < all.size(); ++i) {
-                    if (all[i].first == selected) { next = (i + 1) % all.size(); break; }
-                }
-                selected = all[next].first;
-            }
-            if (f.key_pressed(Key::Escape) && menu_kind == MenuKind::None) selected = nullptr;
-            if (ctrl && f.key_pressed(Key::S)) do_save();
-            if (ctrl && f.key_pressed(Key::O)) do_load();
-        }
-
-        // ---- 3D viewport (fills the whole window; UI chrome draws on top
-        // after, covering the edges — there's no viewport/scissor rect to
-        // clip 3D drawing to a sub-region, so this is the same technique the
-        // very first version of this editor already used) ----
-        f.camera3d(cam);
-        draw_grid(f, 12.0f, 1.0f);
-        scene->draw_meshes(f);
-        for (auto& [node, depth] : all) {
-            if (node->mesh_prim != Prim::Trigger) continue;
-            const WorldMeshTransform wt = node->world_mesh_transform();
-            const vec3 half{0.5f * wt.scale.x, 0.5f * wt.scale.y, 0.5f * wt.scale.z};
-            draw_wire_box(f, wt.pos, wt.rotation, half, node->mesh_tint);
-        }
-        if (selected) {
-            const WorldMeshTransform wt = selected->world_mesh_transform();
-            const vec3 half{0.55f * wt.scale.x, 0.55f * wt.scale.y, 0.55f * wt.scale.z};
-            draw_wire_box(f, wt.pos, wt.rotation, half, theme::accent);
-        }
-        f.camera({0, 0}); // MANDATORY before any 2D drawing below
-
-        // ================= UI chrome =================
-
-        // ---- top bar ----
-        f.rect({0, 0}, {win_w, TOP_H}, theme::chrome);
-        f.text("Thistle Editor", {14, 10}, {.size = 20});
-        {
-            ButtonStyle save_style;
-            save_style.bg_press = theme::accent;
-            if (f.button("Save", Rect{{win_w - 190, 6}, {84, 30}}, save_style)) do_save();
-            if (f.button("Load", Rect{{win_w - 100, 6}, {84, 30}})) do_load();
-        }
-
-        // ---- left panel: Outliner (hierarchy tree). Ctrl+click a row while
-        // something else is selected re-parents the selection onto that row
-        // (preserving its world position) instead of selecting it. ----
-        f.rect({0, TOP_H}, {LEFT_W, win_h - TOP_H}, theme::panel);
-        f.text("Outliner", {12, TOP_H + 8}, {.size = 16, .color = theme::text_dim});
-        {
-            float y = TOP_H + 34.0f;
-            const float row_h = 26.0f;
-            bool right_click_consumed = false;
-            if (all.empty()) {
-                f.text("Nothing in the scene yet —", {12, y}, {.size = 13, .color = theme::text_dim2});
-                f.text("right-click to add something.", {12, y + 16}, {.size = 13, .color = theme::text_dim2});
-            }
-            for (const auto& [node, depth] : all) {
-                if (y > win_h - row_h) break; // no scrolling — just stop, rather than draw off-panel
-                const bool is_selected = (node == selected);
-                if (is_selected) f.rect({0, y}, {LEFT_W, row_h}, rgba{theme::accent.r, theme::accent.g, theme::accent.b, 0.35f});
-                const std::string shown = node_label(node);
-                const float indent = 12.0f + static_cast<float>(depth) * 16.0f;
-                const float row_w = LEFT_W - indent - 8.0f;
-                ButtonStyle row_style;
-                row_style.bg = rgba{0, 0, 0, 0};
-                row_style.bg_hover = rgba{1, 1, 1, 0.06f};
-                row_style.bg_press = rgba{1, 1, 1, 0.1f};
-                row_style.text = is_selected ? white : rgb(0.82f, 0.82f, 0.82f);
-                row_style.text_size = 15.0f;
-                const vec2 measured = f.measure_text(shown, {.size = row_style.text_size});
-                if (measured.x > row_w - 8.0f) row_style.text_size *= (row_w - 8.0f) / measured.x;
-                const Rect row_rect{{indent, y}, {row_w, row_h}};
-                if (f.button(shown, row_rect, row_style) && !editing_name) {
-                    if (ctrl && selected && selected != node && !is_ancestor_of(selected, node)) {
-                        reparent(selected, node);
-                    } else {
-                        selected = node;
-                    }
-                }
-                // Right-click a row: context menu for THAT row specifically
-                // (add a child of it, or delete it) — independent of
-                // whatever's currently selected.
-                if (!editing_name && f.mouse_pressed(Mouse::Right) && row_rect.contains(f.mouse())) {
-                    menu_kind = MenuKind::NodeContext;
-                    menu_pos = f.mouse();
-                    menu_target = node;
-                    right_click_consumed = true;
-                }
-                y += row_h;
-            }
-            // Right-click anywhere else in the panel (not on a row): add at
-            // the scene root.
-            if (!editing_name && !right_click_consumed && f.mouse_pressed(Mouse::Right) &&
-                f.mouse().x >= 0.0f && f.mouse().x <= LEFT_W && f.mouse().y >= TOP_H) {
-                menu_kind = MenuKind::AddAtRoot;
-                menu_pos = f.mouse();
-                menu_target = nullptr;
-            }
-        }
-
-        // ---- right panel: Inspector (selected node's name + transform) ----
-        f.rect({win_w - RIGHT_W, TOP_H}, {RIGHT_W, win_h - TOP_H}, theme::panel);
-        {
-            const float px = win_w - RIGHT_W + 12.0f;
-            const float pw = RIGHT_W - 24.0f;
-            float y = TOP_H + 8.0f;
-            f.text("Inspector", {px, y}, {.size = 16, .color = theme::text_dim});
-            y += 26.0f;
-            if (!selected) {
-                f.text("Nothing selected.", {px, y}, {.size = 14, .color = theme::text_dim2});
-                f.text("Click a prop, a row in the", {px, y + 20}, {.size = 13, .color = theme::text_dim2});
-                f.text("Outliner, or Tab-cycle.", {px, y + 36}, {.size = 13, .color = theme::text_dim2});
+                for (int i : roots) drag.worlds.push_back({i, scene.world_transform(i)});
             } else {
-                const std::string kind = selected->mesh_prim == Prim::Trigger ? "Trigger Volume"
-                    : selected->mesh_prim != Prim::None ? "Primitive" : "Model";
-                f.text(kind, {px, y}, {.size = 13, .color = theme::accent});
-                y += 22.0f;
-
-                // Name: a real text field, using Thistle's actual
-                // begin_text_input()/text_input() capture (see the header
-                // comment — the engine does have text input, just no
-                // built-in visual widget; this is that widget for one field).
-                f.text("Name", {px, y}, {.size = 12, .color = theme::text_dim});
-                y += 16.0f;
-                {
-                    ButtonStyle name_style;
-                    name_style.text_size = 14.0f;
-                    std::string shown_name;
-                    if (editing_name) {
-                        shown_name = text_input() + "_";
-                        name_style.bg = rgb(0.12f, 0.28f, 0.38f);
-                        name_style.bg_hover = name_style.bg;
-                        name_style.bg_press = name_style.bg;
-                        name_style.text = white;
-                    } else {
-                        shown_name = selected->name.empty() ? "(click to name)" : selected->name;
-                        name_style.text = selected->name.empty() ? theme::text_dim2 : white;
+                // Select what's under the cursor: the nearest hit.
+                const Ray ray = camera.screen_ray(m, view);
+                int best = -1;
+                float best_d = no_limit;
+                for (size_t i = 0; i < scene.entities.size(); ++i) {
+                    const int e = static_cast<int>(i);
+                    const Transform t = scene.world_transform(e);
+                    const mat4 inv = inverse(t.matrix());
+                    const vec3 o = inv.transform_point(ray.origin);
+                    const vec3 dir = inv.transform_direction(ray.direction);
+                    const float len = length(dir);
+                    if (len < 1e-8f) continue;
+                    const RaycastHit box_hit = raycast(Ray{o, dir / len}, scene.local_bounds(e));
+                    if (!box_hit) continue;
+                    float hit_d = length(t.matrix().transform_point(box_hit.point) - ray.origin);
+                    if (scene.entities[i].kind == SceneEntity::Kind::Model) { // exact, once the box says maybe
+                        const RaycastHit exact = raycast(ray, scene.model(e), t);
+                        if (!exact) continue;
+                        hit_d = exact.distance;
                     }
-                    if (f.button(shown_name, Rect{{px, y}, {pw, 28}}, name_style) && !editing_name) {
-                        begin_text_input(selected->name);
-                        editing_name = true;
+                    if (hit_d < best_d) { best_d = hit_d; best = e; }
+                }
+                if (shift || ctrl) {
+                    if (best >= 0) {
+                        auto it = std::find(selection.begin(), selection.end(), best);
+                        if (it == selection.end()) selection.push_back(best);
+                        else selection.erase(it);
                     }
-                    y += 32.0f;
-                    if (editing_name) {
-                        f.text("Enter: save   Esc: cancel", {px, y}, {.size = 11, .color = theme::text_dim2});
-                        y += 20.0f;
-                        if (f.key_pressed(Key::Enter)) {
-                            selected->name = text_input();
-                            end_text_input();
-                            editing_name = false;
-                        } else if (f.key_pressed(Key::Escape)) {
-                            end_text_input();
-                            editing_name = false;
+                } else {
+                    selection = best >= 0 ? std::vector<int>{best} : std::vector<int>{};
+                }
+            }
+        }
+        if (active_handle != None) {
+            if (!left_down) {
+                active_handle = None;
+                end_edit();
+            } else {
+                const Ray ray = camera.screen_ray(m, view);
+                for (const auto& [i, start] : drag.worlds) {
+                    Transform t = start;
+                    if (tool == Tool::Move) {
+                        vec3 delta{};
+                        if (active_handle <= AxisZ) {
+                            float step = ray_line_param(ray, drag.pivot, axes[active_handle]) - drag.axis_param;
+                            if (ctrl) step = std::round(step * 2.0f) / 2.0f; // half-meter snaps
+                            delta = axes[active_handle] * step;
+                        } else {
+                            const RaycastHit h = raycast_plane(ray, drag.pivot, axes[active_handle - PlaneYZ]);
+                            if (h) delta = h.point - drag.plane_hit;
+                            if (ctrl) delta = {std::round(delta.x * 2) / 2, std::round(delta.y * 2) / 2, std::round(delta.z * 2) / 2};
+                        }
+                        t.position = start.position + delta;
+                    } else if (tool == Tool::Rotate) {
+                        const vec2 a{drag.mouse.x - pivot_s.x, drag.mouse.y - pivot_s.y}, b{m.x - pivot_s.x, m.y - pivot_s.y};
+                        // Screen y points down: a counter-clockwise turn on
+                        // screen has a negative cross product. Counter-clockwise
+                        // seen from an axis' tip is a positive turn about it.
+                        float angle = -std::atan2(a.x * b.y - a.y * b.x, a.x * b.x + a.y * b.y);
+                        if (dot(axes[active_handle], camera.rotation.forward()) > 0.0f) angle = -angle;
+                        if (ctrl) angle = radians(15.0f) * std::round(angle / radians(15.0f));
+                        const quat q = quat::axis_angle(axes[active_handle], angle);
+                        t.position = drag.pivot + q * (start.position - drag.pivot);
+                        t.rotation = normalize(q * start.rotation);
+                    } else { // scale
+                        float s = 1.0f;
+                        const vec2 a{drag.mouse.x - pivot_s.x, drag.mouse.y - pivot_s.y}, b{m.x - pivot_s.x, m.y - pivot_s.y};
+                        if (active_handle == Uniform) {
+                            const float la = std::hypot(a.x, a.y);
+                            s = la > 1.0f ? std::hypot(b.x, b.y) / la : 1.0f;
+                        } else {
+                            const vec2 end = project(drag.pivot + axes[active_handle] * gizmo_len);
+                            vec2 dir{end.x - pivot_s.x, end.y - pivot_s.y};
+                            const float dl = std::hypot(dir.x, dir.y);
+                            if (dl > 1.0f) {
+                                dir = {dir.x / dl, dir.y / dl};
+                                const float pa = a.x * dir.x + a.y * dir.y;
+                                if (std::fabs(pa) > 1.0f) s = (b.x * dir.x + b.y * dir.y) / pa;
+                            }
+                        }
+                        s = std::max(s, 0.01f);
+                        if (ctrl) s = std::max(0.1f, std::round(s * 10.0f) / 10.0f);
+                        if (active_handle == Uniform) {
+                            t.scale = start.scale * s;
+                            t.position = drag.pivot + (start.position - drag.pivot) * s;
+                        } else {
+                            vec3 k{1, 1, 1};
+                            (active_handle == AxisX ? k.x : active_handle == AxisY ? k.y : k.z) = s;
+                            t.scale = {start.scale.x * k.x, start.scale.y * k.y, start.scale.z * k.z};
                         }
                     }
-                }
-                y += 6.0f;
-
-                // A labeled X/Y/Z row with a live value readout and +/-
-                // steppers. Position/scale can also be dragged with the
-                // mouse in the viewport now; these are for precise nudges.
-                auto axis_row = [&](const char* label, float y_pos, float& value, float step, float min_value) {
-                    f.text(label, {px, y_pos + 6}, {.size = 13});
-                    f.text([&]{ char buf[32]; std::snprintf(buf, sizeof(buf), "%.2f", static_cast<double>(value)); return std::string(buf); }(),
-                           {px + 22, y_pos + 6}, {.size = 13, .color = rgb(0.85f, 0.85f, 0.85f)});
-                    ButtonStyle step_style;
-                    step_style.text_size = 16.0f;
-                    if (f.button("-", Rect{{px + pw - 64, y_pos}, {28, 24}}, step_style)) value = std::max(min_value, value - step);
-                    if (f.button("+", Rect{{px + pw - 30, y_pos}, {28, 24}}, step_style)) value += step;
-                };
-
-                f.text("Position", {px, y}, {.size = 13, .color = theme::text_dim});
-                y += 18.0f;
-                axis_row("X", y, selected->mesh_pos.x, 0.1f, -1000.0f); y += 28.0f;
-                axis_row("Y", y, selected->mesh_pos.y, 0.1f, -1000.0f); y += 28.0f;
-                axis_row("Z", y, selected->mesh_pos.z, 0.1f, -1000.0f); y += 34.0f;
-
-                f.text("Rotation (Y)", {px, y}, {.size = 13, .color = theme::text_dim});
-                y += 18.0f;
-                axis_row("Y", y, selected->mesh_rotation.y, 0.1745f, -1000.0f); y += 34.0f;
-
-                f.text("Scale", {px, y}, {.size = 13, .color = theme::text_dim});
-                y += 18.0f;
-                axis_row("X", y, selected->mesh_scale.x, 0.1f, 0.05f); y += 28.0f;
-                axis_row("Y", y, selected->mesh_scale.y, 0.1f, 0.05f); y += 28.0f;
-                axis_row("Z", y, selected->mesh_scale.z, 0.1f, 0.05f); y += 34.0f;
-
-                f.rect({px, y}, {24, 24}, selected->mesh_tint);
-                f.text("Tint", {px + 32, y + 4}, {.size = 13, .color = theme::text_dim});
-                y += 36.0f;
-
-                if (selected->child_count() > 0) {
-                    f.text("Children: " + std::to_string(selected->child_count()), {px, y}, {.size = 13, .color = theme::text_dim});
-                    y += 24.0f;
-                }
-
-                ButtonStyle delete_style;
-                delete_style.bg = rgb(0.35f, 0.16f, 0.14f);
-                delete_style.bg_hover = rgb(0.45f, 0.2f, 0.17f);
-                delete_style.bg_press = rgb(0.6f, 0.25f, 0.2f);
-                if (f.button("Delete", Rect{{px, y}, {pw, 30}}, delete_style) && !editing_name) {
-                    selected->parent()->remove_child(selected);
-                    selected = nullptr;
+                    scene.set_world_transform(i, t);
                 }
             }
         }
 
-        // ---- compact keybinding hint, bottom-right corner of the viewport ----
-        f.text("Right-click Outliner: add/delete   Click: select+drag   Right-drag: orbit   Scroll: zoom   WASD/R/F/Q/E/Z/X: nudge",
-               {LEFT_W + 12, win_h - 24}, {.size = 12, .color = rgba{1, 1, 1, 0.5f}});
-
-        // ---- right-click context menu (Outliner only): drawn last so it's
-        // always on top of every panel, regardless of where it's positioned.
-        // AddAtRoot: right-clicked empty Outliner space, every spawnable
-        // entry spawns at the scene root. NodeContext: right-clicked an
-        // existing row, offers Delete plus every spawnable entry as a CHILD
-        // of that row specifically (not necessarily the current selection —
-        // this is the actual replacement for the old Shift+click-to-spawn-
-        // as-child palette workflow, and more flexible: it works on any row,
-        // selected or not).
-        if (menu_kind != MenuKind::None) {
-            const float item_h = 26.0f;
-            const float menu_w = 190.0f;
-            int n_items = static_cast<int>(spawnable.size());
-            if (menu_kind == MenuKind::NodeContext) n_items += 1; // Delete
-            const float menu_h = static_cast<float>(n_items) * item_h;
-            const float mx = std::min(menu_pos.x, win_w - menu_w - 4.0f);
-            const float my = std::min(menu_pos.y, win_h - menu_h - 4.0f);
-            const Rect menu_rect{{mx, my}, {menu_w, menu_h}};
-
-            f.rect(menu_rect.pos, menu_rect.size, theme::chrome);
-            float iy = my;
-            if (menu_kind == MenuKind::NodeContext && menu_target) {
-                ButtonStyle del_style;
-                del_style.text = rgb(0.95f, 0.5f, 0.5f);
-                del_style.text_size = 14.0f;
-                if (f.button("Delete", Rect{{mx, iy}, {menu_w, item_h}}, del_style)) {
-                    if (selected == menu_target) selected = nullptr;
-                    menu_target->parent()->remove_child(menu_target);
-                    menu_kind = MenuKind::None;
-                }
-                iy += item_h;
+        // ------------------------------------------------------ shortcuts
+        if (!typing && !flying) {
+            if (!ctrl && !alt) {
+                if (f.key_pressed(Key::W)) tool = Tool::Move;
+                if (f.key_pressed(Key::E)) tool = Tool::Rotate;
+                if (f.key_pressed(Key::R)) tool = Tool::Scale;
+                if (f.key_pressed(Key::F)) frame_selection();
+                if (f.key_pressed(Key::Delete) || f.key_pressed(Key::X) || f.key_pressed(Key::Backspace)) delete_selection();
+                if (shift && f.key_pressed(Key::A)) { popup = Popup::Add; popup_at = m; }
             }
-            if (menu_kind != MenuKind::None) { // Delete above may have just closed it
-                for (const PaletteEntry& pe : spawnable) {
-                    const std::string label = (menu_kind == MenuKind::NodeContext ? "Add child: " : "Add: ") + pe.label;
-                    ButtonStyle style;
-                    style.text_size = 14.0f;
-                    const vec2 measured = f.measure_text(label, {.size = style.text_size});
-                    if (measured.x > menu_w - 12.0f) style.text_size *= (menu_w - 12.0f) / measured.x;
-                    if (f.button(label, Rect{{mx, iy}, {menu_w, item_h}}, style)) {
-                        spawn(pe, (menu_kind == MenuKind::NodeContext && menu_target) ? menu_target : scene.get());
-                        menu_kind = MenuKind::None;
+            if (ctrl) {
+                if (f.key_pressed(Key::Z)) { if (shift) redo(); else undo(); }
+                if (f.key_pressed(Key::Y)) redo();
+                if (f.key_pressed(Key::D)) duplicate_selection();
+                if (f.key_pressed(Key::A)) {
+                    selection.clear();
+                    for (size_t i = 0; i < scene.entities.size(); ++i) selection.push_back(static_cast<int>(i));
+                }
+                if (f.key_pressed(Key::S)) {
+                    if (shift || file_path.empty()) { popup = Popup::SaveAs; popup_at = {W * 0.5f - 160, H * 0.3f}; }
+                    else save_to(file_path);
+                }
+                if (f.key_pressed(Key::O)) { rescan(); popup = Popup::Open; popup_at = {60, TOP}; }
+                if (f.key_pressed(Key::N)) unless_unsaved("start a new scene", new_scene);
+            }
+            if (f.key_pressed(Key::Escape)) {
+                if (popup_open) popup = Popup::None;
+                else selection.clear();
+            }
+        }
+
+        // ------------------------------------------------------ the 3D view
+        World world;
+        scene.draw(world);
+        world.grid({std::round(target.x), 0.002f, std::round(target.z)}, 60.0f, 1.0f, rgba{1, 1, 1, 0.08f});
+        world.line({-500, 0.004f, 0}, {500, 0.004f, 0}, rgba{theme::axis_x.r, theme::axis_x.g, theme::axis_x.b, 0.6f});
+        world.line({0, 0.004f, -500}, {0, 0.004f, 500}, rgba{theme::axis_z.r, theme::axis_z.g, theme::axis_z.b, 0.6f});
+        for (size_t i = 0; i < scene.entities.size(); ++i) {
+            const SceneEntity& e = scene.entities[i];
+            const Transform t = scene.world_transform(static_cast<int>(i));
+            const bool selected = std::find(selection.begin(), selection.end(), static_cast<int>(i)) != selection.end();
+            switch (e.kind) {
+                case SceneEntity::Kind::PointLight:
+                    world.sphere(t.position, 0.12f, e.color);
+                    world.wire_sphere(t.position, selected ? e.range : 0.35f, rgba{e.color.r, e.color.g, e.color.b, 0.5f});
+                    break;
+                case SceneEntity::Kind::SpotLight: {
+                    world.sphere(t.position, 0.12f, e.color);
+                    const float reach = selected ? e.range : 1.5f;
+                    const vec3 fwd = t.rotation.forward(), r = t.rotation.right(), u = t.rotation.up();
+                    const float spread = std::tan(e.spot_angle) * reach;
+                    for (int k = 0; k < 4; ++k) {
+                        const vec3 side = (k % 2 ? r : u) * (k < 2 ? spread : -spread);
+                        world.line(t.position, t.position + fwd * reach + side, rgba{e.color.r, e.color.g, e.color.b, 0.6f});
                     }
-                    iy += item_h;
+                    break;
+                }
+                case SceneEntity::Kind::Trigger: world.wire_box(t, e.color); break;
+                case SceneEntity::Kind::Spawn: {
+                    world.wire_box(Transform{t.apply({0, 0.9f, 0}), t.rotation, {0.5f, 1.8f, 0.5f}}, e.color);
+                    world.line(t.apply({0, 0.05f, 0}), t.apply({0, 0.05f, -0.9f}), e.color); // facing
+                    break;
+                }
+                case SceneEntity::Kind::Empty:
+                    world.line(t.position - vec3{0.3f, 0, 0}, t.position + vec3{0.3f, 0, 0}, theme::faint);
+                    world.line(t.position - vec3{0, 0.3f, 0}, t.position + vec3{0, 0.3f, 0}, theme::faint);
+                    world.line(t.position - vec3{0, 0, 0.3f}, t.position + vec3{0, 0, 0.3f}, theme::faint);
+                    break;
+                default: break;
+            }
+            if (selected) {
+                const Bounds lb = scene.local_bounds(static_cast<int>(i));
+                world.wire_box(Transform{t.apply(lb.center()), t.rotation, {lb.size().x * t.scale.x, lb.size().y * t.scale.y, lb.size().z * t.scale.z}},
+                               theme::accent, true);
+            }
+        }
+        world.render(f, camera, view);
+
+        // Gizmo, in screen space on top of the view: crisp at any distance.
+        if (gizmo_visible) {
+            const rgba colors[3] = {theme::axis_x, theme::axis_y, theme::axis_z};
+            auto col = [&](int h, rgba c) { return h == hot_handle ? theme::hover : c; };
+            if (tool == Tool::Rotate) {
+                for (int axis = 0; axis < 3; ++axis) {
+                    const std::vector<vec2> pts = ring_points(axis);
+                    for (size_t k = 0; k + 1 < pts.size(); ++k) f.line(pts[k], pts[k + 1], col(axis, colors[axis]), axis == hot_handle ? 3.5f : 2.5f);
+                }
+                f.circle(pivot_s, 3.0f, white);
+            } else {
+                if (tool == Tool::Move) {
+                    for (int h = PlaneYZ; h <= PlaneXY; ++h) {
+                        vec2 c[4];
+                        plane_corners(h, c);
+                        rgba fill = col(h, colors[h - PlaneYZ]);
+                        fill.a = h == hot_handle ? 0.7f : 0.35f;
+                        f.triangle(c[0], c[1], c[2], fill);
+                        f.triangle(c[0], c[2], c[3], fill);
+                    }
+                }
+                for (int axis = 0; axis < 3; ++axis) {
+                    const vec2 end = project(pivot + axes[axis] * gizmo_len);
+                    const rgba c = col(axis, colors[axis]);
+                    f.line(pivot_s, end, c, axis == hot_handle ? 4.0f : 3.0f);
+                    vec2 dir{end.x - pivot_s.x, end.y - pivot_s.y};
+                    const float len = std::hypot(dir.x, dir.y);
+                    if (len < 1.0f) continue;
+                    dir = {dir.x / len, dir.y / len};
+                    const vec2 side{-dir.y, dir.x};
+                    if (tool == Tool::Move) { // arrowhead
+                        f.triangle({end.x + dir.x * 14, end.y + dir.y * 14}, {end.x + side.x * 6, end.y + side.y * 6}, {end.x - side.x * 6, end.y - side.y * 6}, c);
+                    } else { // scale: a square end
+                        f.rect({end.x - 6, end.y - 6}, {12, 12}, c);
+                    }
+                }
+                f.rect({pivot_s.x - 5, pivot_s.y - 5}, {10, 10}, tool == Tool::Scale ? col(Uniform, white) : white);
+            }
+        }
+        if (flying) f.text("flying: WASD / Q E, Shift = faster", {view.pos.x + 12, view.pos.y + 10}, {.size = 14, .color = rgba{1, 1, 1, 0.7f}});
+
+        // ------------------------------------------------------ widgets
+        auto button = [&](const std::string& label, Rect r, bool on = false, float size = 14.0f) {
+            ButtonStyle s;
+            s.bg = on ? theme::field_active : theme::field;
+            s.bg_hover = on ? theme::field_active : theme::field_hover;
+            s.bg_press = theme::accent;
+            s.text = theme::text;
+            s.text_size = size;
+            return f.button(label, r, s) && !typing;
+        };
+        auto label = [&](const std::string& t, vec2 p, rgba c = theme::dim, float size = 13.0f) { f.text(t, p, {.size = size, .color = c}); };
+        // A number: drag left/right to change, double-click to type.
+        auto number = [&](const std::string& id, Rect r, float& v, float speed, int decimals = 2, rgba tint = theme::field) {
+            const bool hover = r.contains(m) && !popup_open;
+            const bool is_text = text_field == id;
+            if (typed_id == id) {
+                record();
+                v = parse_float(typed_text, v);
+                typed_id.clear();
+            }
+            if (is_text) text_rect = r;
+            f.rect(r.pos, r.size, is_text ? theme::field_active : active_field == id ? theme::field_active : hover ? theme::field_hover : tint);
+            const std::string shown = is_text ? text_input() + "|" : fmt(v, decimals);
+            const vec2 tsz = f.measure_text(shown, {.size = 13});
+            f.text(shown, {r.pos.x + (r.size.x - tsz.x) * 0.5f, r.pos.y + (r.size.y - 13) * 0.5f - 1}, {.size = 13, .color = theme::text});
+            if (is_text) return;
+            if (left_pressed && hover && !typing) {
+                if (last_click_id == id && now_seconds() - last_click < 0.35) { // double-click: type a value
+                    text_field = id;
+                    begin_text_input(fmt(v, decimals));
+                    text_commit = [&, id](const std::string& s) {
+                        typed_id = id;
+                        typed_text = s;
+                    };
+                    last_click_id.clear();
+                    return;
+                }
+                last_click_id = id;
+                last_click = now_seconds();
+                active_field = id;
+                begin_edit();
+            }
+            if (active_field == id) {
+                if (!left_down) {
+                    active_field.clear();
+                    end_edit();
+                } else if (d.x != 0.0f) {
+                    v += d.x * speed * (shift ? 0.1f : 1.0f);
                 }
             }
-
-            // Click anywhere outside the menu (either mouse button) closes
-            // it without acting. The click still falls through to whatever
-            // it landed on underneath in the same frame (e.g. an Outliner
-            // row also gets selected) — properly swallowing a click needs
-            // more input-pipeline plumbing than this immediate-mode UI has;
-            // this is the honest simplification, not a bug nobody noticed.
-            if (menu_kind != MenuKind::None) {
-                const bool clicked_outside = (f.mouse_pressed(Mouse::Left) || f.mouse_pressed(Mouse::Right)) && !menu_rect.contains(f.mouse());
-                if (clicked_outside || f.key_pressed(Key::Escape)) menu_kind = MenuKind::None;
+        };
+        auto text_box = [&](const std::string& id, Rect r, const std::string& value, std::function<void(const std::string&)> commit) {
+            const bool is_text = text_field == id;
+            const bool hover = r.contains(m) && !popup_open;
+            if (is_text) text_rect = r;
+            f.rect(r.pos, r.size, is_text ? theme::field_active : hover ? theme::field_hover : theme::field);
+            std::string shown = is_text ? text_input() + "|" : value;
+            float size = 13.0f;
+            const vec2 tsz = f.measure_text(shown, {.size = size});
+            if (tsz.x > r.size.x - 10) size *= (r.size.x - 10) / tsz.x;
+            f.text(shown, {r.pos.x + 6, r.pos.y + (r.size.y - size) * 0.5f - 1}, {.size = size, .color = theme::text});
+            if (!is_text && left_pressed && hover && !typing) {
+                text_field = id;
+                begin_text_input(value);
+                text_commit = [&, commit](const std::string& s) {
+                    record();
+                    commit(s);
+                };
             }
+        };
+        auto color_row = [&](const std::string& id, float x, float y, float w, rgba& c) {
+            f.rect({x, y}, {22, 22}, rgba{c.r, c.g, c.b, 1.0f});
+            const float fw = (w - 30) / 3.0f;
+            number(id + ".r", Rect{{x + 28, y}, {fw - 3, 22}}, c.r, 0.004f, 2, rgb(0.30f, 0.20f, 0.20f));
+            number(id + ".g", Rect{{x + 28 + fw, y}, {fw - 3, 22}}, c.g, 0.004f, 2, rgb(0.20f, 0.28f, 0.20f));
+            number(id + ".b", Rect{{x + 28 + fw * 2, y}, {fw - 3, 22}}, c.b, 0.004f, 2, rgb(0.20f, 0.22f, 0.32f));
+            c.r = std::clamp(c.r, 0.0f, 1.0f);
+            c.g = std::clamp(c.g, 0.0f, 1.0f);
+            c.b = std::clamp(c.b, 0.0f, 1.0f);
+        };
+
+        // Text entry: Enter commits, Escape cancels, clicking outside the field
+        // commits (except Save as, which only saves on Enter). text_rect is
+        // from last frame's drawing, which is where the user clicked.
+        if (typing) {
+            const bool clicked_away = left_pressed && !text_rect.contains(m) && text_field != "#saveas";
+            if (f.key_pressed(Key::Enter) || f.key_pressed(Key::KeypadEnter) || clicked_away) {
+                const std::string v = text_input();
+                end_text_input();
+                auto commit = text_commit;
+                text_field.clear();
+                if (commit) commit(v);
+            } else if (f.key_pressed(Key::Escape)) {
+                end_text_input();
+                text_field.clear();
+            }
+        }
+
+        // ------------------------------------------------------ top bar
+        f.rect({0, 0}, {W, TOP}, theme::chrome);
+        float x = 10;
+        auto top_button = [&](const std::string& t, float w, bool on = false) {
+            const bool r = button(t, Rect{{x, 6}, {w, TOP - 12}}, on);
+            x += w + 4;
+            return r;
+        };
+        if (top_button("New", 52)) unless_unsaved("start a new scene", new_scene);
+        if (top_button("Open", 60)) { rescan(); popup = Popup::Open; popup_at = {x - 64, TOP}; }
+        if (top_button("Save", 56)) {
+            if (file_path.empty()) { popup = Popup::SaveAs; popup_at = {W * 0.5f - 160, H * 0.3f}; }
+            else save_to(file_path);
+        }
+        if (top_button("Save as", 72)) { popup = Popup::SaveAs; popup_at = {W * 0.5f - 160, H * 0.3f}; }
+        x += 14;
+        if (top_button("Undo", 56)) undo();
+        if (top_button("Redo", 56)) redo();
+        x += 14;
+        if (top_button("Move (W)", 86, tool == Tool::Move)) tool = Tool::Move;
+        if (top_button("Rotate (E)", 90, tool == Tool::Rotate)) tool = Tool::Rotate;
+        if (top_button("Scale (R)", 86, tool == Tool::Scale)) tool = Tool::Scale;
+        x += 14;
+        if (top_button("+ Add", 70)) { rescan(); popup = Popup::Add; popup_at = {x - 74, TOP}; }
+        {
+            const std::string name = (file_path.empty() ? std::string("untitled") : fs::path(file_path).filename().string()) + (dirty ? " *" : "");
+            const vec2 tsz = f.measure_text(name, {.size = 15});
+            f.text(name, {W - tsz.x - 14, 12}, {.size = 15, .color = dirty ? theme::accent : theme::dim});
+        }
+
+        // ------------------------------------------------------ outliner
+        f.rect({0, TOP}, {LEFT, H - TOP - BOTTOM}, theme::panel);
+        label("Outliner", {12, TOP + 10}, theme::dim, 14);
+        {
+            // Depth-first, children under their parents.
+            std::vector<std::pair<int, int>> rows; // entity, depth
+            std::function<void(int, int)> walk = [&](int parent, int depth) {
+                for (int c : scene.children(parent)) {
+                    rows.push_back({c, depth});
+                    if (depth < 32) walk(c, depth + 1);
+                }
+            };
+            walk(-1, 0);
+            const float row_h = 24.0f, top_y = TOP + 34.0f, bottom_y = H - BOTTOM - 4;
+            const float max_scroll = std::max(0.0f, rows.size() * row_h - (bottom_y - top_y));
+            const Rect list{{0, top_y}, {LEFT, bottom_y - top_y}};
+            if (list.contains(m) && f.mouse_scroll() != 0.0f && !popup_open) outliner_scroll = std::clamp(outliner_scroll - f.mouse_scroll() * 40.0f, 0.0f, max_scroll);
+            outliner_scroll = std::clamp(outliner_scroll, 0.0f, max_scroll);
+            int hover_row = -1;
+            for (size_t r = 0; r < rows.size(); ++r) {
+                const float y = top_y + r * row_h - outliner_scroll;
+                if (y < top_y - row_h || y > bottom_y) continue;
+                const auto [e, depth] = rows[r];
+                const Rect rr{{0, y}, {LEFT, row_h}};
+                const bool sel = std::find(selection.begin(), selection.end(), e) != selection.end();
+                const bool hov = rr.contains(m) && list.contains(m) && !popup_open;
+                if (hov) hover_row = e;
+                if (sel) f.rect(rr.pos, rr.size, rgba{theme::accent.r, theme::accent.g, theme::accent.b, 0.30f});
+                else if (hov) f.rect(rr.pos, rr.size, rgba{1, 1, 1, 0.05f});
+                const SceneEntity& ent = scene.entities[static_cast<size_t>(e)];
+                const float ix = 14 + depth * 14.0f;
+                label(ent.name.empty() ? "(unnamed)" : ent.name, {ix, y + 5}, sel ? white : theme::text, 13);
+                const std::string k = kind_label(ent.kind);
+                const vec2 ksz = f.measure_text(k, {.size = 11});
+                label(k, {LEFT - ksz.x - 10, y + 7}, theme::faint, 11);
+            }
+            if (rows.empty()) label("Empty. Add something with + Add.", {12, top_y + 4}, theme::faint, 12);
+            // Click selects (Ctrl/Shift: add/remove); drag a row onto
+            // another to parent it there, onto empty space to unparent it.
+            if (left_pressed && list.contains(m) && !popup_open && !typing) {
+                if (hover_row >= 0) {
+                    if (ctrl || shift) {
+                        auto it = std::find(selection.begin(), selection.end(), hover_row);
+                        if (it == selection.end()) selection.push_back(hover_row);
+                        else selection.erase(it);
+                    } else if (std::find(selection.begin(), selection.end(), hover_row) == selection.end()) {
+                        selection = {hover_row};
+                    }
+                    outliner_drag = hover_row;
+                    outliner_press = m;
+                    outliner_dragging = false;
+                } else {
+                    selection.clear();
+                }
+            }
+            if (outliner_drag >= 0 && left_down && std::hypot(m.x - outliner_press.x, m.y - outliner_press.y) > 6.0f) outliner_dragging = true;
+            if (outliner_dragging && outliner_drag >= 0) {
+                std::string hint = "move to the top level";
+                if (hover_row >= 0) {
+                    hint = "move under " + scene.entities[static_cast<size_t>(hover_row)].name;
+                    for (size_t r = 0; r < rows.size(); ++r) {
+                        if (rows[r].first != hover_row) continue;
+                        const float ry = top_y + r * row_h - outliner_scroll;
+                        f.rect({1, ry}, {LEFT - 2, 2}, theme::accent); // outline the row it'll go under
+                        f.rect({1, ry + row_h - 2}, {LEFT - 2, 2}, theme::accent);
+                        f.rect({1, ry}, {2, row_h}, theme::accent);
+                        f.rect({LEFT - 3, ry}, {2, row_h}, theme::accent);
+                    }
+                }
+                if (!list.contains(m)) hint = "(let go outside to cancel)";
+                label(hint, {m.x + 14, m.y + 4}, theme::accent, 12);
+            }
+            if (left_released && outliner_drag >= 0) {
+                if (outliner_dragging) {
+                    const int new_parent = list.contains(m) ? hover_row : -2;
+                    if (new_parent != -2 && new_parent != outliner_drag) {
+                        record();
+                        std::vector<int> moving = selection_roots();
+                        if (std::find(moving.begin(), moving.end(), outliner_drag) == moving.end()) moving = {outliner_drag};
+                        int moved = 0;
+                        for (int e : moving) moved += scene.set_parent(e, new_parent);
+                        if (moved == 0) {
+                            undo_stack.pop_back(); // nothing changed, so nothing to undo
+                            say("can't put something under itself");
+                        }
+                        else if (new_parent < 0) say("moved to the top level");
+                        else say("moved under " + scene.entities[static_cast<size_t>(new_parent)].name);
+                    }
+                } else if (!ctrl && !shift && outliner_drag >= 0) {
+                    selection = {outliner_drag};
+                }
+                outliner_drag = -1;
+                outliner_dragging = false;
+            }
+            if (f.mouse_pressed(Mouse::Right) && list.contains(m) && !typing) {
+                context_entity = hover_row;
+                if (hover_row >= 0 && std::find(selection.begin(), selection.end(), hover_row) == selection.end()) selection = {hover_row};
+                popup = hover_row >= 0 ? Popup::Context : Popup::Add;
+                popup_at = m;
+            }
+        }
+
+        // ------------------------------------------------------ inspector
+        const float px = W - RIGHT + 12, pw = RIGHT - 24;
+        f.rect({W - RIGHT, TOP}, {RIGHT, H - TOP - BOTTOM}, theme::panel);
+        float y = TOP + 10;
+        auto heading = [&](const std::string& t) {
+            label(t, {px, y}, theme::accent, 13);
+            y += 22;
+        };
+        auto vec_row = [&](const std::string& id, const std::string& name, vec3& v, float speed, int decimals) {
+            label(name, {px, y + 4}, theme::dim, 12);
+            const float fx = px + 62, fw = (pw - 62) / 3.0f;
+            number(id + ".x", Rect{{fx, y}, {fw - 3, 22}}, v.x, speed, decimals, rgb(0.30f, 0.20f, 0.20f));
+            number(id + ".y", Rect{{fx + fw, y}, {fw - 3, 22}}, v.y, speed, decimals, rgb(0.20f, 0.28f, 0.20f));
+            number(id + ".z", Rect{{fx + fw * 2, y}, {fw - 3, 22}}, v.z, speed, decimals, rgb(0.20f, 0.22f, 0.32f));
+            y += 28;
+        };
+        auto float_row = [&](const std::string& id, const std::string& name, float& v, float speed, int decimals = 2) {
+            label(name, {px, y + 4}, theme::dim, 12);
+            number(id, Rect{{px + 110, y}, {pw - 110, 22}}, v, speed, decimals);
+            y += 28;
+        };
+        if (selection.size() == 1) {
+            const int e = selection[0];
+            SceneEntity& ent = scene.entities[static_cast<size_t>(e)];
+            label(kind_label(ent.kind), {px, y}, theme::accent, 14);
+            y += 24;
+            label("Name", {px, y + 4}, theme::dim, 12);
+            text_box("name", Rect{{px + 62, y}, {pw - 62, 24}}, ent.name, [&, e](const std::string& s) {
+                if (e < static_cast<int>(scene.entities.size())) scene.entities[static_cast<size_t>(e)].name = s;
+            });
+            y += 34;
+            heading("Transform");
+            vec_row("pos", "Position", ent.transform.position, 0.02f, 2);
+            vec3 euler = to_euler(ent.transform.rotation);
+            vec3 deg{degrees(euler.x), degrees(euler.y), degrees(euler.z)};
+            const vec3 before = deg;
+            vec_row("rot", "Rotation", deg, 0.5f, 1);
+            if (!(deg == before)) ent.transform.rotation = quat::euler(radians(deg.x), radians(deg.y), radians(deg.z));
+            vec_row("scl", "Scale", ent.transform.scale, 0.01f, 2);
+            y += 6;
+            if (ent.kind != SceneEntity::Kind::Empty) {
+                heading(ent.kind == SceneEntity::Kind::PointLight || ent.kind == SceneEntity::Kind::SpotLight ? "Light" : "Look");
+                label(ent.kind == SceneEntity::Kind::Model ? "Tint" : "Color", {px, y + 4}, theme::dim, 12);
+                color_row("color", px + 62, y, pw - 62, ent.color);
+                y += 30;
+            }
+            if (ent.kind == SceneEntity::Kind::Model) {
+                label("File", {px, y + 4}, theme::dim, 12);
+                if (button(ent.model.empty() ? "(choose)" : fs::path(ent.model).filename().string(), Rect{{px + 62, y}, {pw - 62, 24}}, false, 12)) {
+                    rescan();
+                    popup = Popup::ChangeModel;
+                    popup_at = {px - 140, y + 26};
+                }
+                y += 32;
+            }
+            if (ent.kind == SceneEntity::Kind::PointLight || ent.kind == SceneEntity::Kind::SpotLight) {
+                float_row("intensity", "Intensity", ent.intensity, 0.01f);
+                float_row("range", "Range (m)", ent.range, 0.05f, 1);
+                if (ent.kind == SceneEntity::Kind::SpotLight) {
+                    float a = degrees(ent.spot_angle);
+                    float_row("angle", "Cone (deg)", a, 0.3f, 1);
+                    ent.spot_angle = radians(std::clamp(a, 1.0f, 89.0f));
+                }
+                ent.intensity = std::max(ent.intensity, 0.0f);
+                ent.range = std::max(ent.range, 0.1f);
+            }
+            heading("Properties");
+            label("for your game: level.entities[i].property(\"key\")", {px, y - 4}, theme::faint, 10);
+            y += 12;
+            int remove_at = -1;
+            for (size_t k = 0; k < ent.properties.size(); ++k) {
+                const float kw = (pw - 30) * 0.45f;
+                text_box("pk" + std::to_string(k), Rect{{px, y}, {kw - 3, 22}}, ent.properties[k].first, [&, e, k](const std::string& s) {
+                    if (e < static_cast<int>(scene.entities.size()) && k < scene.entities[static_cast<size_t>(e)].properties.size())
+                        scene.entities[static_cast<size_t>(e)].properties[k].first = s;
+                });
+                text_box("pv" + std::to_string(k), Rect{{px + kw, y}, {pw - 30 - kw, 22}}, ent.properties[k].second, [&, e, k](const std::string& s) {
+                    if (e < static_cast<int>(scene.entities.size()) && k < scene.entities[static_cast<size_t>(e)].properties.size())
+                        scene.entities[static_cast<size_t>(e)].properties[k].second = s;
+                });
+                if (button("x", Rect{{px + pw - 24, y}, {24, 22}}, false, 12)) remove_at = static_cast<int>(k);
+                y += 26;
+            }
+            if (remove_at >= 0) {
+                record();
+                ent.properties.erase(ent.properties.begin() + remove_at);
+            }
+            if (button("+ property", Rect{{px, y}, {110, 22}}, false, 12)) {
+                record();
+                ent.properties.push_back({"key", "value"});
+            }
+            y += 34;
+            if (button("Duplicate (Ctrl+D)", Rect{{px, y}, {pw * 0.5f - 3, 26}}, false, 12)) duplicate_selection();
+            if (button("Delete (Del)", Rect{{px + pw * 0.5f + 3, y}, {pw * 0.5f - 3, 26}}, false, 12)) delete_selection();
+        } else if (selection.size() > 1) {
+            label(std::to_string(selection.size()) + " selected", {px, y}, theme::accent, 14);
+            y += 26;
+            label("The gizmo moves, turns and scales them", {px, y}, theme::dim, 12);
+            label("together, around their middle.", {px, y + 16}, theme::dim, 12);
+            y += 44;
+            if (button("Duplicate (Ctrl+D)", Rect{{px, y}, {pw * 0.5f - 3, 26}}, false, 12)) duplicate_selection();
+            if (button("Delete (Del)", Rect{{px + pw * 0.5f + 3, y}, {pw * 0.5f - 3, 26}}, false, 12)) delete_selection();
+        } else {
+            label("Scene", {px, y}, theme::accent, 14);
+            y += 26;
+            heading("Sun");
+            vec3 sdir = normalize(scene.sun.direction);
+            float s_yaw = degrees(std::atan2(-sdir.x, -sdir.z)), s_height = degrees(std::asin(std::clamp(-sdir.y, -1.0f, 1.0f)));
+            const float sy0 = s_yaw, sh0 = s_height;
+            float_row("sun.yaw", "Direction", s_yaw, 0.5f, 0);
+            float_row("sun.height", "Height (deg)", s_height, 0.3f, 0);
+            if (s_yaw != sy0 || s_height != sh0) {
+                s_height = std::clamp(s_height, 1.0f, 90.0f);
+                const float yr = radians(s_yaw), hr = radians(s_height);
+                scene.sun.direction = {-std::sin(yr) * std::cos(hr), -std::sin(hr), -std::cos(yr) * std::cos(hr)};
+            }
+            label("Color", {px, y + 4}, theme::dim, 12);
+            color_row("sun.color", px + 62, y, pw - 62, scene.sun.color);
+            y += 30;
+            float_row("sun.intensity", "Intensity", scene.sun.intensity, 0.01f);
+            {
+                bool sh = scene.sun.shadows;
+                if (button(sh ? "Shadows: on" : "Shadows: off", Rect{{px, y}, {pw, 24}}, sh, 12)) {
+                    record();
+                    scene.sun.shadows = !sh;
+                }
+                y += 32;
+            }
+            heading("Sky");
+            label("Top", {px, y + 4}, theme::dim, 12);
+            color_row("sky.top", px + 62, y, pw - 62, scene.sky.top);
+            y += 28;
+            label("Horizon", {px, y + 4}, theme::dim, 12);
+            color_row("sky.horizon", px + 62, y, pw - 62, scene.sky.horizon);
+            y += 28;
+            label("Ground", {px, y + 4}, theme::dim, 12);
+            color_row("sky.ground", px + 62, y, pw - 62, scene.sky.ground);
+            y += 30;
+            float_row("ambient", "Ambient", scene.ambient, 0.005f);
+            heading("Fog");
+            {
+                bool fe = scene.fog.enabled;
+                if (button(fe ? "Fog: on" : "Fog: off", Rect{{px, y}, {pw, 24}}, fe, 12)) {
+                    record();
+                    scene.fog.enabled = !fe;
+                }
+                y += 30;
+            }
+            if (scene.fog.enabled) {
+                float_row("fog.start", "Starts at (m)", scene.fog.start, 0.2f, 0);
+                float_row("fog.end", "Solid at (m)", scene.fog.end, 0.3f, 0);
+                scene.fog.end = std::max(scene.fog.end, scene.fog.start + 1.0f);
+            }
+            y += 8;
+            label("Click something to edit it.", {px, y}, theme::faint, 12);
+        }
+
+        // ------------------------------------------------------ status bar
+        f.rect({0, H - BOTTOM}, {W, BOTTOM}, theme::chrome);
+        const std::string hints = "Middle-drag orbit  |  Shift+middle pan  |  Wheel zoom  |  Hold right: fly (WASD QE)  |  "
+                                  "F frame  |  W/E/R gizmo (Ctrl snaps)  |  Ctrl+Z/Ctrl+Shift+Z  |  Ctrl+D  |  Del";
+        label(hints, {10, H - BOTTOM + 6}, theme::faint, 12);
+        if (!status.empty() && now_seconds() - status_time < 5.0) {
+            const vec2 ssz = f.measure_text(status, {.size = 13});
+            label(status, {W - ssz.x - 12, H - BOTTOM + 5}, theme::accent, 13);
+        }
+
+        // ------------------------------------------------------ popups
+        if (popup != Popup::None) {
+            std::vector<std::string> items;
+            std::string title;
+            switch (popup) {
+                case Popup::Open:
+                    title = scene_files.empty() ? "No scenes yet (save one first)" : "Open";
+                    items = scene_files;
+                    if (fs::exists(old_layout)) items.push_back(import_label);
+                    break;
+                case Popup::Add:
+                    title = "Add";
+                    items = {"Box", "Sphere", "Cylinder", "Cone", "Plane", "Point light", "Spot light", "Trigger volume", "Spawn point", "Empty (group)",
+                             "Model..."};
+                    break;
+                case Popup::AddModel:
+                case Popup::ChangeModel:
+                    title = model_files.empty() ? "No models in assets/" : "Models in assets/";
+                    items = model_files;
+                    break;
+                case Popup::Context:
+                    title = context_entity >= 0 && context_entity < static_cast<int>(scene.entities.size()) ? scene.entities[static_cast<size_t>(context_entity)].name : "";
+                    items = {"Rename", "Duplicate", "Delete", "Unparent", "Frame (F)"};
+                    break;
+                default: break;
+            }
+            if (popup == Popup::SaveAs) {
+                const Rect box{popup_at, {320, 96}};
+                f.rect(box.pos - vec2{1, 1}, box.size + vec2{2, 2}, theme::accent);
+                f.rect(box.pos, box.size, theme::chrome);
+                label("Save as (goes in assets/scenes/)", box.pos + vec2{12, 10}, theme::text, 14);
+                if (text_field != "#saveas") {
+                    text_field = "#saveas";
+                    const std::string current = fs::path(file_path).filename().string();
+                    begin_text_input(current.substr(0, current.find('.'))); // empty when untitled: the placeholder shows
+                    text_commit = [&](const std::string& s) {
+                        std::string name = s.empty() ? "level" : s;
+                        if (name.size() < 11 || name.compare(name.size() - 11, 11, ".scene.json") != 0) name += ".scene.json";
+                        popup = Popup::None;
+                        save_to((fs::path("assets") / "scenes" / name).generic_string());
+                    };
+                }
+                f.rect(box.pos + vec2{12, 36}, {296, 26}, theme::field_active);
+                if (text_input().empty()) label("|level  .scene.json", box.pos + vec2{18, 41}, theme::faint, 14);
+                else label(text_input() + "|  .scene.json", box.pos + vec2{18, 41}, theme::text, 14);
+                label("Enter saves, Esc cancels", box.pos + vec2{12, 70}, theme::faint, 12);
+                if (!text_field.empty() && f.key_pressed(Key::Escape)) popup = Popup::None;
+            } else if (popup == Popup::Confirm) {
+                const Rect box{{W * 0.5f - 190, H * 0.3f}, {380, 112}};
+                f.rect(box.pos - vec2{1, 1}, box.size + vec2{2, 2}, theme::accent);
+                f.rect(box.pos, box.size, theme::chrome);
+                const std::string name = file_path.empty() ? "this scene" : fs::path(file_path).filename().string();
+                label("Unsaved changes to " + name + ".", box.pos + vec2{14, 12}, theme::text, 14);
+                label("Throw them away and " + confirm_text + "?", box.pos + vec2{14, 34}, theme::dim, 13);
+                if (button("Discard changes", Rect{box.pos + vec2{14, 70}, {170, 28}})) {
+                    popup = Popup::None;
+                    if (confirm_action) confirm_action();
+                    confirm_action = nullptr;
+                } else if (button("Cancel", Rect{box.pos + vec2{196, 70}, {170, 28}}) ||
+                           ((left_pressed || f.mouse_pressed(Mouse::Right)) && !box.contains(m) && popup == popup_before)) {
+                    popup = Popup::None;
+                    confirm_action = nullptr;
+                }
+            } else {
+                const float item_h = 24, w = 280;
+                const int shown = std::min<int>(static_cast<int>(items.size()), 22);
+                const float h = 30 + shown * item_h;
+                const vec2 at{std::min(popup_at.x, W - w - 4), std::min(popup_at.y, H - h - 4)};
+                const Rect box{at, {w, h}};
+                f.rect(at - vec2{1, 1}, box.size + vec2{2, 2}, rgba{0, 0, 0, 0.6f});
+                f.rect(at, box.size, theme::chrome);
+                label(title, at + vec2{10, 7}, theme::dim, 12);
+                int chosen = -1;
+                for (int i = 0; i < shown; ++i) {
+                    const Rect r{{at.x + 4, at.y + 28 + i * item_h}, {w - 8, item_h - 2}};
+                    ButtonStyle s;
+                    s.bg = rgba{0, 0, 0, 0};
+                    s.bg_hover = theme::field_hover;
+                    s.bg_press = theme::accent;
+                    s.text = theme::text;
+                    s.text_size = 13;
+                    std::string t = items[static_cast<size_t>(i)];
+                    const vec2 tsz = f.measure_text(t, {.size = 13});
+                    if (tsz.x > w - 20) s.text_size = 13 * (w - 20) / tsz.x;
+                    if (f.button(t, r, s)) chosen = i;
+                }
+                const Popup was = popup;
+                if (chosen >= 0) {
+                    popup = Popup::None;
+                    const std::string& item = items[static_cast<size_t>(chosen)];
+                    if (was == Popup::Open) {
+                        if (item == import_label) unless_unsaved("import the old layout", import_old_layout);
+                        else unless_unsaved("open " + fs::path(item).filename().string(), [&, item] { open_file(item); });
+                    } else if (was == Popup::Add) {
+                        const SceneEntity::Kind kinds[] = {SceneEntity::Kind::Box, SceneEntity::Kind::Sphere, SceneEntity::Kind::Cylinder,
+                                                           SceneEntity::Kind::Cone, SceneEntity::Kind::Plane, SceneEntity::Kind::PointLight,
+                                                           SceneEntity::Kind::SpotLight, SceneEntity::Kind::Trigger, SceneEntity::Kind::Spawn,
+                                                           SceneEntity::Kind::Empty};
+                        if (chosen < 10) add_kind(kinds[chosen]);
+                        else { popup = Popup::AddModel; popup_at = at; }
+                    } else if (was == Popup::AddModel) {
+                        add_model(item);
+                    } else if (was == Popup::ChangeModel && selection.size() == 1) {
+                        record();
+                        scene.entities[static_cast<size_t>(selection[0])].model = item;
+                    } else if (was == Popup::Context && context_entity >= 0 && context_entity < static_cast<int>(scene.entities.size())) {
+                        if (item == "Rename") {
+                            selection = {context_entity};
+                            text_field = "name";
+                            begin_text_input(scene.entities[static_cast<size_t>(context_entity)].name);
+                            const int e = context_entity;
+                            text_commit = [&, e](const std::string& s) {
+                                record();
+                                if (e < static_cast<int>(scene.entities.size())) scene.entities[static_cast<size_t>(e)].name = s;
+                            };
+                        } else if (item == "Duplicate") {
+                            duplicate_selection();
+                        } else if (item == "Delete") {
+                            delete_selection();
+                        } else if (item == "Unparent") {
+                            record();
+                            for (int e : selection) scene.set_parent(e, -1);
+                        } else {
+                            frame_selection();
+                        }
+                    }
+                } else if ((left_pressed || f.mouse_pressed(Mouse::Right)) && !box.contains(m) && popup == popup_before) {
+                    popup = Popup::None;
+                }
+            }
+        }
+        if (popup != Popup::SaveAs && text_field == "#saveas") { // cancelled
+            end_text_input();
+            text_field.clear();
         }
     });
-
     return app.run();
 }
