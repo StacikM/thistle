@@ -1760,6 +1760,63 @@ struct RenderStats {
 
 class VoxelWorld;
 
+// A flat picture in the 3D world that always turns to face the camera:
+// sprites, far-away trees, a Doom-style enemy, a marker over an objective.
+struct Billboard {
+    vec3 position;             // center
+    vec2 size{1.0f, 1.0f};     // world units
+    rgba color = white;        // tint (and alpha)
+    Texture texture;           // none = a plain colored square
+    Rect frame;                // part of the texture in pixels, for sprite sheets; empty = all of it
+    float rotation = 0.0f;     // radians, spinning in the camera's view
+    bool upright = false;      // only turn around the vertical axis (trees, characters), don't tip back
+    bool additive = false;     // glow: adds light instead of covering (fire, sparks, magic)
+};
+
+// How a ParticleSystem's particles look and move.
+struct ParticleSettings {
+    Texture texture;                    // none = a soft round dot
+    rgba start_color = white;
+    rgba end_color = rgba{1.0f, 1.0f, 1.0f, 0.0f}; // fades out by default
+    float start_size = 0.25f;           // world units
+    float end_size = 0.05f;
+    float lifetime = 1.0f;              // seconds
+    float lifetime_jitter = 0.3f;       // +- this fraction, so they don't all vanish at once
+    vec3 velocity{0.0f, 1.5f, 0.0f};    // starting velocity...
+    float spread = 1.0f;                // ...plus up to this much in a random direction (m/s)
+    vec3 gravity{0.0f, -4.0f, 0.0f};
+    float drag = 0.5f;                  // fraction of velocity lost per second
+    float spin = 0.0f;                  // max random rotation speed, radians/second
+    bool additive = false;              // glowing particles (fire, sparks) vs. solid ones (dust, smoke)
+};
+
+// Smoke, sparks, dust, explosions: emit() bursts, update() moves them, and
+// World::draw(particles) draws them — per frame, like everything else.
+class ParticleSystem {
+public:
+    ParticleSettings settings;
+    size_t max_particles = 20000; // emits past this are dropped
+
+    void emit(vec3 position, int count) { emit(position, count, settings); }
+    void emit(vec3 position, int count, const ParticleSettings& look); // a one-off burst in a different style
+    void update(float dt);
+    void clear() { particles_.clear(); }
+    size_t count() const { return particles_.size(); }
+
+    struct Particle {
+        vec3 position, velocity;
+        float age, lifetime, rotation, spin;
+        const ParticleSettings* look; // the style it was emitted with
+    };
+    // Read-only, e.g. to let sparks set things on fire. Order is arbitrary.
+    const std::vector<Particle>& particles() const { return particles_; }
+
+private:
+    std::vector<Particle> particles_;
+    std::vector<std::unique_ptr<ParticleSettings>> looks_; // one per distinct style emitted
+    uint32_t seed_ = 12345;
+};
+
 // A 3D scene. Settings (sun, sky, ambient) stay until you change them; draw
 // calls are per frame, exactly like the 2D API — call draw() for everything
 // visible every frame, then render() once:
@@ -1803,6 +1860,8 @@ public:
     void draw_many(Model model, const std::vector<Transform>& transforms, const std::vector<rgba>& tints) {
         draw_many(model, transforms.data(), transforms.size(), tints.size() >= transforms.size() ? tints.data() : nullptr);
     }
+    void billboard(const Billboard& b);
+    void draw(const ParticleSystem& particles);
     // A block world: re-meshes whatever chunks were edited, then draws them.
     void draw(VoxelWorld& voxels);
     // Same, but every part of the model uses `material` instead of its own.
