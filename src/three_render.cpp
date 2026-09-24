@@ -769,7 +769,7 @@ RaycastHit raycast(const Ray& ray, Model model, const Transform& transform, floa
         const MeshRecord& mesh = rec->meshes[part.mesh];
         const mat4 world = model_matrix * part.local;
         const float limit = best.hit ? best.distance : max_distance;
-        if (!raycast(ray, mesh.bounds.transformed(world), limit)) continue;
+        if (!detail::ray_reaches_box(ray, mesh.bounds.transformed(world), limit)) continue;
         // Triangles are tested in world space, so hit distances stay in the
         // caller's units even under non-uniform scale.
         for (size_t i = 0; i + 2 < mesh.triangles.size(); i += 3) {
@@ -1007,6 +1007,16 @@ void unload_skybox(Skybox& skybox) {
 namespace thistle::detail {
 
 using namespace thistle::three;
+
+void model_world_triangles(Model model, const mat4& transform, std::vector<vec3>& out) {
+    const ModelRecord* rec = model_record(model);
+    if (!rec) return;
+    for (const PartRecord& part : rec->parts) {
+        const MeshRecord& mesh = rec->meshes[part.mesh];
+        const mat4 m = transform * part.local;
+        for (uint32_t idx : mesh.triangles) out.push_back(m.transform_point(mesh.positions[idx]));
+    }
+}
 
 void replace_model(Model& model, const ModelData& data) {
     ModelRecord* rec = model_record(model);

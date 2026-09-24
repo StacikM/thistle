@@ -1,4 +1,4 @@
-#include <thistle.hpp>
+#include "thistle_internal.h"
 
 #include <algorithm>
 #include <cmath>
@@ -413,3 +413,12 @@ Transform operator*(const Transform& parent, const Transform& child) {
 }
 
 } // namespace thistle::three
+
+namespace thistle::detail {
+
+bool ray_reaches_box(const three::Ray& ray, const three::Bounds& box, float max_distance) {
+    if (!box.valid()) return false;
+    return box.contains(ray.origin) || three::raycast(ray, box, max_distance).hit;
+}
+
+} // namespace thistle::detail

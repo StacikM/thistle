@@ -111,6 +111,7 @@ add_library(thistle STATIC
     src/three_render.cpp
     src/three_model.cpp
     src/three_voxel.cpp
+    src/three_collision.cpp
     src/cgltf_impl.c
     src/sokol_impl.c
     src/stb_impl.c
@@ -301,6 +302,10 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_voxel_smoketest examples/voxel_smoketest.cpp)
     target_link_libraries(thistle_voxel_smoketest PRIVATE thistle)
 
+    # Voxel raycast, CollisionWorld, CharacterController simulated at 60 Hz.
+    add_executable(thistle_character_smoketest examples/character_smoketest.cpp)
+    target_link_libraries(thistle_character_smoketest PRIVATE thistle)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -331,4 +336,6 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(model_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME voxel_smoketest COMMAND thistle_voxel_smoketest)
     set_tests_properties(voxel_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME character_smoketest COMMAND thistle_character_smoketest)
+    set_tests_properties(character_smoketest PROPERTIES TIMEOUT 30)
 endif()

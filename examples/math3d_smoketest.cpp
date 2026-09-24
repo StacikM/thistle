@@ -113,6 +113,14 @@ int main() {
         check(!raycast(Ray{{3, 0, 10}, {0, 0, -1}}, Bounds{{-1, -1, -1}, {1, 1, 1}}).hit, "ray beside a box misses");
         const RaycastHit inside = raycast(Ray{{0, 0, 0}, {1, 0, 0}}, Bounds{{-1, -1, -1}, {1, 1, 1}});
         check(inside.hit && near(inside.distance, 1.0f), "ray starting inside a box hits its far side");
+        {
+            // A ray starting inside a model's bounds must still find the
+            // model's own surfaces (it once didn't: the bounds pre-check
+            // measured to where the ray *leaves* the box).
+            const Model big = make_model(box_mesh({10, 10, 10}));
+            const RaycastHit in_box = raycast(Ray{{0, 0, 0}, {0, -1, 0}}, big, Transform{});
+            check(in_box.hit && near(in_box.distance, 5.0f), "raycast from inside a model's bounds hits the model");
+        }
         const RaycastHit sh = raycast_sphere(r, {0, 0, 0}, 2.0f);
         check(sh.hit && near(sh.distance, 8.0f) && near(sh.normal, {0, 0, 1}), "ray hits a sphere's front");
         check(!raycast_sphere(Ray{{0, 5, 10}, {0, 0, -1}}, {0, 0, 0}, 2.0f).hit, "ray passing over a sphere misses");

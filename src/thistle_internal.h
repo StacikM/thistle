@@ -20,11 +20,19 @@ uint64_t frame_index();            // increments once per rendered frame
 int frame_width();
 int frame_height();
 
+// --- implemented in three_math.cpp ---
+// Cheap pre-filter: can the ray touch this box within max_distance? True when
+// the ray starts inside it — unlike raycast(ray, Bounds), which reports where
+// such a ray *exits* and so would wrongly skip a box you're standing in.
+bool ray_reaches_box(const three::Ray& ray, const three::Bounds& box, float max_distance);
+
 // --- implemented in three_render.cpp ---
 // Swaps a model's parts for new ones, keeping its id — so a mesh that gets
 // rebuilt over and over (a voxel chunk) doesn't grow the model registry.
 // An invalid `model` gets a fresh one; empty `data` unloads it.
 void replace_model(three::Model& model, const three::ModelData& data);
+// Every triangle of every part, in world space (3 vec3 per triangle).
+void model_world_triangles(three::Model model, const three::mat4& transform, std::vector<vec3>& out);
 
 // --- implemented in three_render.cpp, called from thistle.cpp's frame loop ---
 void three_setup();
