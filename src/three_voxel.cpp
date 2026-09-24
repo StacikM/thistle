@@ -8,6 +8,7 @@
 #include <functional>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace thistle::three {
 
@@ -34,6 +35,7 @@ struct Chunk {
     std::vector<BlockId> blocks = std::vector<BlockId>(CS3, 0);
     int non_air = 0;
     bool dirty = true;
+    bool modified = false; // changed after generation: streaming must not drop it
     Model model;
 };
 
@@ -58,9 +60,30 @@ struct VoxelWorldImpl {
     int tile_size = 16;
     TextureFilter atlas_filter = TextureFilter::Nearest;
 
+    VoxelWorld::Generator generator;
+    std::unordered_set<int64_t> generated; // chunks the generator has filled (even if it left them empty)
+    bool generating = false;
+    ivec3 focus{0, 0, 0}; // block the last stream_around() centered on; re-meshing goes nearest-first
+    bool has_focus = false;
+
+    // Consecutive set()/get() calls almost always hit the same chunk (a
+    // generator filling one, a fill() box), so remember the last one.
+    // unordered_map nodes don't move on rehash; only erase invalidates this.
+    int64_t last_key = 0;
+    Chunk* last = nullptr;
+
     Chunk* find(int cx, int cy, int cz) {
-        auto it = chunks.find(chunk_key(cx, cy, cz));
-        return it == chunks.end() ? nullptr : &it->second;
+        const int64_t key = chunk_key(cx, cy, cz);
+        if (last && key == last_key) return last;
+        auto it = chunks.find(key);
+        if (it == chunks.end()) return nullptr;
+        last_key = key;
+        last = &it->second;
+        return last;
+    }
+    void erase(int64_t key) {
+        if (last && key == last_key) last = nullptr;
+        chunks.erase(key);
     }
     const Chunk* find(int cx, int cy, int cz) const {
         auto it = chunks.find(chunk_key(cx, cy, cz));
@@ -134,6 +157,7 @@ void VoxelWorld::set(int x, int y, int z, BlockId id) {
     c->non_air += (id != 0) - (slot != 0);
     slot = id;
     c->dirty = true;
+    if (!impl_->generating) c->modified = true;
     // Faces and corner shading of blocks in neighboring chunks depend on
     // this block too (up to all 26 neighbors, for a corner block).
     const int rx[2] = {lx == 0 ? -1 : 0, lx == CS - 1 ? 1 : 0};
@@ -176,6 +200,8 @@ void VoxelWorld::fill_sphere(vec3 center, float radius, BlockId id) {
 void VoxelWorld::clear() {
     for (auto& [key, chunk] : impl_->chunks) unload_model(chunk.model);
     impl_->chunks.clear();
+    impl_->last = nullptr;
+    impl_->generated.clear();
 }
 
 ivec3 VoxelWorld::to_block(vec3 p) const {
@@ -425,25 +451,88 @@ ModelData VoxelWorld::mesh_chunk(ivec3 c) const {
     return out;
 }
 
-void VoxelWorld::remesh_all() {
-    std::vector<int64_t> empty;
-    for (auto& [key, chunk] : impl_->chunks) {
-        if (chunk.non_air == 0) {
-            empty.push_back(key);
-            continue;
-        }
-        if (!chunk.dirty) continue;
-        detail::replace_model(chunk.model, mesh_chunk(key_chunk(key)));
+namespace {
+void remesh(VoxelWorld& world, VoxelWorldImpl& impl, int budget) {
+    std::vector<int64_t> empty, dirty;
+    for (auto& [key, chunk] : impl.chunks) {
+        if (chunk.non_air == 0 && !chunk.modified) empty.push_back(key);
+        else if (chunk.dirty) dirty.push_back(key);
+    }
+    if (budget > 0 && static_cast<int>(dirty.size()) > budget) {
+        const ivec3 f{impl.focus.x >> kChunkShift, impl.focus.y >> kChunkShift, impl.focus.z >> kChunkShift};
+        auto d2 = [&](int64_t k) { const ivec3 c = key_chunk(k) - f; return c.x * c.x + c.y * c.y + c.z * c.z; };
+        std::partial_sort(dirty.begin(), dirty.begin() + budget, dirty.end(), [&](int64_t a, int64_t b) { return d2(a) < d2(b); });
+        dirty.resize(budget);
+    }
+    for (int64_t key : dirty) {
+        Chunk& chunk = impl.chunks[key];
+        detail::replace_model(chunk.model, world.mesh_chunk(key_chunk(key)));
         chunk.dirty = false;
     }
     for (int64_t key : empty) {
-        unload_model(impl_->chunks[key].model);
-        impl_->chunks.erase(key);
+        unload_model(impl.chunks[key].model);
+        impl.erase(key);
+    }
+}
+} // namespace
+
+void VoxelWorld::remesh_all() { remesh(*this, *impl_, 0); }
+
+void VoxelWorld::set_generator(Generator generator) { impl_->generator = std::move(generator); }
+
+void VoxelWorld::stream_around(vec3 world_position, float radius, int budget) {
+    VoxelWorldImpl& w = *impl_;
+    w.focus = to_block(world_position);
+    w.has_focus = true;
+    const ivec3 center{w.focus.x >> kChunkShift, w.focus.y >> kChunkShift, w.focus.z >> kChunkShift};
+    const int r = std::max(1, static_cast<int>(std::ceil(radius / (voxel_size * CS))));
+    if (w.generator) {
+        std::vector<std::pair<int, ivec3>> wanted;
+        for (int z = -r; z <= r; ++z)
+            for (int y = -r; y <= r; ++y)
+                for (int x = -r; x <= r; ++x) {
+                    const int d2 = x * x + y * y + z * z;
+                    if (d2 > r * r) continue;
+                    const ivec3 c = center + ivec3{x, y, z};
+                    if (!w.generated.count(chunk_key(c.x, c.y, c.z))) wanted.push_back({d2, c});
+                }
+        std::sort(wanted.begin(), wanted.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (int i = 0; i < static_cast<int>(wanted.size()) && i < budget; ++i) {
+            const ivec3 c = wanted[i].second;
+            w.generating = true;
+            w.generator(*this, c);
+            w.generating = false;
+            w.generated.insert(chunk_key(c.x, c.y, c.z));
+        }
+    }
+    // Drop what's well outside the radius (the margin stops chunks at the
+    // edge flickering in and out as you step back and forth), unless the
+    // player changed it. The neighbors left behind are re-meshed, since
+    // their faces toward the dropped chunk are now open to the air.
+    const int drop = r + 2;
+    std::vector<int64_t> gone;
+    for (const int64_t key : w.generated) {
+        const ivec3 d = key_chunk(key) - center;
+        if (d.x * d.x + d.y * d.y + d.z * d.z <= drop * drop) continue;
+        auto it = w.chunks.find(key);
+        if (it != w.chunks.end() && it->second.modified) continue;
+        gone.push_back(key);
+    }
+    for (const int64_t key : gone) {
+        w.generated.erase(key);
+        auto it = w.chunks.find(key);
+        if (it == w.chunks.end()) continue;
+        unload_model(it->second.model);
+        w.erase(key);
+        const ivec3 c = key_chunk(key);
+        for (const ivec3 n : {ivec3{1, 0, 0}, ivec3{-1, 0, 0}, ivec3{0, 1, 0}, ivec3{0, -1, 0}, ivec3{0, 0, 1}, ivec3{0, 0, -1}}) {
+            if (Chunk* nc = w.find(c.x + n.x, c.y + n.y, c.z + n.z)) nc->dirty = true;
+        }
     }
 }
 
 void World::draw(VoxelWorld& voxels) {
-    voxels.remesh_all();
+    remesh(voxels, *voxels.impl_, voxels.max_remesh_per_frame);
     const float s = voxels.voxel_size;
     for (const auto& [key, chunk] : voxels.impl_->chunks) {
         if (!chunk.model.valid()) continue;
@@ -558,6 +647,10 @@ bool VoxelWorld::deserialize(const uint8_t* data, size_t size) {
         const uint32_t runs = r.u32();
         if (!r.ok || runs > static_cast<uint32_t>(CS3)) { r.ok = false; break; }
         Chunk& chunk = impl_->chunks[chunk_key(cx, cy, cz)];
+        // Loaded chunks count as generated *and* player-made: a generator
+        // must never overwrite them, and streaming must never drop them.
+        chunk.modified = true;
+        impl_->generated.insert(chunk_key(cx, cy, cz));
         int at = 0;
         for (uint32_t i = 0; i < runs && r.ok; ++i) {
             const BlockId id = r.u16();

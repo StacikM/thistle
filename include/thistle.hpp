@@ -1759,6 +1759,7 @@ struct RenderStats {
 };
 
 class VoxelWorld;
+class Terrain;
 
 // A flat picture in the 3D world that always turns to face the camera:
 // sprites, far-away trees, a Doom-style enemy, a marker over an objective.
@@ -1864,6 +1865,7 @@ public:
     void draw(const ParticleSystem& particles);
     // A block world: re-meshes whatever chunks were edited, then draws them.
     void draw(VoxelWorld& voxels);
+    void draw(Terrain& terrain);
     // Same, but every part of the model uses `material` instead of its own.
     void draw(Model model, const Transform& transform, const Material& material);
 
@@ -1999,6 +2001,22 @@ public:
     // Is any solid block inside this world-space box?
     bool overlaps_solid(const Bounds& box) const;
 
+    // --- endless worlds ---
+    // A generator fills one chunk (chunk coordinates; its blocks span
+    // chunk * 32 .. chunk * 32 + 31) by calling set(). stream_around() then
+    // generates chunks near a point as it moves and drops far ones — except
+    // chunks the player changed, which stay loaded so edits aren't lost
+    // (save() them if you want them to outlive the program). The generator
+    // must be deterministic (same chunk -> same blocks): noise, not rand().
+    using Generator = std::function<void(VoxelWorld& world, ivec3 chunk)>;
+    void set_generator(Generator generator);
+    // Generates at most `budget` new chunks per call (nearest first), so
+    // walking into new land costs a few chunks per frame, not a hitch.
+    void stream_around(vec3 world_position, float radius, int budget = 4);
+    // Re-meshing is capped per draw too (nearest the streaming point first);
+    // 0 = unlimited.
+    int max_remesh_per_frame = 24;
+
     // Everything — block types, blocks, voxel_size — as compact bytes
     // (run-length compressed chunks), and back. save()/load() write/read a
     // file; serialize()/deserialize() are for sending a world over the
@@ -2022,6 +2040,63 @@ private:
     std::unique_ptr<struct VoxelWorldImpl> impl_;
 };
 
+// --- noise & terrain -----------------------------------------------------------------
+
+// Smooth pseudo-random values, for terrain, clouds, wobble, anything organic.
+// Deterministic: the same inputs and seed give the same value on every
+// machine, so every player of a multiplayer game generates the same world.
+// (The 3D versions have their own names: with overloads, perlin(x, y, 42)
+// couldn't tell a seed from a z coordinate.)
+float perlin(float x, float y, uint32_t seed = 0);           // roughly -1..1, 0 at whole numbers
+float perlin3(float x, float y, float z, uint32_t seed = 0); // caves, clouds, anything volumetric
+// Octaves of perlin layered: big shapes plus finer and finer detail.
+// Roughly -1..1. More octaves = more detail (and more cost).
+float fbm(float x, float y, int octaves = 5, uint32_t seed = 0, float lacunarity = 2.0f, float gain = 0.5f);
+float fbm3(float x, float y, float z, int octaves = 5, uint32_t seed = 0, float lacunarity = 2.0f, float gain = 0.5f);
+// Sharp crests instead of rounded hills — mountain ranges. 0..1.
+float ridged(float x, float y, int octaves = 5, uint32_t seed = 0);
+
+// A heightmap landscape: a grid of heights, drawn as low-poly triangles
+// colored by height and steepness (sand, grass, rock, snow by default),
+// split into tiles so off-screen parts are culled. Walkable: add it to a
+// CollisionWorld.
+class Terrain {
+public:
+    // cells_x * cells_z squares of cell_size meters, so (cells + 1) heights per side.
+    Terrain(int cells_x = 128, int cells_z = 128, float cell_size = 1.0f);
+    ~Terrain();
+    Terrain(Terrain&&) noexcept;
+    Terrain& operator=(Terrain&&) noexcept;
+    Terrain(const Terrain&) = delete;
+    Terrain& operator=(const Terrain&) = delete;
+
+    vec3 origin{0.0f, 0.0f, 0.0f}; // world position of height (0, 0)
+    bool flat_shaded = true;        // faceted low-poly look; false = smooth hills
+    Material material;              // colors come from colorize (as vertex colors); a texture tiles in meters via uv_scale
+    // Vertex color for a height (meters) and slope (0 = flat, 1 = vertical).
+    // The default bands sand / grass / rock / snow between the lowest and
+    // highest points. Changes apply on the next rebuild.
+    std::function<rgba(float height, float slope)> colorize;
+
+    int cells_x() const;
+    int cells_z() const;
+    float cell_size() const;
+    float height(int x, int z) const;         // grid point; clamped at the edges
+    void set_height(int x, int z, float h);
+    // Fill every height from a function of world x/z (e.g. fbm noise).
+    void generate(const std::function<float(float x, float z)>& height_fn);
+    float height_at(float x, float z) const;  // world x/z, exactly on the drawn triangles
+    vec3 normal_at(float x, float z) const;
+    Bounds bounds() const;
+
+    void rebuild(); // done automatically when drawn after an edit
+
+private:
+    friend class World;
+    friend class CollisionWorld;
+    std::unique_ptr<struct TerrainImpl> impl_;
+};
+
 // --- collision & characters -------------------------------------------------------
 // Built in, no physics library needed: static colliders plus a character
 // controller that walks on them. It handles what a first- or third-person
@@ -2043,6 +2118,7 @@ public:
     // Each add returns an id for remove(). The voxel world must outlive this.
     int add(const VoxelWorld& voxels);
     int add(Model model, const Transform& transform = {}); // its triangles, as they are now
+    int add(const Terrain& terrain);                        // its triangles, as they are now
     int add_box(const Bounds& box);
     void remove(int id);
     void clear();

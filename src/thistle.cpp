@@ -397,6 +397,14 @@ void init_cb() {
     sg_desc gfx = {};
     gfx.environment = sglue_environment();
     gfx.logger.func = slog_func;
+    // sokol's defaults (128 buffers, 128 images, ...) are sized for demos; a
+    // 3D scene uses 2 buffers per mesh, and a streamed voxel world has
+    // hundreds of chunk meshes. These cost a few MB of bookkeeping.
+    gfx.buffer_pool_size = 16384;
+    gfx.image_pool_size = 4096;
+    gfx.view_pool_size = 8192;
+    gfx.sampler_pool_size = 256;
+    gfx.pipeline_pool_size = 256;
     sg_setup(&gfx);
 
     sgl_desc_t gl = {};
