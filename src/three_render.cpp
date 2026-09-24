@@ -4,6 +4,7 @@
 #include "sokol_gl.h"
 
 #include "shaders/background.glsl.h"
+#include "shaders/billboard.glsl.h"
 #include "shaders/lines.glsl.h"
 #include "shaders/lit.glsl.h"
 #include "shaders/shadow.glsl.h"
@@ -47,7 +48,22 @@ struct WorldImpl {
         uint32_t count = 0;
         Bounds bounds;      // world space, all copies
     };
+    // One camera-facing quad, laid out exactly as the billboard shader's
+    // per-instance buffer wants it.
+    struct Quad {
+        float pos[4];    // center xyz, width
+        float params[4]; // height, rotation, upright, unused
+        float color[4];
+        float uv[4];     // u0 v0 u1 v1
+    };
+    struct BillboardCmd {
+        Quad quad;
+        Texture texture;
+        bool dot = false; // no texture: soft round dot (particles) instead of a square
+        bool additive = false;
+    };
     std::vector<DrawCmd> draws;
+    std::vector<BillboardCmd> billboards;
     std::vector<ManyCmd> many;
     std::vector<Instance> instances;
     std::vector<Light> lights;
@@ -118,6 +134,13 @@ struct PassRecord {
     mat4 shadow_matrix;       // world -> (u, v, depth) in that shadow map
     float shadow_texel = 0.0f; // world size of one shadow-map texel
     std::vector<WorldImpl::DrawCmd> draws;
+    std::vector<WorldImpl::BillboardCmd> billboards;
+    struct BillboardBatch {
+        uint32_t first, count; // into the frame's shared quad buffer
+        Texture texture;
+        bool dot, additive;
+    };
+    std::vector<BillboardBatch> billboard_batches; // filled in three_before_passes, in draw order
     std::vector<WorldImpl::ManyCmd> many;
     std::vector<WorldImpl::Instance> instances;
     uint32_t instance_base = 0; // this pass's first instance in the frame's shared instance buffer
@@ -138,6 +161,14 @@ struct RenderState {
     sg_pipeline instanced_pipelines[PipCount] = {};
     sg_buffer instance_buffer = {};
     size_t instance_capacity = 0; // in instances
+    sg_shader billboard_shader = {};
+    sg_pipeline billboard_pipeline = {};
+    sg_pipeline billboard_additive_pipeline = {};
+    sg_buffer quad_buffer = {};
+    size_t quad_capacity = 0;
+    sg_image dot_image = {};
+    sg_view dot_view = {};
+    sg_sampler sprite_sampler = {};
     sg_pipeline sky_pipeline = {};
     sg_pipeline depth_reset_pipeline = {};
     sg_sampler sampler_linear = {};
@@ -306,6 +337,27 @@ void draw_lines(sg_pipeline pip, int first, int count, const mat4& view_proj) {
     sg_apply_uniforms(UB_lines_vs_params, SG_RANGE(vs));
     sg_draw(first, count, 1);
     ++g_three.stats_this_frame.draw_calls;
+}
+
+sg_pipeline make_billboard_pipeline(bool additive) {
+    sg_pipeline_desc pd = {};
+    pd.shader = g_three.billboard_shader;
+    pd.layout.buffers[0].stride = sizeof(WorldImpl::Quad);
+    pd.layout.buffers[0].step_func = SG_VERTEXSTEP_PER_INSTANCE;
+    pd.layout.attrs[ATTR_billboard_inst_pos] = {0, offsetof(WorldImpl::Quad, pos), SG_VERTEXFORMAT_FLOAT4};
+    pd.layout.attrs[ATTR_billboard_inst_params] = {0, offsetof(WorldImpl::Quad, params), SG_VERTEXFORMAT_FLOAT4};
+    pd.layout.attrs[ATTR_billboard_inst_color] = {0, offsetof(WorldImpl::Quad, color), SG_VERTEXFORMAT_FLOAT4};
+    pd.layout.attrs[ATTR_billboard_inst_uv] = {0, offsetof(WorldImpl::Quad, uv), SG_VERTEXFORMAT_FLOAT4};
+    pd.cull_mode = SG_CULLMODE_NONE;
+    pd.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
+    pd.depth.write_enabled = false;
+    pd.colors[0].blend.enabled = true;
+    pd.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_SRC_ALPHA;
+    pd.colors[0].blend.dst_factor_rgb = additive ? SG_BLENDFACTOR_ONE : SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    pd.colors[0].blend.src_factor_alpha = additive ? SG_BLENDFACTOR_ZERO : SG_BLENDFACTOR_ONE;
+    pd.colors[0].blend.dst_factor_alpha = additive ? SG_BLENDFACTOR_ONE : SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    pd.label = additive ? "three-billboard-additive" : "three-billboard";
+    return sg_make_pipeline(&pd);
 }
 
 sg_pipeline make_background_pipeline(bool write_color) {
@@ -773,6 +825,38 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
     }
 
     if (!lines_drawn) draw_lines(g_three.line_pipeline, pass.line_first, static_cast<int>(pass.lines.size()), view_proj);
+
+    if (!pass.billboard_batches.empty()) {
+        billboard_vs_params_t bvs2 = {};
+        bvs2.view_proj = view_proj;
+        const vec3 r = pass.camera.right(), u = pass.camera.up();
+        bvs2.cam_right = {r.x, r.y, r.z, 0.0f};
+        bvs2.cam_up = {u.x, u.y, u.z, 0.0f};
+        bvs2.cam_pos = {pass.camera.position.x, pass.camera.position.y, pass.camera.position.z, 1.0f};
+        int bound = -1;
+        for (const PassRecord::BillboardBatch& batch : pass.billboard_batches) {
+            if (static_cast<int>(batch.additive) != bound) {
+                sg_apply_pipeline(batch.additive ? g_three.billboard_additive_pipeline : g_three.billboard_pipeline);
+                sg_apply_uniforms(UB_billboard_vs_params, SG_RANGE(bvs2));
+                billboard_fs_params_t bfs2 = {};
+                bfs2.fog_color = scene.fog_color;
+                bfs2.fog_params = {scene.fog_params.x, scene.fog_params.y, scene.fog_params.z, batch.additive ? 1.0f : 0.0f};
+                bfs2.fs_cam_pos = bvs2.cam_pos;
+                sg_apply_uniforms(UB_billboard_fs_params, SG_RANGE(bfs2));
+                bound = batch.additive;
+            }
+            sg_bindings bind = {};
+            bind.vertex_buffers[0] = g_three.quad_buffer;
+            bind.vertex_buffer_offsets[0] = static_cast<int>(batch.first * sizeof(WorldImpl::Quad));
+            sg_view tex = batch.texture.valid() ? detail::texture_view(batch.texture) : sg_view{};
+            bind.views[VIEW_sprite_tex] = tex.id != SG_INVALID_ID ? tex : (batch.dot ? g_three.dot_view : g_three.white_view);
+            bind.samplers[SMP_sprite_smp] = g_three.sprite_sampler;
+            sg_apply_bindings(&bind);
+            sg_draw(0, 6, static_cast<int>(batch.count));
+            ++stats.draw_calls;
+            stats.triangles += static_cast<int>(batch.count) * 2;
+        }
+    }
     draw_lines(g_three.line_on_top_pipeline, pass.on_top_first, static_cast<int>(pass.lines_on_top.size()), view_proj);
 
     // Back to the full framebuffer for the 2D layers drawn after this pass.
@@ -892,6 +976,7 @@ WorldImpl& touch(std::unique_ptr<WorldImpl>& impl) {
     const uint64_t frame = detail::frame_index();
     if (impl->frame != frame) {
         impl->draws.clear();
+        impl->billboards.clear();
         impl->many.clear();
         impl->instances.clear();
         impl->lights.clear();
@@ -969,6 +1054,45 @@ void World::draw_many(Model model, const Transform* transforms, size_t count, co
         if (b.valid()) { cmd.bounds.add(b.min); cmd.bounds.add(b.max); }
     }
     impl.many.push_back(cmd);
+}
+
+void World::billboard(const Billboard& b) {
+    WorldImpl::BillboardCmd cmd;
+    WorldImpl::Quad& q = cmd.quad;
+    q.pos[0] = b.position.x; q.pos[1] = b.position.y; q.pos[2] = b.position.z; q.pos[3] = b.size.x;
+    q.params[0] = b.size.y; q.params[1] = b.rotation; q.params[2] = b.upright ? 1.0f : 0.0f; q.params[3] = 0.0f;
+    q.color[0] = b.color.r; q.color[1] = b.color.g; q.color[2] = b.color.b; q.color[3] = b.color.a;
+    q.uv[0] = 0.0f; q.uv[1] = 0.0f; q.uv[2] = 1.0f; q.uv[3] = 1.0f;
+    if (b.texture.valid() && b.frame.size.x > 0.0f && b.frame.size.y > 0.0f && b.texture.width > 0 && b.texture.height > 0) {
+        const float w = static_cast<float>(b.texture.width), h = static_cast<float>(b.texture.height);
+        q.uv[0] = b.frame.pos.x / w;
+        q.uv[1] = b.frame.pos.y / h;
+        q.uv[2] = (b.frame.pos.x + b.frame.size.x) / w;
+        q.uv[3] = (b.frame.pos.y + b.frame.size.y) / h;
+    }
+    cmd.texture = b.texture;
+    cmd.additive = b.additive;
+    touch(impl_).billboards.push_back(cmd);
+}
+
+void World::draw(const ParticleSystem& particles) {
+    WorldImpl& impl = touch(impl_);
+    for (const ParticleSystem::Particle& p : particles.particles()) {
+        const ParticleSettings& look = *p.look;
+        const float t = std::clamp(p.age / p.lifetime, 0.0f, 1.0f);
+        const rgba c = lerp(look.start_color, look.end_color, t);
+        const float size = look.start_size + (look.end_size - look.start_size) * t;
+        WorldImpl::BillboardCmd cmd;
+        WorldImpl::Quad& q = cmd.quad;
+        q.pos[0] = p.position.x; q.pos[1] = p.position.y; q.pos[2] = p.position.z; q.pos[3] = size;
+        q.params[0] = size; q.params[1] = p.rotation; q.params[2] = 0.0f; q.params[3] = 0.0f;
+        q.color[0] = c.r; q.color[1] = c.g; q.color[2] = c.b; q.color[3] = c.a;
+        q.uv[0] = 0.0f; q.uv[1] = 0.0f; q.uv[2] = 1.0f; q.uv[3] = 1.0f;
+        cmd.texture = look.texture;
+        cmd.dot = true;
+        cmd.additive = look.additive;
+        impl.billboards.push_back(cmd);
+    }
 }
 
 void World::box(vec3 center, vec3 size, rgba color) {
@@ -1068,6 +1192,7 @@ void World::render(const Frame&, const Camera& camera, Rect viewport) {
     pass.ambient = ambient;
     pass.lights = impl.lights;
     pass.draws = impl.draws;
+    pass.billboards = impl.billboards;
     pass.many = impl.many;
     pass.instances = impl.instances;
     pass.lines = impl.lines;
@@ -1185,6 +1310,39 @@ void three_setup() {
     cmp.compare = SG_COMPAREFUNC_LESS_EQUAL;
     cmp.label = "three-shadow-compare";
     s.shadow_sampler = sg_make_sampler(&cmp);
+    s.billboard_shader = sg_make_shader(billboard_shader_desc(sg_query_backend()));
+    s.billboard_pipeline = make_billboard_pipeline(false);
+    s.billboard_additive_pipeline = make_billboard_pipeline(true);
+    {
+        // The default particle: a soft round dot, white, alpha falling off
+        // smoothly to the edge.
+        constexpr int n = 32;
+        std::vector<uint32_t> px(n * n);
+        for (int y = 0; y < n; ++y) {
+            for (int x = 0; x < n; ++x) {
+                const float dx = (x + 0.5f) / n * 2.0f - 1.0f, dy = (y + 0.5f) / n * 2.0f - 1.0f;
+                const float a = std::clamp(1.0f - std::sqrt(dx * dx + dy * dy), 0.0f, 1.0f);
+                px[y * n + x] = 0x00FFFFFFu | (static_cast<uint32_t>(a * a * (3.0f - 2.0f * a) * 255.0f) << 24);
+            }
+        }
+        sg_image_desc dd = {};
+        dd.width = n;
+        dd.height = n;
+        dd.data.mip_levels[0] = {px.data(), px.size() * sizeof(uint32_t)};
+        dd.label = "three-particle-dot";
+        s.dot_image = sg_make_image(&dd);
+        sg_view_desc dv = {};
+        dv.texture.image = s.dot_image;
+        s.dot_view = sg_make_view(&dv);
+        sg_sampler_desc sd = {};
+        sd.min_filter = SG_FILTER_LINEAR;
+        sd.mag_filter = SG_FILTER_LINEAR;
+        sd.mipmap_filter = SG_FILTER_LINEAR;
+        sd.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
+        sd.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
+        sd.label = "three-sprite";
+        s.sprite_sampler = sg_make_sampler(&sd);
+    }
     s.lines_shader = sg_make_shader(lines_shader_desc(sg_query_backend()));
     s.line_pipeline = make_line_pipeline(false);
     s.line_on_top_pipeline = make_line_pipeline(true);
@@ -1262,6 +1420,13 @@ void three_shutdown() {
     for (sg_pipeline p : s.pipelines) sg_destroy_pipeline(p);
     for (sg_pipeline p : s.instanced_pipelines) sg_destroy_pipeline(p);
     sg_destroy_shader(s.lit_instanced_shader);
+    sg_destroy_pipeline(s.billboard_pipeline);
+    sg_destroy_pipeline(s.billboard_additive_pipeline);
+    sg_destroy_shader(s.billboard_shader);
+    if (s.quad_buffer.id != SG_INVALID_ID) sg_destroy_buffer(s.quad_buffer);
+    sg_destroy_view(s.dot_view);
+    sg_destroy_image(s.dot_image);
+    sg_destroy_sampler(s.sprite_sampler);
     sg_destroy_pipeline(s.shadow_instanced_pipeline);
     sg_destroy_shader(s.shadow_instanced_shader);
     if (s.instance_buffer.id != SG_INVALID_ID) sg_destroy_buffer(s.instance_buffer);
@@ -1287,7 +1452,35 @@ void three_before_passes() {
     // frame — and the shadow passes below already bind the instance buffer.
     std::vector<WorldImpl::Instance> all_instances;
     std::vector<WorldImpl::LineVertex> all_lines;
+    std::vector<WorldImpl::Quad> all_quads;
     for (PassRecord& pass : s.passes) {
+        // See-through billboards far to near (so nearer ones blend over
+        // farther ones), then glowing ones, which don't care about order.
+        // Consecutive runs with the same texture become one instanced draw.
+        std::vector<const WorldImpl::BillboardCmd*> order;
+        order.reserve(pass.billboards.size());
+        for (const auto& b : pass.billboards) order.push_back(&b);
+        const vec3 eye = pass.camera.position;
+        auto dist2 = [&](const WorldImpl::BillboardCmd* b) {
+            const vec3 d = vec3{b->quad.pos[0], b->quad.pos[1], b->quad.pos[2]} - eye;
+            return dot(d, d);
+        };
+        std::stable_sort(order.begin(), order.end(), [&](const WorldImpl::BillboardCmd* a, const WorldImpl::BillboardCmd* b) {
+            if (a->additive != b->additive) return !a->additive;
+            if (!a->additive) return dist2(a) > dist2(b);
+            return a->texture.id < b->texture.id;
+        });
+        pass.billboard_batches.clear();
+        for (const WorldImpl::BillboardCmd* b : order) {
+            auto* last = pass.billboard_batches.empty() ? nullptr : &pass.billboard_batches.back();
+            if (!last || last->texture.id != b->texture.id || last->dot != b->dot || last->additive != b->additive) {
+                pass.billboard_batches.push_back({static_cast<uint32_t>(all_quads.size()), 0, b->texture, b->dot, b->additive});
+                last = &pass.billboard_batches.back();
+            }
+            all_quads.push_back(b->quad);
+            ++last->count;
+        }
+
         pass.instance_base = static_cast<uint32_t>(all_instances.size());
         all_instances.insert(all_instances.end(), pass.instances.begin(), pass.instances.end());
         pass.line_first = static_cast<int>(all_lines.size());
@@ -1315,6 +1508,7 @@ void three_before_passes() {
     write_transient(s.instance_buffer, s.instance_capacity, all_instances.data(), all_instances.size(),
                     sizeof(WorldImpl::Instance), "three-instances");
     write_transient(s.line_buffer, s.line_capacity, all_lines.data(), all_lines.size(), sizeof(WorldImpl::LineVertex), "three-lines");
+    write_transient(s.quad_buffer, s.quad_capacity, all_quads.data(), all_quads.size(), sizeof(WorldImpl::Quad), "three-billboards");
 
     if (!s.no_shadow_cleared) {
         sg_pass clear = {};
