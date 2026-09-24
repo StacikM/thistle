@@ -41,11 +41,13 @@ def die(msg: str) -> "None":
     sys.exit(1)
 
 
-def find_project_root(start: Path) -> Path:
+def find_project_root(start: Path, required: bool = True):
     p = start.resolve()
     for candidate in (p, *p.parents):
         if (candidate / "thistle.json").exists():
             return candidate
+    if not required:
+        return None
     die("not inside a thistle project (no thistle.json here or in a parent directory)")
 
 
@@ -207,8 +209,12 @@ def cmd_editor(args) -> None:
 
     if args.editor_cmd == "run":
         exe = _build_editor()
-        print("$ " + str(exe))
-        os.execv(str(exe), [str(exe)])
+        # The editor edits one game's assets/ and scenes/: the folder given,
+        # else the project we're in, else (outside any project) its own folder.
+        folder = Path(args.project).resolve() if args.project else find_project_root(Path.cwd(), required=False)
+        argv = [str(exe)] + ([str(folder)] if folder else [])
+        print("$ " + " ".join(argv))
+        os.execv(str(exe), argv)
 
     # install, or update falling through to reinstall with the fresh build
     exe = _build_editor()
@@ -348,7 +354,10 @@ def main() -> None:
     esub = p_editor.add_subparsers(dest="editor_cmd", required=True)
     esub.add_parser("install", help="build the editor and put `thistle-editor` on your PATH").set_defaults(func=cmd_editor)
     esub.add_parser("update", help="pull the latest engine source, then rebuild+reinstall the editor").set_defaults(func=cmd_editor)
-    esub.add_parser("run", help="build (if needed) and run the editor without installing it").set_defaults(func=cmd_editor)
+    p_erun = esub.add_parser("run", help="build (if needed) and run the editor without installing it")
+    p_erun.add_argument("project", nargs="?", default=None,
+                        help="the game folder to edit (default: the project you're in; its assets/ and scenes/ are what the editor shows)")
+    p_erun.set_defaults(func=cmd_editor)
 
     args = parser.parse_args()
     args.func(args)

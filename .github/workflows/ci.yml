@@ -60,3 +60,13 @@ jobs:
 
       - name: Test (headless suites — no GPU/display needed)
         run: ctest --test-dir build -C Release --output-on-failure
+
+      # The Thistle Editor is its own project on top of the engine (see
+      # tools/thistle-editor): build it too, so it can't stop compiling on one
+      # platform unnoticed. It doesn't use the optional modules, so once per
+      # OS is enough. Like the demos, it's built, never run here.
+      - name: Build the Thistle Editor
+        if: matrix.modules == 'OFF'
+        run: |
+          cmake -S tools/thistle-editor -B build-editor -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-editor --config Release

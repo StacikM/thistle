@@ -404,6 +404,20 @@ bool Frustum::intersects_sphere(vec3 c, float radius) const {
     return true;
 }
 
+vec3 to_euler(quat q) {
+    // quat::euler builds Ry(yaw) * Rx(pitch) * Rz(roll); read the angles
+    // back off that product's matrix (row 1 column 2 is -sin(pitch)).
+    const mat4 m = mat4::rotate(normalize(q));
+    const float sp = std::clamp(-m(1, 2), -1.0f, 1.0f);
+    const float pitch = std::asin(sp);
+    if (std::fabs(sp) < 0.9999f) {
+        return {pitch, std::atan2(m(0, 2), m(2, 2)), std::atan2(m(1, 0), m(1, 1))};
+    }
+    // Looking straight up or down: yaw and roll turn about the same axis;
+    // put it all in yaw.
+    return {pitch, std::atan2(-m(2, 0), m(0, 0)), 0.0f};
+}
+
 Transform operator*(const Transform& parent, const Transform& child) {
     Transform r;
     r.position = parent.apply(child.position);

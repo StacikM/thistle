@@ -1268,7 +1268,8 @@ void World::shape(int kind, const Transform& transform, rgba color) {
         case 0: draw(unit_model(g_three.unit_box, [] { return box_mesh(); }), transform, color); break;
         case 1: draw(unit_model(g_three.unit_sphere, [] { return sphere_mesh(); }), transform, color); break;
         case 2: draw(unit_model(g_three.unit_cylinder, [] { return cylinder_mesh(); }), transform, color); break;
-        default: draw(unit_model(g_three.unit_cone, [] { return cone_mesh(); }), transform, color); break;
+        case 3: draw(unit_model(g_three.unit_cone, [] { return cone_mesh(); }), transform, color); break;
+        default: draw(unit_model(g_three.unit_plane, [] { return plane_mesh(); }), transform, color); break;
     }
 }
 

@@ -1,181 +1,127 @@
 # Thistle Editor
 
-A prop-placement tool for Thistle's minor-3D drawing mode: spawn a built-in
-primitive (cube/sphere/cylinder/cone/plane/trigger) or browse `.obj` files,
-move things with the mouse or keyboard, name them, group them into real
-parent/child hierarchies, save/load the layout as a `Node` tree.
+A 3D level editor for `thistle::three`. Place models, shapes, lights, trigger volumes and spawn points, move/rotate/scale them with gizmos, group them, give them properties your game reads, set the sun, sky and fog, and save the result as a `.scene.json` that your game loads with `three::Scene3D` (see [docs/scene3d.md](../../docs/scene3d.md)).
 
-**This is not a level compiler.** There's no BSP, no lighting bake, none of what
-actually makes something like Hammer valuable for a real FPS level. It's the
-thinnest real GUI on top of `save_scene()`/`load_scene()` — see
-[docs/ui-and-scenes.md](../../docs/ui-and-scenes.md)'s "Placing minor-3D props
-on a `Node`" section for exactly what that captures (and doesn't). Use this for
-laying out props in a small 3D scene, not for building a shippable level. The
-**Trigger** primitive is the same story: it's a named position + size, nothing
-more — see "Trigger volumes" below.
+It's drawn with Thistle's own 2D API, not Dear ImGui, and it renders the level with the same `three::World` renderer your game uses: what you see in the editor is what the game draws, lights and shadows included.
 
-## Layout
+Voxel painting and sculpting aren't in it yet. That's the next step.
 
-Outliner (hierarchy tree) on the left, Inspector (selected prop's name +
-transform) on the right, both running the full height of the window below
-the top bar — there's no spawn palette taking up bottom-of-window space
-anymore, since spawning now happens through the Outliner's right-click menu
-(see "Adding and deleting" below). A real viewport grid with colored X/Z
-axis lines instead of a flat ground plane, a wireframe cage around whatever's
-selected instead of a floating marker cube. This is a deliberate redesign
-toward how Blender/Unity actually lay their tools out — a real screenshot of
-Blender's default window (docs.blender.org's Window System Introduction
-page) was checked before writing it, not worked from memory.
-
-There's still no orbiting 3D gizmo ball (no way to draw a fixed screen-space
-overlay independent of the main camera) — just the axis-colored grid lines
-for orientation. The Inspector's Position/Rotation/Scale fields stay
-read-only-number-plus-steppers rather than click-to-type — a mouse-drag
-already covers coarse repositioning (see below), and steppers are enough for
-fine nudges. The Name field, though, **is** a real click-to-type box: it uses
-Thistle's actual `begin_text_input()`/`text_input()` capture (the engine does
-have text input, it just has no built-in visual widget for it anywhere — this
-is that widget, built for exactly one field).
-
-## Building
+## Running it
 
 ```bash
-thistle editor install   # build it and put `thistle-editor` on your PATH
-thistle editor run       # or just build+run it once, without installing
+thistle editor run              # from inside a game project: edits that project
+thistle editor run path/to/game # or name the project
+thistle editor install          # put `thistle-editor` on your PATH, then: thistle-editor [project]
 ```
 
-Or by hand, since it's a real Thistle project — it links the engine the same
-way a scaffolded game would (see the comment in `CMakeLists.txt`), just
-pointed at this repo's own engine two directories up instead of a copy:
+The editor works on one project folder:
+
+- **Models** are the `.glb`, `.gltf` and `.obj` files anywhere under its `assets/`.
+- **Scenes** are saved to `assets/scenes/`. They're in `assets/` on purpose: `thistle_bundle_assets()` ships that folder with the game on every platform, so a level the editor saves is a level the game can load, with nothing else to set up.
+- Paths inside a scene are relative to the project folder (`assets/ship.glb`), which is also how the game sees them once `assets/` is next to it.
+
+Without a folder, it uses the current one if it has `assets/` or `thistle.json`, else the folder the editor itself is in.
+
+## The window
+
+- **Top bar**: New, Open, Save, Save as, Undo, Redo, the Move/Rotate/Scale tools, `+ Add`, and the file name (orange with a `*` when there are unsaved changes).
+- **Outliner** (left): everything in the scene as a tree.
+- **Viewport** (middle): the level, drawn by the engine, with a grid, gizmos, and icons for the things that don't draw in the game (lights, triggers, spawn points, empties).
+- **Inspector** (right): whatever's selected. With nothing selected, it shows the scene's own settings: sun direction/height/color/intensity/shadows, sky colors, ambient light, fog.
+- **Status bar**: the main shortcuts, and what just happened ("saved ...", "moved under ...").
+
+## Moving around
+
+| | |
+|---|---|
+| Middle-drag | Orbit |
+| Shift + middle-drag | Pan |
+| Wheel | Zoom |
+| Alt + left-drag / Alt + Shift + left-drag | Orbit / pan (for laptops without a middle button) |
+| Hold right button | Fly: the mouse looks, WASD moves, Q/E down/up, Shift faster |
+| F | Frame the selection |
+| Numpad 1 / 3 / 7 | Look from the front / right / top |
+
+That's Blender's orbit-and-pan plus Unity's and Unreal's right-button fly mode.
+
+## Editing
+
+- **Add**: `+ Add` (or Shift+A) has Box, Sphere, Cylinder, Cone, Plane, Point light, Spot light, Trigger volume, Spawn point, Empty (a group), and Model..., which lists the models in `assets/`. New things go below the point the camera orbits around, resting on the ground. Lights go 3 m up.
+- **Select**: click in the viewport or the Outliner. Ctrl- or Shift-click adds or removes. Ctrl+A selects everything, Esc selects nothing. Clicking picks the nearest thing under the cursor, and for models that's a test against their triangles, not their box.
+- **Gizmos**: W / E / R switch between move, rotate and scale.
+  - Move: drag an arrow to go along that axis, or a colored square to slide in that plane.
+  - Rotate: drag a ring.
+  - Scale: drag a handle to stretch along that axis, or the center square for all three.
+  - Move and rotate use the world's axes. Scale uses the object's own axes, since that's what scaling means.
+  - Hold **Ctrl** while dragging to snap: 0.5 m, 15°, 0.1×.
+  - With several things selected, they move, turn and scale together around their middle.
+- **Inspector fields**: drag a number left/right to change it (Shift for fine control), or double-click it and type. Enter or clicking elsewhere keeps what you typed, Esc doesn't. Rotation is shown in degrees.
+- **Properties**: `+ property` adds a key/value pair. They're for your game (`health` = `100`, `door` = `exit`) and the editor doesn't interpret them.
+- **Hierarchy**: drag a row in the Outliner onto another to put it under that one, or onto empty space to move it back to the top. It keeps its place in the world either way. Moving a parent moves what's under it. You can't put something under its own child: the editor says so and doesn't change anything.
+- **Right-click a row**: Rename, Duplicate, Delete, Unparent, Frame.
+- **Duplicate** Ctrl+D, **Delete** Del / X / Backspace. Deleting something deletes what's under it.
+- **Undo / Redo**: Ctrl+Z, and Ctrl+Shift+Z or Ctrl+Y. That covers every change (adding, gizmo drags, typed values, reparenting, scene settings), 200 steps back.
+
+## Files
+
+- **Save** (Ctrl+S) writes the current file. **Save as** (Ctrl+Shift+S, or Save on a new scene) asks for a name and writes `assets/scenes/<name>.scene.json`.
+- **Open** (Ctrl+O) lists the scenes under `assets/` (and any `.scene.json` lying directly in the project folder).
+- **New** (Ctrl+N) starts a scene with a ground plane and a `player_start` spawn point.
+- New and Open clear the undo history, so with unsaved changes they ask first ("Discard changes" / "Cancel").
+- Closing the window doesn't ask. Save first.
+
+### Layouts from the old editor
+
+The editor that came before this one was a prop placer for the 2D engine's minor-3D mode. It saved one layout, as a `Node` tree, to `thistle_editor_scene.json` in its save folder. If that file exists, Open lists **Import the old editor's layout**. The import brings every node across with its name, hierarchy, color and world placement: primitives become shapes, `.obj` props become models, and triggers stay triggers. Use Save as to keep the result.
+
+Two things don't carry over exactly:
+
+- **Textures on `.obj` props.** The old editor paired an `.obj` with a same-named `.png` by convention. Models now take their textures from the `.mtl` file.
+- **Rotations nested under other rotated nodes.** Node trees add rotations axis by axis down the chain, while scenes compose them properly. The import keeps each thing where the old editor showed it, so the local numbers under a rotated parent come out different.
+
+## What it doesn't do (yet)
+
+- No voxel tools. That's the next step.
+- No prefabs, no multiple scenes open at once, no copy/paste between scenes.
+- No play button: run your game to see the level in it.
+- Physics isn't set up here. A game reads the scene and makes bodies for what it wants (see [docs/scene3d.md](../../docs/scene3d.md)).
+- It doesn't watch `assets/` for changes. The lists refresh when you open Open or `+ Add`.
+- There's one viewport. There's no split view and no orthographic camera: the numpad views are perspective.
+
+## What's been verified
+
+Run under Xvfb + llvmpipe (software OpenGL) on Linux and driven with `xdotool`, with a screenshot after each step:
+
+- Adding every kind of thing from `+ Add`, including a glTF model (`Duck.glb`), which lands sitting on the ground.
+- Selecting by clicking in the viewport and in the Outliner.
+- Dragging the move arrow. The box followed the mouse along X and the Inspector read 2.89.
+- Dragging the Y rotation ring. It turned 43.6° about Y, and the saved quaternion was a pure Y rotation, turning the right way.
+- Dragging the Y scale handle on a rotated box. It stretched along the box's own axis, Y scale 1.92.
+- Undo, redo (Ctrl+Shift+Z and Ctrl+Y), and undoing typed values one at a time.
+- Typing values into Position, Rotation and Scale, committed with Enter, with keypad Enter, and by clicking away. Typing into Rotation was broken until this was tested: it wrote to a value that no longer existed. It's fixed.
+- Orbit, zoom, fly mode, and F to frame.
+- Point and spot lights lighting the ground, with their icons.
+- The Outliner's drag-to-parent. After it, moving the parent moved the child too.
+- The right-click menu's Delete (and undoing it) and Duplicate. Custom properties. Turning fog on.
+- Save as, then Open after restarting the editor. The saved JSON was checked value by value: parents, lights' intensity/range/cone, properties, and fog.
+- New with unsaved changes asks first. Cancel keeps the changes and Discard throws them away. The asking came out of this testing: before it, New silently dropped them, and undo couldn't bring them back.
+- Importing a hand-written old-editor layout. The positions were checked against hand-computed ones, including a child under a rotated, stretched parent. A malformed old file is refused, not a crash. It was a crash on the first try, since `load_scene()` throws.
+
+`scene3d_smoketest` (ctest) covers the file format and the transform math the editor relies on.
+
+Not verified: any real GPU or display. macOS and Windows haven't been run at all. On a Retina/HiDPI screen, mouse coordinates vs. drawing coordinates are the thing most likely to be off, and that hasn't been seen. The window is 1440×860 by default. The panels are fixed widths, so it's cramped much below about 1100 px wide.
+
+## Building it by hand
+
+It's a regular Thistle project that points at this repo's engine two folders up:
 
 ```bash
 cd tools/thistle-editor
 cmake -S . -B build
 cmake --build build
+./build/thistle_editor path/to/game
 ```
 
-## Running
+## Font
 
-Just open the built app/executable — it finds its own `assets/`/`editor_assets/`
-folders relative to itself, not relative to whatever directory it happened to
-be launched from (double-clicking a `.app` in Finder starts it with an
-unrelated working directory, so this matters).
-
-**Primitives** (cube/sphere/cylinder/cone/plane/trigger) are always
-available, no assets required — right-click the Outliner to spawn one (see
-"Adding and deleting" below).
-
-**Models**: the editor also scans `./assets` (relative to the built
-executable) for `.obj` files, recursively, and lists them in that same
-right-click menu alongside the primitives. For each one it resolves a
-texture by convention, since `load_mesh()` doesn't read `.mtl`:
-
-1. A same-basename `.png` next to the `.obj` (`chest.obj` → `chest.png`), else
-2. a shared `atlas.png` or `colormap.png` in that same folder (the common case
-   for a kit that shares one texture atlas across many props), else
-3. no texture — the prop draws flat-colored.
-
-No `.obj` files ship with this tool (kept it asset-free, same as the engine's
-own smoketest) — drop your own into `assets/` next to the built executable.
-It was verified during development against Kenney's CC0 "Mini Dungeon" pack
-(kenney.nl), which is exactly the atlas-sharing layout convention #2 above is
-for.
-
-The editor's own UI font (`editor_assets/inter-regular.ttf`, bundled and
-copied next to the executable at build time) is **Inter** by the Inter
-Project Authors (github.com/rsms/inter), OFL — the same font Blender's own
-UI has used since ~2.9, picked for the same reason. License text travels
-with it (`editor_assets/inter-OFL-LICENSE.txt`), as OFL requires. That's a
-separate folder from `assets/` on purpose — the tool's own resources and
-your project's props should never collide over a shared folder name.
-
-## Mouse control
-
-- **Left-click** a prop (in the viewport, or a row in the Outliner) to select
-  it. Clicking empty viewport space deselects — matches Blender's/Unity's own
-  convention. Picking works by projecting every node's position to screen
-  space and taking the nearest one within ~40px of the click, not real
-  ray-mesh intersection (there's no such thing in Thistle to hit-test
-  against) — good enough at editor prop-counts, but two overlapping objects
-  can be hard to tell apart by click alone (Tab-cycle or the Outliner instead).
-- **Left-click-drag** a selected prop to slide it along the ground plane at
-  its current height, preserving the offset between where you clicked and its
-  center (it doesn't snap its center to the cursor). Height still needs R/F.
-- **Right-click-drag** anywhere to orbit the camera (yaw + pitch).
-- **Scroll** to zoom. Up/Down keys also zoom, Left/Right keys also orbit yaw.
-
-All of this is built on real camera-ray math (screen position → world ray →
-intersect the ground plane), not a shortcut — verified with a standalone
-round-trip test (project a known world point to screen, unproject it back,
-confirm you land on the same point) before being wired into the editor,
-since this is exactly the kind of math that's easy to get subtly backwards.
-
-## Hierarchy
-
-**Adding and deleting**: right-click empty space in the Outliner for an
-"Add: X" menu that spawns a new prop at the scene root; right-click an
-existing row instead for "Add child: X" (spawns as a *child* of that row)
-plus a "Delete" entry (removes that row and everything nested under it).
-There's no more bottom palette bar or Shift+click-to-spawn — this replaced
-both. Moving, rotating, or scaling a parent moves everything nested under it
-too — real grouping, not just a visual nesting in a list.
-
-**Re-parent an existing prop**: select it, then **Ctrl+click** a *different*
-row in the Outliner to move the selection under that row instead, preserving
-its world position (it won't visually jump). Refuses to create a cycle (you
-can't re-parent something onto its own descendant).
-
-See `Node::draw_meshes()`'s doc comment in `include/thistle.hpp` for exactly
-how the transform composes (short version: per-axis rotation addition, not a
-true rotation-matrix multiply — exact for the common case of everything
-sharing one rotation axis, an approximation once nested nodes rotate around
-different axes at once). Re-parenting keeps the child's own rotation/scale
-values as-is, so its world rotation/scale can visibly shift if the new
-parent has a non-identity one — fine under a plain unrotated/unscaled group
-node, the common case.
-
-## Trigger volumes
-
-The **Trigger** primitive is pure data: a named position + size, drawn as a
-cyan wireframe box in the editor (rotation-aware — a rotated trigger visibly
-looks rotated) and **never** drawn as a solid mesh by `Node::draw_meshes()`,
-in the editor or in your own game. This is exactly what a brush in a level
-editor like Hammer actually is on its own: geometry and a name, with the
-*engine* (Source, in Hammer's case — your own game code, here) responsible
-for actually testing overlap and doing something about it — Thistle now has
-basic 3D overlap tests (`Box3D`/`Sphere3D`, `box3d_sphere3d_overlap()`, etc.,
-see docs/drawing.md's "3D collision" section) but nothing calls them
-automatically; there's still no "on enter" callback, no event, nothing that
-fires on its own. Load the scene, walk the tree for `mesh_prim ==
-Prim::Trigger` nodes, build a `Box3D` from `node->world_mesh_transform()`
-(parent-composed the same way as any other node — see `Node::draw_meshes()`'s
-doc comment), and call the overlap test yourself, every frame.
-
-## Keybindings
-
-| Key | Action |
-|---|---|
-| Click a prop / Outliner row | Select it |
-| Click empty viewport | Deselect |
-| Click-drag a selected prop | Move it along the ground at its current height |
-| Right-drag | Orbit camera |
-| Scroll / Up / Down | Zoom camera |
-| Left / Right | Orbit camera (yaw) |
-| Right-click empty Outliner space | Open the "Add" menu (spawns at scene root) |
-| Right-click an Outliner row | Open the "Add child" / "Delete" menu for that row |
-| Ctrl+click a different Outliner row | Re-parent the current selection onto it |
-| W / A / S / D | Move selected prop (relative to its own parent) |
-| R / F | Move selected prop up / down |
-| Q / E | Rotate selected prop (Y axis) |
-| Z / X | Scale selected prop down / up |
-| Tab | Select next prop (whole tree, not just root-level) |
-| Escape | Deselect (or cancel a Name edit in progress) |
-| Backspace | Delete selected prop (and everything nested under it) |
-| Ctrl+S | Save the scene |
-| Ctrl+O | Load the scene |
-| Enter (while naming) | Save the Name field |
-
-Save/load always uses one fixed file next to your save data
-(`thistle_editor_scene.json`, in the same directory `save::path()` returns) —
-there's no file-picker dialog, so it's one layout at a time. If you want more
-than that, copy the JSON out between sessions.
+The UI font, `editor_assets/inter-regular.ttf`, is **Inter** by the Inter Project Authors ([github.com/rsms/inter](https://github.com/rsms/inter)), under the OFL. Its license travels with it in `editor_assets/inter-OFL-LICENSE.txt`, as the OFL requires. It's kept in `editor_assets/`, apart from any project's `assets/`, so the editor's own files and your game's never share a folder.

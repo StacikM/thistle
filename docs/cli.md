@@ -55,9 +55,9 @@ The starter `main.cpp` deliberately draws shapes, not text — text needs a `.tt
 - **`thistle modules`** / **`enable <module>`** / **`disable <module>`** — optional engine modules, big enough that a game has to ask for them. Right now: `physics3d` (Jolt rigid bodies and voxel destruction, see [physics3d.md](physics3d.md)) and `debug_ui` (Dear ImGui debug windows, see [ui-and-scenes.md](ui-and-scenes.md)). Switching writes `"modules": {...}` into `thistle.json`; the generated `CMakeLists.txt` reads it before adding the engine, and the `CONFIGURE_DEPENDS` line below makes the next build reconfigure by itself. Projects made by an older `thistle new` don't read modules — `enable` notices and prints the lines to add rather than editing your CMake for you.
 - **`thistle editor install`** — builds `tools/thistle-editor` and puts a `thistle-editor` launcher on your `PATH` (same default/override as the `thistle` command itself: `~/.local/bin`, or `THISTLE_BIN_DIR`). A symlink on Unix, a one-line wrapper `.bat` on Windows (same reasoning as `install.bat` above).
 - **`thistle editor update`** — `git pull --ff-only` on the engine checkout (the editor's source lives in the same repo, so this is the same update mechanism as the engine itself), then rebuilds and reinstalls.
-- **`thistle editor run`** — builds (if needed) and execs the editor directly, without touching your `PATH` — for trying a change without installing it.
+- **`thistle editor run [project]`** — builds (if needed) and execs the editor directly, without touching your `PATH`. It edits the project folder you name, or else the project you're in (the nearest folder up with a `thistle.json`). The installed `thistle-editor` takes the same optional folder argument.
 
-Unlike `new`/`build`/`run`/`version`, `thistle editor` doesn't need a `thistle.json` project in your current directory — it operates on the engine checkout itself, so it works from anywhere.
+Unlike `new`/`build`/`run`/`version`, `thistle editor` doesn't need a `thistle.json` project in your current directory — it builds from the engine checkout itself, so it works from anywhere. Run outside any project, the editor works in its own folder.
 
 ## How the version actually gets into your code
 

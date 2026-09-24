@@ -186,6 +186,7 @@ add_library(thistle STATIC
     src/three_audio.cpp
     src/three_net.cpp
     src/three_anim.cpp
+    src/three_scene.cpp
     src/cgltf_impl.c
     src/sokol_impl.c
     src/stb_impl.c
@@ -500,6 +501,10 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_animation_smoketest examples/animation_smoketest.cpp)
     target_link_libraries(thistle_animation_smoketest PRIVATE thistle)
 
+    # three::Scene (the Thistle Editor's level format) + to_euler().
+    add_executable(thistle_scene3d_smoketest examples/scene3d_smoketest.cpp)
+    target_link_libraries(thistle_scene3d_smoketest PRIVATE thistle)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -546,4 +551,6 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(voxelnet_smoketest PROPERTIES TIMEOUT 60)
     add_test(NAME animation_smoketest COMMAND thistle_animation_smoketest)
     set_tests_properties(animation_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME scene3d_smoketest COMMAND thistle_scene3d_smoketest)
+    set_tests_properties(scene3d_smoketest PROPERTIES TIMEOUT 30)
 endif()
