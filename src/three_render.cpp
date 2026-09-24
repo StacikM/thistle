@@ -6,9 +6,11 @@
 #include "shaders/background.glsl.h"
 #include "shaders/lines.glsl.h"
 #include "shaders/lit.glsl.h"
+#include "shaders/shadow.glsl.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 
 namespace thistle::three {
@@ -100,6 +102,9 @@ struct PassRecord {
     Fog fog;
     float ambient = 0.0f;
     std::vector<WorldImpl::Light> lights;
+    int shadow_target = -1;   // index into RenderState::shadow_targets, -1 = no shadows this pass
+    mat4 shadow_matrix;       // world -> (u, v, depth) in that shadow map
+    float shadow_texel = 0.0f; // world size of one shadow-map texel
     std::vector<WorldImpl::DrawCmd> draws;
     std::vector<WorldImpl::LineVertex> lines;
     std::vector<WorldImpl::LineVertex> lines_on_top;
@@ -124,6 +129,19 @@ struct RenderState {
     sg_view black_cube_view = {};
     sg_sampler sky_sampler = {};
     std::vector<SkyboxRecord> skyboxes;
+
+    struct ShadowTarget {
+        int size = 0;
+        sg_image image = {};
+        sg_view attachment = {};
+        sg_view texture = {};
+    };
+    sg_shader shadow_shader = {};
+    sg_pipeline shadow_pipeline = {};
+    sg_sampler shadow_sampler = {};
+    std::vector<ShadowTarget> shadow_targets; // one per render() that has shadows this frame
+    ShadowTarget no_shadow;                   // 1x1, cleared to "far": what passes without shadows bind
+    bool no_shadow_cleared = false;
     sg_shader lines_shader = {};
     sg_pipeline line_pipeline = {};
     sg_pipeline line_on_top_pipeline = {};
@@ -317,6 +335,178 @@ std::vector<WorldImpl::Light> pick_lights(const std::vector<WorldImpl::Light>& a
     return visible;
 }
 
+RenderState::ShadowTarget make_shadow_target(int size) {
+    RenderState::ShadowTarget t;
+    t.size = size;
+    sg_image_desc d = {};
+    d.usage.depth_stencil_attachment = true;
+    d.width = size;
+    d.height = size;
+    d.pixel_format = SG_PIXELFORMAT_DEPTH;
+    d.sample_count = 1;
+    d.label = "three-shadow-map";
+    t.image = sg_make_image(&d);
+    sg_view_desc a = {};
+    a.depth_stencil_attachment.image = t.image;
+    t.attachment = sg_make_view(&a);
+    sg_view_desc v = {};
+    v.texture.image = t.image;
+    t.texture = sg_make_view(&v);
+    return t;
+}
+
+void destroy_shadow_target(RenderState::ShadowTarget& t) {
+    if (t.texture.id != SG_INVALID_ID) sg_destroy_view(t.texture);
+    if (t.attachment.id != SG_INVALID_ID) sg_destroy_view(t.attachment);
+    if (t.image.id != SG_INVALID_ID) sg_destroy_image(t.image);
+    t = RenderState::ShadowTarget{};
+}
+
+sg_pipeline make_shadow_pipeline() {
+    sg_pipeline_desc pd = {};
+    pd.shader = g_three.shadow_shader;
+    // Same vertex buffers as the lit pass, minus the normal, so the offsets
+    // and stride are spelled out instead of inferred from the attributes.
+    pd.layout.buffers[0].stride = sizeof(GpuVertex);
+    pd.layout.attrs[ATTR_shadow_position] = {0, offsetof(GpuVertex, px), SG_VERTEXFORMAT_FLOAT3};
+    pd.layout.attrs[ATTR_shadow_texcoord0] = {0, offsetof(GpuVertex, u), SG_VERTEXFORMAT_FLOAT2};
+    pd.layout.attrs[ATTR_shadow_color0] = {0, offsetof(GpuVertex, color), SG_VERTEXFORMAT_UBYTE4N};
+    pd.index_type = SG_INDEXTYPE_UINT32;
+    // Both faces: a single-sided plane (a roof, a billboard) still blocks the sun.
+    pd.cull_mode = SG_CULLMODE_NONE;
+    pd.depth.pixel_format = SG_PIXELFORMAT_DEPTH;
+    pd.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
+    pd.depth.write_enabled = true;
+    pd.depth.bias = 1.0f;
+    pd.depth.bias_slope_scale = 1.5f;
+    pd.colors[0].pixel_format = SG_PIXELFORMAT_NONE; // sokol's way of saying "depth only"
+    pd.sample_count = 1;
+    pd.label = "three-shadow";
+    return sg_make_pipeline(&pd);
+}
+
+// Maps OpenGL-style clip space onto shadow-map (u, v, depth). GL render
+// targets have their origin at the bottom and depth in -1..1; D3D11/Metal
+// at the top, with depth already 0..1 after clip_fix().
+mat4 shadow_bias_matrix() {
+    mat4 b;
+    b(0, 0) = 0.5f;
+    b(0, 3) = 0.5f;
+    if (clip_space_is_gl()) {
+        b(1, 1) = 0.5f;
+        b(1, 3) = 0.5f;
+        b(2, 2) = 0.5f;
+        b(2, 3) = 0.5f;
+    } else {
+        b(1, 1) = -0.5f;
+        b(1, 3) = 0.5f;
+    }
+    return b;
+}
+
+struct LightFit {
+    mat4 view_proj_gl; // for culling casters
+    mat4 view_proj;    // what the shadow pass renders with (backend-fixed)
+    float texel = 0.0f;
+};
+
+LightFit fit_sun(const PassRecord& pass, float aspect, int resolution) {
+    const Camera& cam = pass.camera;
+    Camera slice = cam;
+    slice.far_z = std::max(std::min(cam.far_z, pass.sun.shadow_distance), cam.near_z + 0.01f);
+    const mat4 inv = inverse(slice.projection(aspect) * slice.view());
+    vec3 corners[8];
+    vec3 center{0, 0, 0};
+    for (int i = 0; i < 8; ++i) {
+        corners[i] = inv.transform_point({(i & 1) ? 1.0f : -1.0f, (i & 2) ? 1.0f : -1.0f, (i & 4) ? 1.0f : -1.0f});
+        center += corners[i] * 0.125f;
+    }
+    float radius = 0.0f;
+    for (const vec3& c : corners) radius = std::max(radius, distance(c, center));
+    // A bounding sphere (not a tight box) keeps the shadow map's size fixed
+    // while the camera turns, and rounding it keeps it fixed as the
+    // camera's near/far math jitters — both prevent shimmering edges.
+    radius = std::ceil(radius * 16.0f) / 16.0f;
+
+    const vec3 dir = normalize(pass.sun.direction);
+    const vec3 up = std::fabs(dir.y) > 0.99f ? vec3{0, 0, 1} : vec3{0, 1, 0};
+    const mat4 light_rot = mat4::look_at({0, 0, 0}, dir, up);
+    vec3 c = light_rot.transform_point(center);
+    const float texel = 2.0f * radius / static_cast<float>(resolution);
+    // Snap to whole texels, so moving the camera slides the shadow map in
+    // texel steps and existing shadow edges don't crawl.
+    c.x = std::floor(c.x / texel) * texel;
+    c.y = std::floor(c.y / texel) * texel;
+    // Casters between the sun and the visible area can be far outside the
+    // view (a mountain behind you), so the depth range reaches well back.
+    const float caster_reach = std::max(150.0f, radius * 4.0f);
+    const mat4 proj = mat4::ortho(c.x - radius, c.x + radius, c.y - radius, c.y + radius,
+                                  -c.z - radius - caster_reach, -c.z + radius);
+    LightFit fit;
+    fit.view_proj_gl = proj * light_rot;
+    fit.view_proj = clip_fix(proj) * light_rot;
+    fit.texel = texel;
+    return fit;
+}
+
+void render_shadow_map(PassRecord& pass, int index, int fb_w, int fb_h) {
+    RenderState& s = g_three;
+    const int res = std::clamp(pass.sun.shadow_resolution, 256, 8192);
+    if (static_cast<int>(s.shadow_targets.size()) <= index) s.shadow_targets.resize(index + 1);
+    RenderState::ShadowTarget& target = s.shadow_targets[index];
+    if (target.size != res) {
+        destroy_shadow_target(target);
+        target = make_shadow_target(res);
+    }
+    const bool full = pass.viewport.size.x <= 0.0f || pass.viewport.size.y <= 0.0f;
+    const float vw = full ? static_cast<float>(fb_w) : pass.viewport.size.x;
+    const float vh = full ? static_cast<float>(fb_h) : pass.viewport.size.y;
+    const LightFit fit = fit_sun(pass, vh > 0.0f ? vw / vh : 1.0f, res);
+    const Frustum light_frustum = Frustum::from_matrix(fit.view_proj_gl);
+
+    sg_pass sp = {};
+    sp.action.depth.load_action = SG_LOADACTION_CLEAR;
+    sp.action.depth.clear_value = 1.0f;
+    sp.attachments.depth_stencil = target.attachment;
+    sp.label = "three-shadow-pass";
+    sg_begin_pass(&sp);
+    sg_apply_pipeline(s.shadow_pipeline);
+    for (const WorldImpl::DrawCmd& cmd : pass.draws) {
+        ModelRecord* rec = model_record(Model{cmd.model});
+        if (!rec) continue;
+        for (const PartRecord& part : rec->parts) {
+            const Material& mat = cmd.override_material ? cmd.material : part.material;
+            if (!mat.casts_shadow || mat.alpha == AlphaMode::Blend) continue;
+            MeshRecord& mesh = rec->meshes[part.mesh];
+            upload_mesh(mesh);
+            if (mesh.index_count == 0) continue;
+            const mat4 world = cmd.world * part.local;
+            if (!light_frustum.intersects(mesh.bounds.transformed(world))) continue;
+            sg_bindings bind = {};
+            bind.vertex_buffers[0] = mesh.vbuf;
+            bind.index_buffer = mesh.ibuf;
+            const bool cutout = mat.alpha == AlphaMode::Cutout;
+            sg_view tex = cutout && mat.texture.valid() ? detail::texture_view(mat.texture) : sg_view{};
+            bind.views[VIEW_base_tex] = tex.id != SG_INVALID_ID ? tex : s.white_view;
+            bind.samplers[SMP_base_smp] = mat.filter == TextureFilter::Nearest ? s.sampler_nearest : s.sampler_linear;
+            sg_apply_bindings(&bind);
+            shadow_vs_params_t vs = {};
+            vs.light_mvp = fit.view_proj * world;
+            vs.uv_transform = {mat.uv_scale.x, mat.uv_scale.y, 0.0f, 0.0f};
+            sg_apply_uniforms(UB_shadow_vs_params, SG_RANGE(vs));
+            shadow_fs_params_t fs = {};
+            fs.cutout = {cutout ? mat.alpha_cutoff : -1.0f, mat.color.a * cmd.tint.a, 0.0f, 0.0f};
+            sg_apply_uniforms(UB_shadow_fs_params, SG_RANGE(fs));
+            sg_draw(0, mesh.index_count, 1);
+            ++s.stats_this_frame.draw_calls;
+        }
+    }
+    sg_end_pass();
+    pass.shadow_target = index;
+    pass.shadow_matrix = shadow_bias_matrix() * fit.view_proj;
+    pass.shadow_texel = fit.texel;
+}
+
 struct DrawItem {
     const MeshRecord* mesh;
     const Material* material;
@@ -414,6 +604,16 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
         const float span = std::max(pass.fog.end - pass.fog.start, 1e-3f);
         scene.fog_params = {pass.fog.start, 1.0f / span, 1.0f, 0.0f};
     }
+    const bool shadowed = pass.shadow_target >= 0;
+    if (shadowed) {
+        const int res = g_three.shadow_targets[pass.shadow_target].size;
+        scene.shadow_matrix = pass.shadow_matrix;
+        scene.shadow_params = {1.0f, std::max(pass.sun.shadow_softness, 0.0f) / static_cast<float>(res),
+                               pass.shadow_texel * 1.5f, std::clamp(pass.sun.shadow_strength, 0.0f, 1.0f)};
+        const float fade_len = pass.sun.shadow_distance * 0.15f;
+        scene.shadow_fade = {pass.sun.shadow_distance - fade_len, 1.0f / std::max(fade_len, 1e-3f), 0.0f, 0.0f};
+    }
+    const sg_view shadow_view = shadowed ? g_three.shadow_targets[pass.shadow_target].texture : g_three.no_shadow.texture;
     const std::vector<WorldImpl::Light> lights = pick_lights(pass.lights, frustum, pass.camera.position);
     scene.light_count = {static_cast<float>(lights.size()), 0.0f, 0.0f, 0.0f};
     for (size_t i = 0; i < lights.size(); ++i) {
@@ -445,6 +645,8 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
         bind.views[VIEW_base_tex] = tex_view.id != SG_INVALID_ID ? tex_view : g_three.white_view;
         const sg_view glow_view = mat.emissive_texture.valid() ? detail::texture_view(mat.emissive_texture) : sg_view{};
         bind.views[VIEW_emissive_tex] = glow_view.id != SG_INVALID_ID ? glow_view : g_three.white_view;
+        bind.views[VIEW_shadow_map] = shadow_view;
+        bind.samplers[SMP_shadow_smp] = g_three.shadow_sampler;
         bind.samplers[SMP_base_smp] = mat.filter == TextureFilter::Nearest ? g_three.sampler_nearest : g_three.sampler_linear;
         sg_apply_bindings(&bind);
 
@@ -807,6 +1009,17 @@ void three_setup() {
     s.pipelines[PipBlendDouble] = make_lit_pipeline(true, true);
     s.sky_pipeline = make_background_pipeline(true);
     s.depth_reset_pipeline = make_background_pipeline(false);
+    s.shadow_shader = sg_make_shader(shadow_shader_desc(sg_query_backend()));
+    s.shadow_pipeline = make_shadow_pipeline();
+    s.no_shadow = make_shadow_target(1);
+    sg_sampler_desc cmp = {};
+    cmp.min_filter = SG_FILTER_LINEAR;
+    cmp.mag_filter = SG_FILTER_LINEAR;
+    cmp.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
+    cmp.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
+    cmp.compare = SG_COMPAREFUNC_LESS_EQUAL;
+    cmp.label = "three-shadow-compare";
+    s.shadow_sampler = sg_make_sampler(&cmp);
     s.lines_shader = sg_make_shader(lines_shader_desc(sg_query_backend()));
     s.line_pipeline = make_line_pipeline(false);
     s.line_on_top_pipeline = make_line_pipeline(true);
@@ -873,6 +1086,11 @@ void three_shutdown() {
         if (rec.view.id != SG_INVALID_ID) sg_destroy_view(rec.view);
         if (rec.image.id != SG_INVALID_ID) sg_destroy_image(rec.image);
     }
+    for (RenderState::ShadowTarget& t : s.shadow_targets) destroy_shadow_target(t);
+    destroy_shadow_target(s.no_shadow);
+    sg_destroy_pipeline(s.shadow_pipeline);
+    sg_destroy_shader(s.shadow_shader);
+    sg_destroy_sampler(s.shadow_sampler);
     sg_destroy_view(s.black_cube_view);
     sg_destroy_image(s.black_cube);
     sg_destroy_sampler(s.sky_sampler);
@@ -893,10 +1111,26 @@ void three_shutdown() {
 }
 
 void three_before_passes() {
+    RenderState& s = g_three;
+    if (!s.no_shadow_cleared) {
+        sg_pass clear = {};
+        clear.action.depth.load_action = SG_LOADACTION_CLEAR;
+        clear.action.depth.clear_value = 1.0f;
+        clear.attachments.depth_stencil = s.no_shadow.attachment;
+        sg_begin_pass(&clear);
+        sg_end_pass();
+        s.no_shadow_cleared = true;
+    }
+    int shadow_index = 0;
+    for (PassRecord& pass : s.passes) {
+        if (pass.sun.shadows && pass.sun.intensity > 0.0f && !pass.draws.empty()) {
+            render_shadow_map(pass, shadow_index++, frame_width(), frame_height());
+        }
+    }
+
     // Every pass's lines go into one transient buffer, written once, before
     // any pass binds it (sokol only allows transient writes before the
     // first bind in a frame).
-    RenderState& s = g_three;
     std::vector<WorldImpl::LineVertex> all;
     for (PassRecord& pass : s.passes) {
         pass.line_first = static_cast<int>(all.size());
