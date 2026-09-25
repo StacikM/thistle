@@ -47,6 +47,7 @@ Without a folder, it uses the current one if it has `assets/` or `thistle.json`,
 | Alt + left-drag / Alt + Shift + left-drag | Orbit / pan (for laptops without a middle button) |
 | Hold right button | Fly: the mouse looks, WASD moves, Q/E down/up, Shift faster |
 | F | Frame the selection |
+| Home | Frame the whole scene (ground and sea planes left out). Opening a scene does this too. |
 | Numpad 1 / 3 / 7 | Look from the front / right / top |
 
 That's Blender's orbit-and-pan plus Unity's and Unreal's right-button fly mode.

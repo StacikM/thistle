@@ -419,6 +419,7 @@ int main(int argc, char** argv) {
         }
     };
     bool block_mode = false; // editing the selected block object's blocks (Tab)
+    bool frame_opened = false; // a scene was just opened: point the camera at it on the next frame
     auto undo = [&] {
         if (undo_stack.empty()) return say("nothing to undo");
         UndoStep step = std::move(undo_stack.back());
@@ -511,6 +512,7 @@ int main(int argc, char** argv) {
         applied_atlas.clear();
         block_mode = false;
         dirty = false;
+        frame_opened = true;
         say("opened " + path);
     };
 
@@ -831,8 +833,7 @@ int main(int argc, char** argv) {
         selection = fresh;
         say("duplicated " + std::to_string(fresh.size()) + " (move them with the gizmo)");
     };
-    auto frame_selection = [&] {
-        const Bounds b = selection.empty() ? Bounds{} : selection_bounds();
+    auto frame_bounds = [&](const Bounds& b) {
         if (!b.valid()) {
             target = {0, 0.5f, 0};
             distance = 14.0f;
@@ -841,6 +842,22 @@ int main(int argc, char** argv) {
         target = b.center();
         const vec3 s = b.size();
         distance = std::clamp(std::max({s.x, s.y, s.z}) * 1.6f + 1.5f, 1.5f, 400.0f);
+    };
+    auto frame_selection = [&] { frame_bounds(selection.empty() ? Bounds{} : selection_bounds()); };
+    // Everything in the scene, except ground and sea planes, which would
+    // zoom out to the horizon (unless planes are all there is). Otherwise
+    // the view stays wherever the last scene left it, which could be inside
+    // a building.
+    auto frame_scene = [&] {
+        Bounds b;
+        for (int pass = 0; pass < 2 && !b.valid(); ++pass) {
+            for (int i = 0; i < static_cast<int>(scene.entities.size()); ++i) {
+                if (pass == 0 && scene.entities[i].kind == SceneEntity::Kind::Plane) continue;
+                const Bounds w = world_box(i);
+                if (w.valid()) { b.add(w.min); b.add(w.max); }
+            }
+        }
+        frame_bounds(b);
     };
 
     // ------------------------------------------------------ gizmo state
@@ -887,6 +904,10 @@ int main(int argc, char** argv) {
     bool prev_left = false;
 
     app.update([&](Frame f) {
+        if (frame_opened) {
+            frame_scene();
+            frame_opened = false;
+        }
         const float W = static_cast<float>(f.width), H = static_cast<float>(f.height);
         constexpr float TOP = 40.0f, LEFT = 250.0f, RIGHT = 310.0f, BOTTOM = 26.0f;
         const Rect view{{LEFT, TOP}, {std::max(W - LEFT - RIGHT, 50.0f), std::max(H - TOP - BOTTOM, 50.0f)}};
@@ -1325,6 +1346,7 @@ int main(int argc, char** argv) {
                 if (f.key_pressed(Key::E)) tool = Tool::Rotate;
                 if (f.key_pressed(Key::R)) tool = Tool::Scale;
                 if (f.key_pressed(Key::F)) frame_selection();
+                if (f.key_pressed(Key::Home)) frame_scene();
                 if (!block_mode && (f.key_pressed(Key::Delete) || f.key_pressed(Key::X) || f.key_pressed(Key::Backspace))) delete_selection();
                 if (shift && f.key_pressed(Key::A)) { popup = Popup::Add; popup_at = m; }
             }

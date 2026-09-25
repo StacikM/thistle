@@ -103,6 +103,8 @@ GLCore has now actually been run, and that immediately found a real bug the comp
 
 ## Minor 3D — read this before you get excited
 
+> **For a 3D game, use `thistle::three` instead ([3d.md](3d.md)):** a real lit renderer with models, shadows, lights, block worlds and a level editor. The calls below are the older, simpler mode. They still work, and they're fine for a spinning cube on a title screen.
+
 `camera3d()`, `cube()`, `plane3d()`, `line3d()`, `sphere3d()`, `cylinder3d()`, `cone3d()`, `mesh3d()` exist because sokol_gl (the library the 2D renderer sits on) is secretly a full legacy-OpenGL-style immediate-mode API with its own matrix stack, perspective projection, and depth testing already built in. Exposing it took an afternoon; the extra primitives, texture support, and `.obj` mesh loading below took a bit more. It is still not a 3D renderer. Do not confuse the two.
 
 ```cpp

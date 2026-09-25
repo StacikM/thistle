@@ -2251,11 +2251,13 @@ public:
     // 0 = unlimited.
     int max_remesh_per_frame = 24;
 
-    // Everything — block types, blocks, voxel_size — as compact bytes
-    // (run-length compressed chunks), and back. save()/load() write/read a
+    // Block types, blocks, voxel_size, origin and rotation as compact bytes
+    // (run-length compressed chunks), and back — not the atlas texture or
+    // the generator, which stay as they are. save()/load() write/read a
     // file; serialize()/deserialize() are for sending a world over the
     // network or embedding it in your own save format. load/deserialize
-    // replace the whole world and return false (leaving it empty) on bad data.
+    // replace the blocks and types, and return false (leaving it empty) on
+    // bad data; load() of a file that isn't there changes nothing.
     // changed_only: just the chunks changed after the generator made them
     // (and all of a world without one) — for endless worlds, where the
     // generator remakes the rest. Loading marks every chunk it brings back

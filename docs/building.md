@@ -66,7 +66,7 @@ This whole list exists because someone actually ran the smoketest on a real Wind
 
 **Don't use Wine to "test" Windows builds.** It got far enough to open a window and complete a real TLS handshake over WinHTTP, then died with "none of the requested D3D feature levels is supported on this GPU" — Wine's D3D-over-OpenGL/Vulkan translation on macOS is not a substitute for real Windows and will produce failures that mean nothing. If you don't have a Windows machine, get one or find someone who does. Guessing from a translation layer is worse than not testing at all, because it gives you false confidence.
 
-**Linux/other UNIX.** Desktop GL, links `X11 Xi Xcursor GL EGL dl m pthread` via `find_package(OpenGL REQUIRED)`. Nobody has actually run a game on this path as far as the commit history shows. It should work — sokol supports it and the same code paths run on macOS's GL fallback conceptually — but "should work" and "verified working" are different sentences, don't confuse them in your own documentation either.
+**Linux/other UNIX.** Desktop GL, links `X11 Xi Xcursor GL EGL dl m pthread` via `find_package(OpenGL REQUIRED)`. Every example, the 3D demos, the three 3D templates and the Thistle Editor have been run on this path, but under Xvfb with Mesa's llvmpipe (a software renderer, in a container with no GPU), driven with xdotool and checked by screenshot. That found real bugs (post effects drawn upside down, sprites after text coming out white) and proves the GL code paths. It doesn't prove what an NVIDIA/AMD/Intel driver or a Wayland session does. Nobody has run it on a Linux desktop with a real GPU yet: "should work" and "verified working" are different sentences, don't confuse them in your own documentation either.
 
 **Web (Emscripten).** The backend is selected and that's the extent of what's been done. No emcc link flags, no `.html` shell, no testing. If you want this, budget real time for it, don't assume it falls out for free.
 
@@ -80,7 +80,12 @@ Turns on an in-app draggable log overlay (a button that expands into the capture
 
 ## Vendored dependencies
 
-`CMakeLists.txt` pulls sokol, stb, miniaudio, box2d (pinned to `v2.4.1`, everything else tracks `master` — yes, that's inconsistent, box2d pins because its API isn't stable across versions and the others are stable-enough header libraries that master is fine) via `FetchContent`. `third_party/nlohmann/json.hpp` is vendored directly as a single header because fetching the whole repo for one header is a waste of everyone's bandwidth.
+`CMakeLists.txt` pulls these via `FetchContent`:
+
+- **Pinned:** sokol (to a commit, because the 3D renderer's pre-compiled shaders in `src/shaders/*.glsl.h` must match that exact `sokol_gfx.h`; bump it together with `tools/shaders/build_shaders.py`, see AGENTS.md), box2d `v2.4.1` (its API isn't stable across versions), cgltf `v1.15` (glTF loading), and, only when their modules are on, Jolt Physics `v5.6.0` (`THISTLE_PHYSICS3D`) and Dear ImGui `v1.92.9b` (`THISTLE_DEBUG_UI`).
+- **Tracking `master`:** stb, miniaudio, fontstash. Yes, that's inconsistent: they're stable-enough header libraries that master has been fine.
+
+`third_party/nlohmann/json.hpp` is vendored directly as a single header because fetching the whole repo for one header is a waste of everyone's bandwidth.
 
 If you're doing repeated cross-compiles or offline builds, point `FETCHCONTENT_BASE_DIR` at an already-populated `_deps` directory from a previous build instead of re-fetching:
 

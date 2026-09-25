@@ -141,11 +141,11 @@ JSON, written with sorted keys and two-space indents so it diffs well in git:
     - `VoxelWorld::copy()` is separate from the original
     - `set_block_type()` changes a type (and ignores air and unknown ids)
   - `add_colliders()`: a floor, a wall turned 45° (a ray stops exactly at its turned face), a decoration with `solid` = `false` that doesn't block, a light that isn't added, and a block object a character dropped over lands on
+  - `draw()` applying the environment
+  - `to_euler()`, which the editor uses to show rotations as angles
 - The three 3D templates were played under Xvfb:
   - **fps:** shooting a target, the exit refusing while one is left, then finishing.
   - **third-person:** coins collected, the jump pad's throw landing on its marker, the goal, falling into the sea.
   - **voxel:** a new world with the house stamped in, then an edit surviving a quit and relaunch.
-  - `draw()` applying the environment
-  - `to_euler()`, which the editor uses to show rotations as angles
 - The editor was used to make, save and reopen scenes under Xvfb. The saved files were checked value by value (see the editor's README for exactly what was clicked).
 - No game has loaded an editor-made level yet. The templates coming next are the first real users.

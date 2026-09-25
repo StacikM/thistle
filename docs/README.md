@@ -7,21 +7,25 @@ You want to make a game, not read a novel. Here's the map:
 - [ui-and-scenes.md](ui-and-scenes.md) — immediate-mode widgets, `Menu`, the `Node` scene graph, particles, tilemaps, `App::scene`, and the optional Dear ImGui debug UI.
 - [input-and-audio.md](input-and-audio.md) — keyboard, mouse, touch, gamepad, sound, music, and 3D positional sound.
 - [physics.md](physics.md) — the Box2D wrapper. 2D only. Read the caveats before you build something that needs them.
+- [3d.md](3d.md) — the 3D engine (`thistle::three`): the `World`, cameras, models, materials, lights, shadows, sky and fog, instancing, particles, terrain, raycasts, and walking around with the built-in character controller. Start here for 3D, and read its "What's been verified" section: so far it's been run on a software renderer, not a GPU.
+- [voxels.md](voxels.md) — block worlds (`three::VoxelWorld`): Minecraft- or Teardown-style blocks, textured or flat-colored, break and place, endless generated worlds, saving, MagicaVoxel import.
 - [animation.md](animation.md) — skeletal animation: animated glTF characters, crossfades, attaching things to joints, and skeletons built in code.
 - [scene3d.md](scene3d.md) — 3D levels made in the Thistle Editor (`three::Scene3D`): loading and drawing one, spawn points, triggers, properties, and making physics bodies from it.
 - [physics3d.md](physics3d.md) — opt-in 3D rigid bodies on Jolt (`three::Physics3D`) and Teardown-style voxel destruction (`VoxelDestruction`): turning it on, colliders, triggers, what falls and why, and exactly what's been verified where.
 - [platform-and-networking.md](platform-and-networking.md) — save data, HTTP, clipboard, haptics, text input, logging, platform queries.
 - [networking.md](networking.md) — realtime client/server (Mirror-flavored `NetVar`/Command/ClientRpc over TCP), multiplayer block worlds (`VoxelSync`) and smoothing remote movement. Read the scope section before you plan a game around it.
 - [iap.md](iap.md) — in-app purchases via StoreKit (iOS/macOS only). Read the "what's actually been verified" section before you assume a purchase has ever succeeded.
-- [cli.md](cli.md) — the `thistle` CLI: scaffold a project, build/run it, manage its version. No dependencies to install, on purpose.
+- [cli.md](cli.md) — the `thistle` CLI: scaffold a project (blank, or a playable fps, third-person or voxel game), build/run it, manage its version, turn optional modules on, run the editor. No dependencies to install, on purpose.
 - [crash-handler.md](crash-handler.md) — local-only crash reporting: a report file plus a native popup, automatically, on every crash. No telemetry, ever.
 - [android.md](android.md) — building, packaging (no Gradle needed), and what is and isn't verified on Android yet. Read the "what's not verified" section before you assume rendering works.
 
 ## What this actually is
 
-A small immediate-mode 2D game engine glued together from other people's good work: [sokol](https://github.com/floooh/sokol) for the window and GPU, Box2D for physics, miniaudio for sound, fontstash for text, nlohmann/json if you need it. It runs on iOS, macOS, Windows, Linux, and in principle the web (untested — nobody's tried it). Android builds, links, and packages into a real APK, but rendering isn't verified working yet — see [android.md](android.md).
+A small immediate-mode game engine, 2D and 3D, glued together from other people's good work: [sokol](https://github.com/floooh/sokol) for the window and GPU, Box2D for 2D physics, Jolt for 3D physics (opt-in), cgltf for glTF models, miniaudio for sound, fontstash for text, Dear ImGui for debug windows (opt-in), nlohmann/json if you need it. It runs on iOS, macOS, Windows, Linux, and in principle the web (untested — nobody's tried it). Android builds, links, and packages into a real APK, but rendering isn't verified working yet — see [android.md](android.md).
 
-It is not Unreal. It is not even close to Unreal. It draws rectangles, circles, sprites, and text through one function call each, every frame, and gets out of your way. If you want a scene editor, a material system, or physically-based rendering, this is the wrong engine and you should know that before you invest a week in it.
+In 2D it draws rectangles, circles, sprites, and text through one function call each, every frame, and gets out of your way. In 3D (`thistle::three`, see [3d.md](3d.md)) it's the same idea: draw models, shapes, block worlds and lights every frame, then `render()`. There's a level editor for the 3D side ([tools/thistle-editor](../tools/thistle-editor/README.md)), and `thistle new --template fps|third-person|voxel` gives you a playable game to start from.
+
+It is not Unreal. It is not even close to Unreal. The lighting is classic (a sun with shadows, point and spot lights, sky-colored ambient), not physically-based: no normal maps, no reflections, no global illumination, no material editor. The level editor places things and paints blocks; it doesn't script, animate or build a game for you. And the 3D renderer has so far only been run on a software renderer under Linux, not on a GPU, Metal or D3D11 — [3d.md](3d.md#whats-been-verified) says exactly what that means. Know all that before you invest a week in it.
 
 ## The one idea that matters
 
