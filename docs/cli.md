@@ -4,6 +4,14 @@
 
 ## Installing
 
+The CLI itself needs only Python 3 and Git. Building a game needs **CMake** (3.20 or newer) and a **C++20 compiler**:
+
+- **Windows:** Visual Studio 2022, or its free Build Tools, with the "Desktop development with C++" workload. CMake from https://cmake.org/download/ or `winget install Kitware.CMake`. Visual Studio also bundles a CMake, but it's only on the `PATH` inside "Developer PowerShell for VS 2022".
+- **macOS:** Xcode's command line tools (`xcode-select --install`) and `brew install cmake`.
+- **Linux:** GCC or Clang, CMake, and the X11/OpenGL headers (on Debian/Ubuntu: `libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev`).
+
+Without CMake, `thistle build` and `thistle run` stop and say what to install.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StacikM/thistle/main/install.sh | bash
 ```

@@ -63,9 +63,22 @@ def write_project(root: Path, data: dict) -> None:
     (root / "thistle.json").write_text(json.dumps(data, indent=2) + "\n")
 
 
+MISSING_TOOL_HINTS = {
+    "cmake": "Thistle builds games with CMake. Install it from https://cmake.org/download/ "
+             "(Windows: `winget install Kitware.CMake`, macOS: `brew install cmake`, Linux: your "
+             "package manager), then open a new terminal. On Windows you also need Visual Studio's "
+             "C++ compiler: the \"Desktop development with C++\" workload of Visual Studio 2022 or its Build Tools.",
+    "git": "Install Git from https://git-scm.com/downloads, then open a new terminal.",
+}
+
+
 def run(cmd: list) -> None:
     print("$ " + " ".join(str(c) for c in cmd))
-    result = subprocess.run(cmd)
+    try:
+        result = subprocess.run(cmd)
+    except FileNotFoundError:
+        # Without this, a missing tool is a Python traceback.
+        die(f"`{cmd[0]}` isn't installed, or isn't on your PATH. " + MISSING_TOOL_HINTS.get(cmd[0], ""))
     if result.returncode != 0:
         sys.exit(result.returncode)
 
