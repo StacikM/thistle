@@ -205,6 +205,8 @@ set(THISTLE_SERVER_SOURCES
     src/save.cpp
     src/net.cpp
     src/headless.cpp
+    src/dedicated_server.cpp
+    src/server_console.cpp
     src/three_math.cpp
     src/three_mesh.cpp
     src/three_models.cpp
