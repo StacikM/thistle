@@ -70,6 +70,14 @@ This whole list exists because someone actually ran the smoketest on a real Wind
 
 **Web (Emscripten).** The backend is selected and that's the extent of what's been done. No emcc link flags, no `.html` shell, no testing. If you want this, budget real time for it, don't assume it falls out for free.
 
+## `THISTLE_SERVER_ONLY`
+
+```bash
+cmake -S . -B build-server -DTHISTLE_SERVER_ONLY=ON
+```
+
+Builds only `thistle_server`, the engine a dedicated server links: networking, saves, logs and the data side of the 3D engine, with no window, graphics or audio. It fetches only stb and cgltf, and needs no X11/OpenGL development files, so it configures on a bare VPS or in a Docker image with just a compiler, CMake and git (CI does exactly that, in an `ubuntu:24.04` container). In a normal build `thistle_server` exists too, but is only compiled when something links it. With `-DTHISTLE_BUILD_SMOKETEST=ON`, the headless tests that need nothing more run against it. See [dedicated-servers.md](dedicated-servers.md).
+
 ## `THISTLE_DEBUG`
 
 ```bash

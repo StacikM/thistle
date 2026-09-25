@@ -11,6 +11,7 @@ A small, simple, cross-platform C++ game engine for 2D and 3D games, built on th
 - **Audio:** miniaudio.
 - **Text:** fontstash.
 - **Networking:** async HTTP (NSURLSession/WinHTTP) plus a Mirror-flavored realtime client/server layer — synced fields, Commands, ClientRpcs — over TCP, and multiplayer block worlds on top of it.
+- **Dedicated servers:** a headless engine (`thistle_server`) that builds on a bare VPS, and `DedicatedServer`: a console to type commands into (`kick 3`, `list`, your own), settings in `server.json`, a log, passwords, max players, and a clean stop that saves. `thistle new --template multiplayer` is a game and its server. See [docs/dedicated-servers.md](docs/dedicated-servers.md).
 - **In-app purchases:** StoreKit (iOS/macOS).
 - **Minor 3D:** the older perspective drawing mode on `Frame` (`camera3d`, `cube`, `sphere3d`, `mesh3d`...) layered on the 2D renderer with one fixed light. It still works; new 3D games should use `thistle::three`.
 
