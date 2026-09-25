@@ -85,6 +85,27 @@ def run(cmd: list) -> None:
         sys.exit(result.returncode)
 
 
+def hand_over(argv: list) -> None:
+    """Runs argv[0] (the game, the editor) in place of this process, the way
+    `thistle run` ends. What's printed so far is flushed first: exec drops
+    whatever is still buffered, and the Thistle Editor reads the "$ ..." line
+    just before this to know the game has started. Windows has no real exec
+    (os.execv starts the program and ends Python at once: a terminal got its
+    prompt back while the game was still running, and its exit code was
+    lost), so there the program runs as a child and its exit code is ours."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if os.name != "nt":
+        os.execv(argv[0], argv)
+    try:
+        code = subprocess.call(argv)
+    except KeyboardInterrupt:  # Ctrl+C reached the game too
+        code = 130
+    if code > 0x7FFFFFFF:  # an NTSTATUS like 0xC0000005 (a crash), as the int sys.exit takes
+        code -= 1 << 32
+    sys.exit(code)
+
+
 # --- new ---------------------------------------------------------------
 
 def engine_dir_for(project: Path) -> str:
@@ -255,7 +276,7 @@ def cmd_run(args) -> None:
     # game would find no assets at all. (On macOS the engine moves into the
     # app bundle's Resources itself.)
     os.chdir(exe.parent)
-    os.execv(str(exe), [str(exe)])
+    hand_over([str(exe)])
 
 
 # --- editor --------------------------------------------------------------
@@ -326,7 +347,7 @@ def cmd_editor(args) -> None:
         folder = Path(args.project).resolve() if args.project else find_project_root(Path.cwd(), required=False)
         argv = [str(exe)] + ([str(folder)] if folder else [])
         print("$ " + " ".join(argv))
-        os.execv(str(exe), argv)
+        hand_over(argv)
 
     # install, or update falling through to reinstall with the fresh build
     exe = _build_editor()
@@ -430,10 +451,12 @@ def cmd_disable(args) -> None:
 def main() -> None:
     # Output into a pipe (the Thistle Editor reads it that way) is UTF-8 on
     # every OS. Otherwise Windows uses the locale's code page, and some of
-    # those (Japanese, for one) can't encode the "—" in these messages.
+    # those (Japanese, for one) can't encode the "—" in these messages. And
+    # it goes out a line at a time: Python otherwise holds it back, so a
+    # "$ cmake ..." line came out after cmake's own output, not before it.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure") and not stream.isatty():
-            stream.reconfigure(encoding="utf-8", errors="replace")
+            stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
     parser = argparse.ArgumentParser(prog="thistle", description="Thistle engine project tool")
     sub = parser.add_subparsers(dest="command", required=True)

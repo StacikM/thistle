@@ -74,6 +74,20 @@ with tempfile.TemporaryDirectory() as tmp:
     check(r.returncode == 1 and "no module called 'nope' —" in r.stderr.decode("utf-8", errors="replace"),
           "an error message comes out as UTF-8 under a cp932 locale")
 
+    # The handover that ends `thistle run`: the "$ ..." line printed just
+    # before it has to reach a pipe (the editor waits for it to know the game
+    # started), and the program's exit code has to come back. With Python's
+    # normal buffering: PYTHONUNBUFFERED, which some environments set, hid
+    # the line being lost.
+    handover = ("import runpy, sys\n"
+                f"cli = runpy.run_path({str(CLI)!r})\n"
+                "print('$ the game')\n"
+                "cli['hand_over']([sys.executable, '-c', 'print(\"the game ran\"); raise SystemExit(3)'])\n")
+    r = subprocess.run([sys.executable, "-c", handover], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       env={k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"})
+    check(r.stdout.splitlines() == ["$ the game", "the game ran"], "the line printed before handing over comes out first, then the game's")
+    check(r.returncode == 3, "and the game's exit code is the CLI's")
+
     # init: adds what's missing, keeps what's there
     old = root / "old thing!"
     (old / "src").mkdir(parents=True)
