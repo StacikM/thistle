@@ -45,7 +45,10 @@ std::atomic<bool> g_stopped{false};
 
 #if defined(_WIN32)
 BOOL WINAPI on_console_event(DWORD event) {
-    if (g_stop_requests.fetch_add(1) >= 1 && (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT)) ExitProcess(130);
+    if (g_stop_requests.fetch_add(1) >= 1 && (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT)) {
+        detail::restore_console();
+        ExitProcess(130);
+    }
     if (event == CTRL_CLOSE_EVENT || event == CTRL_LOGOFF_EVENT || event == CTRL_SHUTDOWN_EVENT) {
         // Windows ends the process as soon as this returns (and a few
         // seconds after the event regardless): wait here for the save.
@@ -56,7 +59,10 @@ BOOL WINAPI on_console_event(DWORD event) {
 void install_stop_handlers() { SetConsoleCtrlHandler(on_console_event, TRUE); }
 #else
 extern "C" void on_stop_signal(int) {
-    if (g_stop_requests.fetch_add(1) >= 1) std::_Exit(130);
+    if (g_stop_requests.fetch_add(1) >= 1) {
+        detail::restore_console();
+        std::_Exit(130);
+    }
 }
 void install_stop_handlers() {
     struct sigaction sa {};

@@ -26,4 +26,9 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+// Puts the terminal back the way it was, if the console changed it. Safe in
+// a signal handler: the stop handlers call it before a second Ctrl+C ends the
+// process on the spot, so the shell isn't left without echo.
+void restore_console();
+
 } // namespace thistle::detail
