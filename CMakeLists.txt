@@ -13,6 +13,11 @@ set(CMAKE_C_STANDARD 11)
 # project with -DTHISTLE_DEBUG=ON to turn it on.
 option(THISTLE_DEBUG "Build with the in-app debug log overlay" OFF)
 
+# Builds only thistle_server, the engine a headless dedicated server links
+# (see below): no window, graphics or audio, so it configures and builds on a
+# machine without X11/OpenGL development files, like a VPS or a Docker image.
+option(THISTLE_SERVER_ONLY "Build only thistle_server, the engine for headless dedicated servers" OFF)
+
 # Gets an assets/ directory next to your executable, on every platform, so
 # relative paths like "assets/font.ttf" resolve the same way whether you're
 # on macOS, Windows, or Linux. Call once per executable target, after
@@ -116,7 +121,7 @@ FetchContent_Declare(
 # which sets "modules": {"physics3d": true} in thistle.json. Off, Physics3D still
 # compiles and links; it just logs that it's disabled and does nothing.
 option(THISTLE_PHYSICS3D "Build three::Physics3D on Jolt Physics" OFF)
-if(THISTLE_PHYSICS3D)
+if(THISTLE_PHYSICS3D AND NOT THISTLE_SERVER_ONLY)
     # Jolt's own defaults that would break or surprise a consumer build:
     # a static MSVC runtime (/MT) that won't link with ours (/MD), LTO,
     # AVX-512 (binaries that crash on many players' CPUs), and its tests/samples.
@@ -167,7 +172,7 @@ endif()
 # -DTHISTLE_DEBUG_UI=ON, or `thistle enable debug_ui` in a CLI project. The
 # pinned sokol's sokol_imgui.h needs ImGui 1.92+ (the texture API changed).
 option(THISTLE_DEBUG_UI "Build the Dear ImGui debug UI" OFF)
-if(THISTLE_DEBUG_UI)
+if(THISTLE_DEBUG_UI AND NOT THISTLE_SERVER_ONLY)
     FetchContent_Declare(
         imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -181,14 +186,85 @@ endif()
 # We only use miniaudio's header (our audio_impl.c holds the implementation), but
 # MakeAvailable is the non-deprecated path (FetchContent_Populate is a hard error
 # under newer CMake, e.g. via emcmake); its extra targets just build unused.
-FetchContent_MakeAvailable(sokol stb fontstash box2d miniaudio cgltf)
+if(THISTLE_SERVER_ONLY)
+    FetchContent_MakeAvailable(stb cgltf)
+else()
+    FetchContent_MakeAvailable(sokol stb fontstash box2d miniaudio cgltf)
+endif()
+
+# --- thistle_server: the engine for headless dedicated servers -----------------
+# Networking, saves and logs, and the data side of the 3D engine: VoxelWorld
+# and VoxelSync, CollisionWorld and CharacterController, Scene3D levels,
+# terrain, and models as geometry (their textures load as empty handles).
+# No window, graphics, audio, input or 2D physics: calling one of those from
+# a server program is a link error. Game code shared by a game and its server
+# can check #if THISTLE_SERVER. See docs/dedicated-servers.md.
+set(THISTLE_SERVER_SOURCES
+    src/log.cpp
+    src/collision3d.cpp
+    src/save.cpp
+    src/net.cpp
+    src/headless.cpp
+    src/three_math.cpp
+    src/three_mesh.cpp
+    src/three_models.cpp
+    src/three_model.cpp
+    src/three_voxel.cpp
+    src/three_collision.cpp
+    src/three_noise.cpp
+    src/three_terrain.cpp
+    src/three_net.cpp
+    src/three_anim.cpp
+    src/three_scene.cpp
+    src/cgltf_impl.c
+    src/stb_impl.c
+)
+if(THISTLE_SERVER_ONLY)
+    add_library(thistle_server STATIC ${THISTLE_SERVER_SOURCES})
+else()
+    # Built only when something links it (a game's server program), so a game
+    # without one doesn't compile these files a second time.
+    add_library(thistle_server STATIC EXCLUDE_FROM_ALL ${THISTLE_SERVER_SOURCES})
+endif()
+target_include_directories(thistle_server
+    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    PRIVATE ${stb_SOURCE_DIR}
+            ${cgltf_SOURCE_DIR}
+)
+target_compile_definitions(thistle_server PUBLIC THISTLE_SERVER=1)
+find_package(Threads REQUIRED)
+target_link_libraries(thistle_server PUBLIC Threads::Threads)
+if(WIN32)
+    target_link_libraries(thistle_server PRIVATE ws2_32)
+endif()
+
+if(THISTLE_SERVER_ONLY)
+    # The headless tests that need nothing but the server library, run
+    # against it: proof the server engine works, not only that it builds.
+    if(THISTLE_BUILD_SMOKETEST)
+        enable_testing()
+        foreach(_thistle_test net collision mesh3d character terrain voxelnet animation)
+            add_executable(thistle_${_thistle_test}_smoketest examples/${_thistle_test}_smoketest.cpp)
+            target_link_libraries(thistle_${_thistle_test}_smoketest PRIVATE thistle_server)
+            add_test(NAME ${_thistle_test}_smoketest COMMAND thistle_${_thistle_test}_smoketest)
+            set_tests_properties(${_thistle_test}_smoketest PROPERTIES TIMEOUT 60)
+        endforeach()
+    endif()
+    return()
+endif()
 
 add_library(thistle STATIC
     src/thistle.cpp
+    src/collision3d.cpp
+    src/log.cpp
+    src/save.cpp
+    src/net.cpp
     src/three_math.cpp
     src/three_camera.cpp
     src/three_mesh.cpp
     src/three_render.cpp
+    src/three_models.cpp
     src/three_model.cpp
     src/three_voxel.cpp
     src/three_collision.cpp

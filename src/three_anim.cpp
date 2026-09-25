@@ -5,7 +5,7 @@
 // Poses follow glTF: a joint's world matrix is its parent's times its own
 // local TRS (roots start from root_offset, the transform of whatever
 // non-joint nodes sit above them), and skinning uses world * inverse_bind.
-#include "thistle_internal.h"
+#include "thistle_core.h"
 
 #include <algorithm>
 #include <cmath>

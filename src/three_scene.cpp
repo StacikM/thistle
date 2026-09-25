@@ -1,7 +1,7 @@
 // three::Scene3D: the level format the Thistle Editor writes, and the code a
 // game uses to read and draw it. JSON, so it diffs well in version control
 // and a person can fix one by hand.
-#include "thistle_internal.h"
+#include "thistle_core.h"
 
 #include <algorithm>
 #include <cmath>
@@ -429,6 +429,7 @@ std::vector<int> Scene3D::add_colliders(CollisionWorld& world) const {
     return ids;
 }
 
+#if !defined(THISTLE_SERVER) // drawing: not in the server library
 void Scene3D::draw(World& world, bool environment) const {
     if (environment) {
         const Skybox keep = world.sky.skybox; // not part of the file: leave whatever the game set
@@ -471,5 +472,6 @@ void Scene3D::draw(World& world, bool environment) const {
         }
     }
 }
+#endif
 
 } // namespace thistle::three

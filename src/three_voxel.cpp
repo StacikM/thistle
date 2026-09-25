@@ -1,4 +1,4 @@
-#include "thistle_internal.h"
+#include "thistle_core.h"
 
 #include <algorithm>
 #include <array>
@@ -595,6 +595,7 @@ void VoxelWorld::stream_around(vec3 world_position, float radius, int budget) {
     }
 }
 
+#if !defined(THISTLE_SERVER) // drawing: not in the server library
 void World::draw(VoxelWorld& voxels) {
     remesh(voxels, *voxels.impl_, voxels.max_remesh_per_frame);
     const float s = voxels.voxel_size;
@@ -605,6 +606,7 @@ void World::draw(VoxelWorld& voxels) {
         draw(chunk.model, Transform{voxels.origin + voxels.rotation * offset, voxels.rotation, {s, s, s}});
     }
 }
+#endif
 
 } // namespace thistle::three
 

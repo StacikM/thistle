@@ -337,8 +337,6 @@ struct EngineState {
     float dbg_moved = 0.0f;
 };
 
-// Captured log lines (also echoed to the console). Shared by the debug overlay.
-std::vector<std::string> g_logs;
 
 // Single app per process; sokol's callbacks are plain C function pointers so we
 // route them through this pointer.
@@ -767,22 +765,23 @@ void draw_debug(Frame& f) {
 
     const float W = static_cast<float>(f.width);
     const float H = static_cast<float>(f.height);
+    const std::vector<std::string>& logs = detail::log_lines();
     f.rect({0.0f, 0.0f}, {W, H}, rgba{0.02f, 0.02f, 0.05f, 0.93f});
-    f.text("LOGS (" + std::to_string(g_logs.size()) + ")", {24.0f, 24.0f}, {.size = 26.0f, .color = white});
+    f.text("LOGS (" + std::to_string(logs.size()) + ")", {24.0f, 24.0f}, {.size = 26.0f, .color = white});
 
     const float lh = 20.0f;
     const int fit = std::max(1, static_cast<int>((H - 150.0f) / lh));
-    int start = static_cast<int>(g_logs.size()) - fit;
+    int start = static_cast<int>(logs.size()) - fit;
     if (start < 0) start = 0;
     float y = 66.0f;
-    for (int i = start; i < static_cast<int>(g_logs.size()); ++i) {
-        f.text(g_logs[static_cast<size_t>(i)], {24.0f, y}, {.size = 15.0f, .color = rgb(0.80f, 0.82f, 0.92f)});
+    for (int i = start; i < static_cast<int>(logs.size()); ++i) {
+        f.text(logs[static_cast<size_t>(i)], {24.0f, y}, {.size = 15.0f, .color = rgb(0.80f, 0.82f, 0.92f)});
         y += lh;
     }
 
     if (f.button("COPY ALL", {{W - 360.0f, H - 62.0f}, {170.0f, 46.0f}})) {
         std::string all;
-        for (const std::string& line : g_logs) { all += line; all += '\n'; }
+        for (const std::string& line : logs) { all += line; all += '\n'; }
         set_clipboard(all);
     }
     if (f.button("CLOSE", {{W - 176.0f, H - 62.0f}, {150.0f, 46.0f}})) {
@@ -1700,59 +1699,6 @@ std::unique_ptr<Node> load_scene(const std::string& path) {
     return node_from_json(j, tex_cache, mesh_cache);
 }
 
-// --- 3D collision ---------------------------------------------------------
-
-bool box3d_overlap(const Box3D& a, const Box3D& b) {
-    return std::fabs(a.center.x - b.center.x) <= (a.half_extent.x + b.half_extent.x) &&
-           std::fabs(a.center.y - b.center.y) <= (a.half_extent.y + b.half_extent.y) &&
-           std::fabs(a.center.z - b.center.z) <= (a.half_extent.z + b.half_extent.z);
-}
-
-bool box3d_contains_point(const Box3D& box, vec3 point) {
-    return std::fabs(point.x - box.center.x) <= box.half_extent.x &&
-           std::fabs(point.y - box.center.y) <= box.half_extent.y &&
-           std::fabs(point.z - box.center.z) <= box.half_extent.z;
-}
-
-bool sphere3d_overlap(const Sphere3D& a, const Sphere3D& b) {
-    const float dx = a.center.x - b.center.x, dy = a.center.y - b.center.y, dz = a.center.z - b.center.z;
-    const float r = a.radius + b.radius;
-    return (dx * dx + dy * dy + dz * dz) <= r * r;
-}
-
-bool box3d_sphere3d_overlap(const Box3D& box, const Sphere3D& sphere) {
-    auto clampf = [](float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); };
-    const float cx = clampf(sphere.center.x, box.center.x - box.half_extent.x, box.center.x + box.half_extent.x);
-    const float cy = clampf(sphere.center.y, box.center.y - box.half_extent.y, box.center.y + box.half_extent.y);
-    const float cz = clampf(sphere.center.z, box.center.z - box.half_extent.z, box.center.z + box.half_extent.z);
-    const float dx = sphere.center.x - cx, dy = sphere.center.y - cy, dz = sphere.center.z - cz;
-    return (dx * dx + dy * dy + dz * dz) <= sphere.radius * sphere.radius;
-}
-
-bool ray_box3d(vec3 ray_origin, vec3 ray_dir, const Box3D& box, float& out_t) {
-    const float box_min[3] = {box.center.x - box.half_extent.x, box.center.y - box.half_extent.y, box.center.z - box.half_extent.z};
-    const float box_max[3] = {box.center.x + box.half_extent.x, box.center.y + box.half_extent.y, box.center.z + box.half_extent.z};
-    const float origin[3] = {ray_origin.x, ray_origin.y, ray_origin.z};
-    const float dir[3] = {ray_dir.x, ray_dir.y, ray_dir.z};
-    float t_min = -std::numeric_limits<float>::infinity();
-    float t_max = std::numeric_limits<float>::infinity();
-    for (int i = 0; i < 3; ++i) {
-        if (std::fabs(dir[i]) < 1e-8f) {
-            if (origin[i] < box_min[i] || origin[i] > box_max[i]) return false;
-            continue;
-        }
-        float t1 = (box_min[i] - origin[i]) / dir[i];
-        float t2 = (box_max[i] - origin[i]) / dir[i];
-        if (t1 > t2) std::swap(t1, t2);
-        t_min = std::max(t_min, t1);
-        t_max = std::min(t_max, t2);
-        if (t_min > t_max) return false;
-    }
-    if (t_max < 0.0f) return false; // box is entirely behind the ray
-    out_t = t_min >= 0.0f ? t_min : t_max; // ray origin starts inside the box
-    return true;
-}
-
 // --- tilemap -----------------------------------------------------------
 
 bool Tilemap::load_csv(const std::string& csv_path, Texture tileset, int tw, int th, int tileset_cols) {
@@ -2208,20 +2154,7 @@ std::string device_name() {
     return platform_name();
 }
 
-// --- logging & clipboard ----------------------------------------------
-
-namespace {
-void push_log(const char* level, const std::string& msg) {
-    std::string line = std::string(level) + msg;
-    std::fprintf(stderr, "%s\n", line.c_str());
-    g_logs.push_back(std::move(line));
-    if (g_logs.size() > 1000) g_logs.erase(g_logs.begin(), g_logs.begin() + 200);
-}
-} // namespace
-
-void log_info(const std::string& msg)  { push_log("[info] ", msg); }
-void log_warn(const std::string& msg)  { push_log("[warn] ", msg); }
-void log_error(const std::string& msg) { push_log("[error] ", msg); }
+// --- window, mouse & clipboard -----------------------------------------
 
 void lock_mouse(bool locked) { sapp_lock_mouse(locked); }
 bool mouse_locked() { return sapp_mouse_locked(); }
@@ -2381,395 +2314,6 @@ bool Http::done() {
 
 void Http::reset() { h_.reset(); done_ = false; status_ = 0; body_.clear(); }
 
-// --- realtime networking -------------------------------------------------
-// Plain blocking-connect / non-blocking-poll TCP sockets, length-prefixed
-// JSON messages. See the big comment on this API in thistle.hpp before
-// touching this — the scope is deliberate, not an oversight.
-
-#if defined(_WIN32)
-    using SocketFd = SOCKET;
-    constexpr SocketFd kInvalidSocket = INVALID_SOCKET;
-    using NetSockLen = int;
-    static void close_socket(SocketFd s) { closesocket(s); }
-    static bool would_block() { return WSAGetLastError() == WSAEWOULDBLOCK; }
-    static void set_nonblocking(SocketFd s) { u_long mode = 1; ioctlsocket(s, FIONBIO, &mode); }
-    static void ensure_sockets_ready() {
-        static bool started = false;
-        if (!started) { WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa); started = true; }
-    }
-#else
-    using SocketFd = int;
-    constexpr SocketFd kInvalidSocket = -1;
-    using NetSockLen = socklen_t;
-    static void close_socket(SocketFd s) { ::close(s); }
-    static bool would_block() { return errno == EWOULDBLOCK || errno == EAGAIN; }
-    static void set_nonblocking(SocketFd s) { int fl = fcntl(s, F_GETFL, 0); fcntl(s, F_SETFL, fl | O_NONBLOCK); }
-    static void ensure_sockets_ready() {}
-#endif
-
-static void set_nodelay(SocketFd s) {   // small JSON messages + Nagle's algorithm = needless latency
-    int yes = 1;
-    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof(yes));
-}
-
-// Blocking send loop (busy-retries on EWOULDBLOCK) — fine for the tiny
-// messages this protocol actually carries; not fine if you start sending
-// megabytes over this, which you shouldn't.
-static bool net_send_all(SocketFd s, const char* data, size_t n) {
-    size_t sent = 0;
-    while (sent < n) {
-        int r = ::send(s, data + sent, static_cast<int>(n - sent), 0);
-        if (r > 0) { sent += static_cast<size_t>(r); continue; }
-        if (r < 0 && would_block()) continue;
-        return false;
-    }
-    return true;
-}
-
-static bool net_send_json(SocketFd s, const nlohmann::json& j) {
-    std::string body = j.dump();
-    uint32_t len = static_cast<uint32_t>(body.size());
-    unsigned char hdr[4] = {
-        static_cast<unsigned char>(len & 0xFF), static_cast<unsigned char>((len >> 8) & 0xFF),
-        static_cast<unsigned char>((len >> 16) & 0xFF), static_cast<unsigned char>((len >> 24) & 0xFF)
-    };
-    return net_send_all(s, reinterpret_cast<const char*>(hdr), 4) && net_send_all(s, body.data(), body.size());
-}
-
-// Drains everything currently available into buf. Returns false if the
-// connection should be closed (orderly EOF or a real error).
-static bool net_recv_available(SocketFd s, std::string& buf) {
-    char tmp[4096];
-    for (;;) {
-        int r = ::recv(s, tmp, sizeof(tmp), 0);
-        if (r > 0) { buf.append(tmp, static_cast<size_t>(r)); continue; }
-        if (r == 0) return false;
-        if (would_block()) return true;
-        return false;
-    }
-}
-
-// Pulls one complete length-prefixed message out of buf, if there is one.
-static bool net_extract_message(std::string& buf, nlohmann::json& out) {
-    if (buf.size() < 4) return false;
-    uint32_t len = static_cast<unsigned char>(buf[0]) | (static_cast<unsigned char>(buf[1]) << 8) |
-                   (static_cast<unsigned char>(buf[2]) << 16) | (static_cast<unsigned char>(buf[3]) << 24);
-    if (buf.size() < 4 + len) return false;
-    bool ok = true;
-    try { out = nlohmann::json::parse(buf.begin() + 4, buf.begin() + 4 + len); }
-    catch (...) { ok = false; }
-    buf.erase(0, 4 + len);
-    return ok;
-}
-
-// A friend "access key": lets the send/dispatch code above reach NetObject's
-// private registries without exposing them on the public API.
-// struct NetServer::Impl / NetClient::Impl must be complete (defined) before
-// anything below dereferences a NetServer*/NetClient*'s impl_ — hence up here,
-// right after the access key that lets non-member code reach impl_ at all.
-struct NetServer::Impl {
-    SocketFd listen_fd = kInvalidSocket;
-    struct Conn { SocketFd fd; std::string rx; int id; };
-    std::vector<Conn> conns;
-    int next_conn_id = 1;
-    std::map<uint32_t, std::unique_ptr<NetObject>> objects;
-    uint32_t next_net_id = 1;
-};
-
-struct NetClient::Impl {
-    SocketFd fd = kInvalidSocket;
-    int conn_id = 0; // from the server's welcome
-    std::string rx;
-    std::map<uint32_t, std::unique_ptr<NetObject>> objects;
-    bool connected = false;
-};
-
-struct NetObjectAccess {
-    static void set_id(NetObject& o, uint32_t id, const std::string& cls) { o.id_ = id; o.class_name_ = cls; }
-    static std::vector<std::pair<std::string, NetObject::NetSyncField>>& fields(NetObject& o) { return o.fields_; }
-    static std::vector<std::pair<std::string, std::function<void(const NetArgs&)>>>& commands(NetObject& o) { return o.commands_; }
-    static std::vector<std::pair<std::string, std::function<void(const NetArgs&)>>>& client_rpcs(NetObject& o) { return o.client_rpcs_; }
-    static NetServer::Impl& server_impl(NetServer& s) { return *s.impl_; }
-    static NetClient::Impl& client_impl(NetClient& c) { return *c.impl_; }
-};
-
-static std::unordered_map<std::string, std::function<std::unique_ptr<NetObject>()>>& net_class_registry() {
-    static std::unordered_map<std::string, std::function<std::unique_ptr<NetObject>()>> m;
-    return m;
-}
-
-static NetServer* g_active_server = nullptr;
-static NetClient* g_active_client = nullptr;
-static int g_command_sender = 0; // set while an on_command handler runs
-
-static void net_send_spawn(SocketFd fd, NetObject& obj) {
-    nlohmann::json vars = nlohmann::json::object();
-    for (auto& [name, field] : NetObjectAccess::fields(obj)) vars[name] = field.get();
-    net_send_json(fd, { {"t", "spawn"}, {"id", obj.net_id()}, {"class", obj.class_name()}, {"vars", vars} });
-}
-
-namespace net {
-bool is_server() { return g_active_server != nullptr; }
-bool is_client() { return g_active_client != nullptr; }
-int command_sender() { return g_command_sender; }
-}
-
-void net_register_class(const std::string& class_name, std::function<std::unique_ptr<NetObject>()> make) {
-    net_class_registry()[class_name] = std::move(make);
-}
-
-// --- NetObject ------------------------------------------------------------
-
-void NetObject::add_sync_field(const std::string& name, NetSyncField field) { fields_.emplace_back(name, std::move(field)); }
-void NetObject::on_command(const std::string& name, std::function<void(const NetArgs&)> fn) { commands_.emplace_back(name, std::move(fn)); }
-void NetObject::on_client_rpc(const std::string& name, std::function<void(const NetArgs&)> fn) { client_rpcs_.emplace_back(name, std::move(fn)); }
-
-void NetObject::call_command(const std::string& name, NetArgs args) {
-    if (!g_active_client) { log_warn("call_command(\"" + name + "\"): not connected as a client"); return; }
-    net_send_json(NetObjectAccess::client_impl(*g_active_client).fd, { {"t", "cmd"}, {"id", id_}, {"name", name}, {"args", args} });
-}
-
-void NetObject::call_client_rpc(const std::string& name, NetArgs args) {
-    if (!g_active_server) { log_warn("call_client_rpc(\"" + name + "\"): not running as a server"); return; }
-    nlohmann::json msg = { {"t", "rpc"}, {"id", id_}, {"name", name}, {"args", args} };
-    for (auto& c : NetObjectAccess::server_impl(*g_active_server).conns) net_send_json(c.fd, msg);
-}
-
-bool NetObject::call_target_rpc(int conn_id, const std::string& name, NetArgs args) {
-    if (!g_active_server) { log_warn("call_target_rpc(\"" + name + "\"): not running as a server"); return false; }
-    for (auto& c : NetObjectAccess::server_impl(*g_active_server).conns) {
-        if (c.id != conn_id) continue;
-        // Same message as a ClientRpc: the client can't tell (or need to) that only it got it.
-        net_send_json(c.fd, { {"t", "rpc"}, {"id", id_}, {"name", name}, {"args", args} });
-        return true;
-    }
-    return false;
-}
-
-// --- spawn / despawn (server-only) -----------------------------------------
-
-NetObject* net_spawn(const std::string& class_name) {
-    if (!g_active_server) { log_warn("net_spawn(\"" + class_name + "\"): no active server"); return nullptr; }
-    auto it = net_class_registry().find(class_name);
-    if (it == net_class_registry().end()) { log_error("net_spawn: unregistered class \"" + class_name + "\""); return nullptr; }
-    std::unique_ptr<NetObject> obj = it->second();
-    uint32_t id = g_active_server->impl_->next_net_id++;
-    NetObjectAccess::set_id(*obj, id, class_name);
-    NetObject* raw = obj.get();
-    g_active_server->impl_->objects[id] = std::move(obj);
-    for (auto& c : g_active_server->impl_->conns) net_send_spawn(c.fd, *raw);
-    return raw;
-}
-
-void net_despawn(NetObject* obj) {
-    if (!g_active_server || !obj) return;
-    uint32_t id = obj->net_id();
-    nlohmann::json msg = { {"t", "despawn"}, {"id", id} };
-    for (auto& c : g_active_server->impl_->conns) net_send_json(c.fd, msg);
-    g_active_server->impl_->objects.erase(id);
-}
-
-NetObject* net_find(uint32_t id) {
-    if (g_active_server) {
-        auto& objs = NetObjectAccess::server_impl(*g_active_server).objects;
-        auto it = objs.find(id);
-        return it != objs.end() ? it->second.get() : nullptr;
-    }
-    if (g_active_client) {
-        auto& objs = NetObjectAccess::client_impl(*g_active_client).objects;
-        auto it = objs.find(id);
-        return it != objs.end() ? it->second.get() : nullptr;
-    }
-    return nullptr;
-}
-
-void net_each_object(const std::function<void(NetObject&)>& fn) {
-    if (g_active_server) { for (auto& [id, obj] : NetObjectAccess::server_impl(*g_active_server).objects) fn(*obj); return; }
-    if (g_active_client) { for (auto& [id, obj] : NetObjectAccess::client_impl(*g_active_client).objects) fn(*obj); return; }
-}
-
-// --- NetServer --------------------------------------------------------------
-
-NetServer::NetServer() : impl_(std::make_unique<Impl>()) {}
-NetServer::~NetServer() { stop(); }
-
-bool NetServer::listen(int port) {
-    ensure_sockets_ready();
-    impl_->listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (impl_->listen_fd == kInvalidSocket) return false;
-    int yes = 1;
-    setsockopt(impl_->listen_fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes), sizeof(yes));
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-    if (::bind(impl_->listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
-        ::listen(impl_->listen_fd, 16) != 0) {
-        close_socket(impl_->listen_fd);
-        impl_->listen_fd = kInvalidSocket;
-        return false;
-    }
-    set_nonblocking(impl_->listen_fd);
-    g_active_server = this;
-    return true;
-}
-
-void NetServer::update() {
-    if (impl_->listen_fd == kInvalidSocket) return;
-
-    for (;;) {   // drain pending connections
-        sockaddr_in cliaddr{};
-        NetSockLen len = sizeof(cliaddr);
-        SocketFd fd = ::accept(impl_->listen_fd, reinterpret_cast<sockaddr*>(&cliaddr), &len);
-        if (fd == kInvalidSocket) break;
-        set_nonblocking(fd);
-        set_nodelay(fd);
-        int cid = impl_->next_conn_id++;
-        impl_->conns.push_back({fd, std::string(), cid});
-        net_send_json(fd, { {"t", "welcome"}, {"conn", cid} });            // older clients ignore it
-        for (auto& [id, obj] : impl_->objects) net_send_spawn(fd, *obj);   // full snapshot for the newcomer
-        if (on_connect) on_connect(cid);
-    }
-
-    for (size_t i = 0; i < impl_->conns.size(); ) {
-        Impl::Conn& c = impl_->conns[i];
-        if (!net_recv_available(c.fd, c.rx)) {
-            close_socket(c.fd);
-            int cid = c.id;
-            impl_->conns.erase(impl_->conns.begin() + static_cast<long>(i));
-            if (on_disconnect) on_disconnect(cid);
-            continue;
-        }
-        nlohmann::json msg;
-        while (net_extract_message(c.rx, msg)) {
-            if (msg.value("t", std::string()) != "cmd") continue;   // the server only ever receives Commands
-            uint32_t id = msg.value("id", 0u);
-            std::string name = msg.value("name", std::string());
-            auto it = impl_->objects.find(id);
-            if (it == impl_->objects.end()) continue;
-            for (auto& [n, fn] : NetObjectAccess::commands(*it->second)) {
-                if (n != name) continue;
-                g_command_sender = c.id;
-                fn(msg.value("args", NetArgs::object()));
-                g_command_sender = 0;
-                break;
-            }
-        }
-        ++i;
-    }
-
-    for (auto& [id, obj] : impl_->objects) {   // flush dirty NetVars, one batched sync message per object
-        nlohmann::json vars = nlohmann::json::object();
-        for (auto& [name, field] : NetObjectAccess::fields(*obj))
-            if (field.is_dirty()) { vars[name] = field.get(); field.clear_dirty(); }
-        if (vars.empty()) continue;
-        nlohmann::json msg = { {"t", "sync"}, {"id", id}, {"vars", vars} };
-        for (auto& c : impl_->conns) net_send_json(c.fd, msg);
-    }
-}
-
-void NetServer::stop() {
-    if (impl_->listen_fd != kInvalidSocket) { close_socket(impl_->listen_fd); impl_->listen_fd = kInvalidSocket; }
-    for (auto& c : impl_->conns) close_socket(c.fd);
-    impl_->conns.clear();
-    impl_->objects.clear();
-    if (g_active_server == this) g_active_server = nullptr;
-}
-
-int NetServer::connection_count() const { return static_cast<int>(impl_->conns.size()); }
-
-NetObject* NetServer::find(uint32_t id) const {
-    auto it = impl_->objects.find(id);
-    return it != impl_->objects.end() ? it->second.get() : nullptr;
-}
-
-// --- NetClient --------------------------------------------------------------
-
-NetClient::NetClient() : impl_(std::make_unique<Impl>()) {}
-NetClient::~NetClient() { disconnect(); }
-
-bool NetClient::connect(const std::string& host, int port) {
-    ensure_sockets_ready();
-    addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo* res = nullptr;
-    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0) return false;
-    SocketFd fd = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    bool ok = fd != kInvalidSocket && ::connect(fd, res->ai_addr, static_cast<int>(res->ai_addrlen)) == 0;
-    freeaddrinfo(res);
-    if (!ok) { if (fd != kInvalidSocket) close_socket(fd); return false; }
-    set_nonblocking(fd);
-    set_nodelay(fd);
-    impl_->fd = fd;
-    impl_->connected = true;
-    g_active_client = this;
-    if (on_connect) on_connect();
-    return true;
-}
-
-void NetClient::update() {
-    if (!impl_->connected) return;
-    if (!net_recv_available(impl_->fd, impl_->rx)) { disconnect(); return; }
-
-    nlohmann::json msg;
-    while (net_extract_message(impl_->rx, msg)) {
-        std::string t = msg.value("t", std::string());
-        uint32_t id = msg.value("id", 0u);
-        if (t == "welcome") {
-            impl_->conn_id = msg.value("conn", 0);
-        } else if (t == "spawn") {
-            std::string cls = msg.value("class", std::string());
-            auto it = net_class_registry().find(cls);
-            if (it == net_class_registry().end()) { log_error("net: unknown class \"" + cls + "\" (not registered on this machine)"); continue; }
-            std::unique_ptr<NetObject> obj = it->second();
-            NetObjectAccess::set_id(*obj, id, cls);
-            nlohmann::json vars = msg.value("vars", NetArgs::object());
-            for (auto& [name, field] : NetObjectAccess::fields(*obj))
-                if (vars.contains(name)) field.set(vars[name]);
-            impl_->objects[id] = std::move(obj);
-        } else if (t == "sync") {
-            auto it = impl_->objects.find(id);
-            if (it == impl_->objects.end()) continue;
-            // Bind to a named variable before .items() — nlohmann's items()
-            // returns a proxy that references the json it was called on, and
-            // calling it directly on a temporary (msg.value(...).items()) left
-            // that proxy pointing at an already-destroyed temporary. Real bug,
-            // found by actually running this, not by reading the code.
-            nlohmann::json vars = msg.value("vars", NetArgs::object());
-            for (auto& [name, val] : vars.items())
-                for (auto& [n, field] : NetObjectAccess::fields(*it->second))
-                    if (n == name) { field.set(val); break; }
-        } else if (t == "rpc") {
-            auto it = impl_->objects.find(id);
-            if (it == impl_->objects.end()) continue;
-            std::string name = msg.value("name", std::string());
-            for (auto& [n, fn] : NetObjectAccess::client_rpcs(*it->second))
-                if (n == name) { fn(msg.value("args", NetArgs::object())); break; }
-        } else if (t == "despawn") {
-            impl_->objects.erase(id);
-        }
-    }
-}
-
-void NetClient::disconnect() {
-    bool was = impl_->connected;
-    if (impl_->fd != kInvalidSocket) { close_socket(impl_->fd); impl_->fd = kInvalidSocket; }
-    impl_->connected = false;
-    impl_->conn_id = 0;
-    impl_->objects.clear();
-    if (g_active_client == this) g_active_client = nullptr;
-    if (was && on_disconnect) on_disconnect();
-}
-
-bool NetClient::connected() const { return impl_->connected; }
-int NetClient::connection_id() const { return impl_->conn_id; }
-
-NetObject* NetClient::find(uint32_t id) const {
-    auto it = impl_->objects.find(id);
-    return it != impl_->objects.end() ? it->second.get() : nullptr;
-}
-
 // --- in-app purchases -----------------------------------------------------
 
 bool iap_can_make_payments() {
@@ -2861,138 +2405,6 @@ bool iap_poll_event(IAPEvent& out) {
     return false;
 #endif
 }
-
-// --- save --------------------------------------------------------------
-
-namespace save {
-namespace {
-std::map<std::string, std::string> g_data;
-bool g_loaded = false;
-
-void make_one(const std::string& p) {
-#if defined(_WIN32)
-    _mkdir(p.c_str());
-#else
-    mkdir(p.c_str(), 0755);
-#endif
-}
-
-// Create a directory and all missing parents (ignores "already exists").
-void make_dirs(const std::string& path) {
-    std::string cur;
-    for (char c : path) {
-        cur += c;
-        if ((c == '/' || c == '\\') && cur.size() > 1) make_one(cur);
-    }
-    make_one(path);
-}
-
-std::string base_dir() {
-    std::string base;
-#if defined(__APPLE__)
-    base = thistle_apple_writable_dir();
-#elif defined(__ANDROID__)
-    // The only path an Android app can actually write to; there's no HOME or
-    // XDG env var here. Set on the activity before sokol_main() ever runs
-    // (see ANativeActivity_onCreate in sokol_app.h), so this is safe anywhere.
-    const auto* activity = static_cast<const ANativeActivity*>(sapp_android_get_native_activity());
-    base = (activity && activity->internalDataPath) ? activity->internalDataPath : "/data/local/tmp";
-#elif defined(_WIN32)
-    const char* ad = std::getenv("APPDATA");
-    base = (ad && *ad) ? ad : ".";
-    base += "\\Thistle";
-#else
-    const char* xdg = std::getenv("XDG_DATA_HOME");
-    if (xdg && *xdg) {
-        base = xdg;
-    } else {
-        const char* home = std::getenv("HOME");
-        base = (home && *home) ? home : ".";
-        base += "/.local/share";
-    }
-    base += "/thistle";
-#endif
-    const std::string title = !g_state ? std::string("Thistle") : !g_state->config.save_name.empty() ? g_state->config.save_name : g_state->config.title;
-    std::string safe;
-    for (char c : title) safe += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
-    base += "/" + safe;
-    make_dirs(base);
-    return base;
-}
-
-std::string file_path() { return base_dir() + "/save.dat"; }
-
-std::string escape(const std::string& s) {
-    std::string o;
-    for (char c : s) {
-        if (c == '\\') o += "\\\\";
-        else if (c == '\n') o += "\\n";
-        else o += c;
-    }
-    return o;
-}
-
-std::string unescape(const std::string& s) {
-    std::string o;
-    for (size_t i = 0; i < s.size(); ++i) {
-        if (s[i] == '\\' && i + 1 < s.size()) {
-            const char n = s[++i];
-            o += (n == 'n') ? '\n' : n;
-        } else {
-            o += s[i];
-        }
-    }
-    return o;
-}
-
-void ensure_loaded() {
-    if (g_loaded) return;
-    g_loaded = true;
-    std::ifstream in(file_path());
-    std::string line;
-    while (std::getline(in, line)) {
-        const auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        g_data[line.substr(0, eq)] = unescape(line.substr(eq + 1));
-    }
-}
-
-void write() {
-    std::ofstream out(file_path(), std::ios::trunc);
-    for (const auto& [k, v] : g_data) out << k << '=' << escape(v) << '\n';
-}
-} // namespace
-
-void set(const std::string& key, const std::string& value) {
-    ensure_loaded();
-    g_data[key] = value;
-    write();
-}
-void set_int(const std::string& key, int value) { set(key, std::to_string(value)); }
-void set_float(const std::string& key, float value) { set(key, std::to_string(value)); }
-
-std::string get(const std::string& key, const std::string& fallback) {
-    ensure_loaded();
-    const auto it = g_data.find(key);
-    return it == g_data.end() ? fallback : it->second;
-}
-int get_int(const std::string& key, int fallback) {
-    ensure_loaded();
-    const auto it = g_data.find(key);
-    if (it == g_data.end()) return fallback;
-    try { return std::stoi(it->second); } catch (...) { return fallback; }
-}
-float get_float(const std::string& key, float fallback) {
-    ensure_loaded();
-    const auto it = g_data.find(key);
-    if (it == g_data.end()) return fallback;
-    try { return std::stof(it->second); } catch (...) { return fallback; }
-}
-bool has(const std::string& key) { ensure_loaded(); return g_data.count(key) > 0; }
-void remove(const std::string& key) { ensure_loaded(); g_data.erase(key); write(); }
-void clear() { ensure_loaded(); g_data.clear(); write(); }
-std::string path() { return file_path(); }
-} // namespace save
 
 // --- crash reporting -----------------------------------------------------
 // See the big comment on this API in thistle.hpp before touching this —
@@ -3144,8 +2556,9 @@ void crash_write_report(const char* reason, const std::vector<std::string>& bt) 
     for (auto& line : bt) std::fprintf(f, "  %s\n", line.c_str());
 
     std::fprintf(f, "\nlast log lines:\n");
-    size_t start = g_logs.size() > 50 ? g_logs.size() - 50 : 0;
-    for (size_t i = start; i < g_logs.size(); ++i) std::fprintf(f, "  %s\n", g_logs[i].c_str());
+    const std::vector<std::string>& logs = detail::log_lines();
+    size_t start = logs.size() > 50 ? logs.size() - 50 : 0;
+    for (size_t i = start; i < logs.size(); ++i) std::fprintf(f, "  %s\n", logs[i].c_str());
 
     std::fclose(f);
 
@@ -3955,6 +3368,9 @@ App::App(AppConfig config) {
     state = EngineState{};
     state.config = std::move(config);
     g_state = &state;
+    detail::set_save_name_source([]() -> std::string {
+        return !g_state->config.save_name.empty() ? g_state->config.save_name : g_state->config.title;
+    });
     install_crash_handler();   // safe to call more than once; only the first call does anything
 #if defined(__APPLE__)
     // On iOS the app bundle is the asset root. Do this in the constructor so it
