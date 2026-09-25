@@ -1317,6 +1317,10 @@ struct AppConfig {
     int width = 1280;
     int height = 720;
     std::string icon; // optional path to a PNG for the window/dock icon
+    // The save-data folder's name (save::, and anything next to save::path()).
+    // Empty: the title. Set it when the title changes between versions
+    // ("My Game v1.2"), or every update would start players from nothing.
+    std::string save_name;
 };
 
 class App {
@@ -2252,9 +2256,13 @@ public:
     // file; serialize()/deserialize() are for sending a world over the
     // network or embedding it in your own save format. load/deserialize
     // replace the whole world and return false (leaving it empty) on bad data.
-    std::vector<uint8_t> serialize() const;
+    // changed_only: just the chunks changed after the generator made them
+    // (and all of a world without one) — for endless worlds, where the
+    // generator remakes the rest. Loading marks every chunk it brings back
+    // as changed, so the generator never overwrites them.
+    std::vector<uint8_t> serialize(bool changed_only = false) const;
     bool deserialize(const uint8_t* data, size_t size);
-    bool save(const std::string& path) const;
+    bool save(const std::string& path, bool changed_only = false) const;
     bool load(const std::string& path);
     // One chunk's blocks (chunk coordinates, i.e. block / 32) as compact
     // bytes, and back: deserialize_chunk() replaces that chunk's blocks
@@ -2844,6 +2852,14 @@ public:
     // rotation, through its parents). load() and draw() do this; call it
     // yourself after moving one, before raycasting it or adding it to physics.
     void place_voxels();
+    // Makes the level solid for CharacterController: shapes and models by
+    // their triangles (turned and scaled as placed), block objects as their
+    // live voxel worlds. Lights, triggers, spawns and empties aren't solid,
+    // nor is anything with the property solid = "false" (decoration). Block
+    // objects collide as if unturned (the built-in collision takes grids as
+    // axis-aligned; a turned one logs a warning). Returns the ids added.
+    // The scene's voxel worlds must outlive `world`.
+    std::vector<int> add_colliders(CollisionWorld& world) const;
 
     // Draws every model, shape and block object and adds every light to
     // `world`; with `environment`, also sets its sun, sky, fog and ambient.

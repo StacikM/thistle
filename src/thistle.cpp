@@ -2831,7 +2831,7 @@ std::string base_dir() {
     }
     base += "/thistle";
 #endif
-    const std::string title = g_state ? g_state->config.title : std::string("Thistle");
+    const std::string title = !g_state ? std::string("Thistle") : !g_state->config.save_name.empty() ? g_state->config.save_name : g_state->config.title;
     std::string safe;
     for (char c : title) safe += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
     base += "/" + safe;

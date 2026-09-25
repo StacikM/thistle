@@ -48,7 +48,13 @@ The starter `main.cpp` deliberately draws shapes, not text — text needs a `.tt
 
 ## Commands
 
-- **`thistle new <name> [--at PATH]`** — scaffold a project. Default location is next to the engine (matching the existing convention every project in this repo already uses); `--at` overrides it.
+- **`thistle new <name> [--at PATH] [--template KIND]`** — scaffold a project. Default location is next to the engine (matching the existing convention every project in this repo already uses); `--at` overrides it. `--template` picks what it starts as:
+  - `blank` (the default): a window and two shapes, the smallest 2D start.
+  - `fps`: first person. Walk a level made in the Thistle Editor, shoot the targets, reach the exit. Mouse look, sprint, jump, a HUD.
+  - `third-person`: a character behind an orbiting camera that pulls in instead of going through walls. Collect coins, ride a jump pad, reach the flag. Falling in the sea respawns you.
+  - `voxel`: an endless textured block world, generated as you walk. Break, place and build with a hotbar, fly, a day/night cycle. The changed chunks are saved between runs, and a house made as a block object in the editor is stamped in at the start.
+
+  The three 3D templates come with their level in `assets/scenes/` (open it with `thistle editor run`), a UI font in `assets/fonts/` (Inter, OFL, license included), and a README section on what the code reads from the level. Each is one `src/main.cpp` of 200–350 lines, meant to be read and changed. Every template sets `AppConfig::save_name` to the project name, so the version in the window title can change without moving the save data (see [platform-and-networking.md](platform-and-networking.md)).
 - **`thistle build [--release]`** — configures on first run (creates `build/`), then just builds on every call after. Debug by default.
 - **`thistle run [--release]`** — builds, then execs the resulting binary. Finds it under whatever your platform's generator actually produced (`.app` bundle on macOS, `Debug/`/`Release/` subfolder on Windows' multi-config generator, a plain binary on Linux) so you never have to know that path yourself.
 - **`thistle version show`** / **`set X.Y.Z`** / **`bump major|minor|patch`** — reads/writes `thistle.json`. No network behavior of any kind — this is metadata, not an updater (see below).

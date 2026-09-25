@@ -1,0 +1,344 @@
+// {{name}} — a block-world starter made with Thistle.
+//
+// An endless world of textured blocks, generated around you as you walk:
+// hills, beaches, water, trees. Break and place blocks and build; what you
+// change is saved between runs (only the chunks you changed: the generator
+// remakes the rest). A day passes every 10 minutes. The house you start in
+// is a block object made in the Thistle Editor (assets/scenes/spawn.scene.json),
+// stamped into the world the first time it's generated: open that scene in
+// the editor (`thistle editor run` in this folder) and build something else.
+//
+// Click to capture the mouse (Esc lets go). WASD to move, Space to jump,
+// left click breaks, right click places, 1-9 or the wheel picks a block,
+// F toggles flying, F3 shows where you are, N starts a new world.
+#include <thistle.hpp>
+#include <version.hpp>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <string>
+#include <vector>
+using namespace thistle;
+using namespace thistle::three;
+
+namespace {
+
+// --- the block textures: a 4x4 atlas of 16 px tiles, drawn in code ---------------
+constexpr int kTile = 16;
+constexpr int kCols = 4;
+
+uint32_t hash(int x, int y, int salt) {
+    // Unsigned math: the products overflow on purpose, and signed overflow is undefined.
+    uint32_t h = static_cast<uint32_t>(x) * 374761393u + static_cast<uint32_t>(y) * 668265263u + static_cast<uint32_t>(salt) * 2147483647u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return h ^ (h >> 16);
+}
+
+Texture make_atlas() {
+    const int size = kTile * kCols;
+    std::vector<unsigned char> px(size * size * 4, 0);
+    auto put = [&](int tile, int x, int y, int r, int g, int b, int a = 255) {
+        unsigned char* p = &px[(((tile / kCols) * kTile + y) * size + (tile % kCols) * kTile + x) * 4];
+        p[0] = static_cast<unsigned char>(std::clamp(r, 0, 255));
+        p[1] = static_cast<unsigned char>(std::clamp(g, 0, 255));
+        p[2] = static_cast<unsigned char>(std::clamp(b, 0, 255));
+        p[3] = static_cast<unsigned char>(a);
+    };
+    for (int y = 0; y < kTile; ++y) {
+        for (int x = 0; x < kTile; ++x) {
+            const int n = static_cast<int>(hash(x, y, 1) % 40) - 20;
+            put(0, x, y, 90 + n, 160 + n, 60 + n / 2);                                   // 0 grass top
+            if (y < 3 + static_cast<int>(hash(x, 0, 2) % 3)) put(1, x, y, 90 + n, 160 + n, 60 + n / 2);
+            else put(1, x, y, 125 + n, 88 + n, 55 + n);                                  // 1 grass side
+            put(2, x, y, 125 + n, 88 + n, 55 + n);                                       // 2 dirt
+            put(3, x, y, 128 + n, 128 + n, 132 + n);                                     // 3 stone
+            put(4, x, y, 50 + n, 125 + n, 40, hash(x, y, 5) % 5 != 0 ? 255 : 0);         // 4 leaves (with holes)
+            put(5, x, y, (x % 4 == 0 ? 70 : 100) + n / 2, (x % 4 == 0 ? 48 : 70) + n / 2, 35); // 5 log side
+            const int ring = static_cast<int>(std::sqrt((x - 7.5f) * (x - 7.5f) + (y - 7.5f) * (y - 7.5f)));
+            put(6, x, y, ring % 2 ? 160 : 135, ring % 2 ? 125 : 100, 70);               // 6 log top
+            put(7, x, y, 220 + n / 2, 205 + n / 2, 150 + n / 2);                         // 7 sand
+            put(8, x, y, 40, 90 + n / 2, 200);                                           // 8 water
+            const bool frame = x == 0 || y == 0 || x == kTile - 1 || y == kTile - 1;
+            put(9, x, y, 220, 235, 245, frame ? 255 : 60);                               // 9 glass
+            const bool seam = y % 4 == 0;
+            put(10, x, y, seam ? 120 : 175 + n / 2, seam ? 85 : 130 + n / 2, seam ? 50 : 80); // 10 planks
+            put(11, x, y, 255, 210 + n, 90 + n);                                         // 11 glow
+        }
+    }
+    return make_texture(size, size, px.data());
+}
+
+// Copies a block object into the world, matching block types by name
+// (a type the world doesn't have is added).
+void stamp(VoxelWorld& world, const VoxelWorld& piece, ivec3 at) {
+    piece.each_block([&](ivec3 b, BlockId id) {
+        BlockId mine = world.find_block(piece.block_type(id).name);
+        if (mine == 0) mine = world.add_block(piece.block_type(id));
+        world.set(b + at, mine);
+    });
+}
+
+int surface(const VoxelWorld& world, int x, int z) {
+    for (int y = 63; y > -32; --y) {
+        const BlockId id = world.get(x, y, z);
+        if (id != 0 && world.block_type(id).solid) return y;
+    }
+    return 0;
+}
+
+} // namespace
+
+int main() {
+    App app{{.title = "{{name}} v" + std::string(GAME_VERSION), .width = 1280, .height = 720, .save_name = "{{name}}"}};
+    load_font("assets/fonts/inter-regular.ttf");
+
+    // --- the world
+    VoxelWorld voxels;
+    const Texture atlas = make_atlas();
+    voxels.set_atlas(atlas, kTile);
+    const BlockType kinds[] = {
+        BlockType{.name = "grass"}.set_tiles(0, 1, 2),
+        BlockType{.name = "dirt"}.set_tiles(2),
+        BlockType{.name = "stone"}.set_tiles(3),
+        BlockType{.name = "sand"}.set_tiles(7),
+        BlockType{.name = "water", .color = rgba{1, 1, 1, 0.6f}, .alpha = AlphaMode::Blend, .solid = false}.set_tiles(8),
+        BlockType{.name = "log"}.set_tiles(6, 5, 6),
+        BlockType{.name = "leaves", .alpha = AlphaMode::Cutout}.set_tiles(4),
+        BlockType{.name = "planks"}.set_tiles(10),
+        BlockType{.name = "glass", .alpha = AlphaMode::Blend}.set_tiles(9),
+        BlockType{.name = "glow", .emissive = rgb(1.0f, 0.8f, 0.45f)}.set_tiles(11),
+    };
+    // After loading a save, types come from it: add any this version has that it didn't.
+    auto ensure_types = [&] {
+        for (const BlockType& t : kinds) {
+            if (voxels.find_block(t.name) == 0) voxels.add_block(t);
+        }
+    };
+    ensure_types();
+    auto id = [&](const char* name) { return voxels.find_block(name); };
+
+    constexpr int sea = 12;
+    voxels.set_generator([&](VoxelWorld& w, ivec3 c) {
+        if (c.y < -1 || c.y > 1) return; // the world lives between y = -32 and y = 63
+        const BlockId grass = id("grass"), dirt = id("dirt"), stone = id("stone"), sand = id("sand"), water = id("water");
+        const BlockId log = id("log"), leaves = id("leaves");
+        for (int lz = 0; lz < 32; ++lz) {
+            for (int lx = 0; lx < 32; ++lx) {
+                const int x = c.x * 32 + lx, z = c.z * 32 + lz;
+                const int h = static_cast<int>(16.0f + 12.0f * fbm(x * 0.012f, z * 0.012f, 5, 1));
+                for (int ly = 0; ly < 32; ++ly) {
+                    const int y = c.y * 32 + ly;
+                    BlockId b = 0;
+                    if (y <= h) b = y == h ? (h <= sea + 1 ? sand : grass) : (y > h - 4 ? dirt : stone);
+                    else if (y <= sea) b = water;
+                    if (b) w.set(x, y, z, b);
+                }
+                // A tree now and then, kept inside this chunk so chunks never write into each other.
+                if (hash(x, z, 9) % 97 == 0 && h > sea + 1 && lx > 2 && lx < 29 && lz > 2 && lz < 29 && c.y == (h + 6) / 32) {
+                    for (int i = 1; i <= 4; ++i) w.set(x, h + i, z, log);
+                    for (int dz = -2; dz <= 2; ++dz)
+                        for (int dy = 3; dy <= 6; ++dy)
+                            for (int dx = -2; dx <= 2; ++dx)
+                                if (std::abs(dx) + std::abs(dz) + (dy == 6 ? 2 : 0) <= 3 && w.get(x + dx, h + dy, z + dz) == 0)
+                                    w.set(x + dx, h + dy, z + dz, leaves);
+                }
+            }
+        }
+    });
+
+    // --- saving: the changed chunks, next to the game's other save data
+    const std::string world_file = (std::filesystem::path(save::path()).parent_path() / "world.tvx").string();
+    CharacterController player;
+    MouseLook look;
+    bool flying = false;
+    const float day_length = 600.0f; // seconds
+    float time_of_day = save::get_float("world.time", 0.3f); // 0 = midnight, 0.25 = sunrise, 0.5 = noon
+    auto new_world = [&] {
+        voxels.clear();
+        ensure_types();
+        // Generate around the spawn now, then stamp the house from the editor into it.
+        voxels.stream_around({0, 20, 0}, 40.0f, 400);
+        Scene3D spawn;
+        spawn.load("assets/scenes/spawn.scene.json");
+        vec3 start{0.5f, 40.0f, 0.5f};
+        for (const SceneEntity& e : spawn.entities) {
+            if (e.kind != SceneEntity::Kind::Voxels || !e.voxels) continue;
+            const Bounds b = e.voxels->grid_bounds(); // in blocks, since its block size is 1
+            const int w = static_cast<int>(b.size().x), d = static_cast<int>(b.size().z), tall = static_cast<int>(b.max.y) + 2;
+            const int ground = surface(voxels, 0, 0);
+            const ivec3 at{-w / 2, ground, -d / 2}; // the house's box, centered on the origin, floor at ground level
+            for (int z = 0; z < d; ++z)
+                for (int x = 0; x < w; ++x) {
+                    for (int y = 1; y <= tall; ++y) voxels.set(at.x + x, ground + y, at.z + z, 0); // clear the hill
+                    for (int y = ground - 1; y > ground - 12 && voxels.get(at.x + x, y, at.z + z) == 0; --y)
+                        voxels.set(at.x + x, y, at.z + z, id("stone")); // and fill under it
+                }
+            // Where the house's own block (0,0,0) lands (its roof may reach past that corner).
+            const ivec3 origin = at + ivec3{-static_cast<int>(b.min.x), -static_cast<int>(b.min.y), -static_cast<int>(b.min.z)};
+            stamp(voxels, *e.voxels, origin);
+            const int s = spawn.find("player_start");
+            start = s >= 0 ? vec3{static_cast<float>(origin.x), static_cast<float>(origin.y), static_cast<float>(origin.z)} + spawn.world_transform(s).position
+                           : vec3{0.5f, ground + 8.0f, 0.5f};
+            look.yaw = s >= 0 ? to_euler(spawn.world_transform(s).rotation).y : 0.0f;
+            break;
+        }
+        player = CharacterController{};
+        player.position = start;
+        save::set_float("world.spawn_x", start.x);
+        save::set_float("world.spawn_y", start.y);
+        save::set_float("world.spawn_z", start.z);
+    };
+    auto save_world = [&] {
+        voxels.save(world_file, true);
+        save::set_float("world.x", player.position.x);
+        save::set_float("world.y", player.position.y);
+        save::set_float("world.z", player.position.z);
+        save::set_float("world.yaw", look.yaw);
+        save::set_float("world.time", time_of_day);
+    };
+    if (std::filesystem::exists(world_file) && voxels.load(world_file)) {
+        voxels.set_atlas(atlas, kTile);
+        ensure_types();
+        player.position = {save::get_float("world.x"), save::get_float("world.y", 40.0f), save::get_float("world.z")};
+        look.yaw = save::get_float("world.yaw");
+    } else {
+        new_world();
+    }
+    app.stop([&] { save_world(); });
+
+    CollisionWorld solid;
+    solid.add(voxels); // read live: broken blocks stop blocking at once
+
+    World world;
+    world.sun.shadow_distance = 60.0f;
+    world.fog.enabled = true;
+    world.fog.start = 55.0f; // hides the edge of the generated area
+    world.fog.end = 95.0f;
+    Camera camera;
+    ParticleSystem dust;
+    dust.settings.start_size = 0.12f;
+    dust.settings.end_size = 0.04f;
+    dust.settings.lifetime = 0.6f;
+    dust.settings.spread = 2.5f;
+    dust.settings.gravity = {0, -9, 0};
+    const char* hotbar[9] = {"grass", "dirt", "stone", "planks", "log", "glass", "leaves", "sand", "glow"};
+    int selected = 3;
+    bool debug = false;
+    float autosave = 60.0f, saved_flash = 0.0f;
+
+    app.update([&](Frame f) {
+        // --- input
+        look.update(camera, f);
+        if (f.key_pressed(Key::F)) flying = !flying;
+        if (f.key_pressed(Key::F3)) debug = !debug;
+        if (f.key_pressed(Key::N)) {
+            new_world();
+            save_world();
+        }
+        const Key numbers[9] = {Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9};
+        for (int i = 0; i < 9; ++i) {
+            if (f.key_pressed(numbers[i])) selected = i;
+        }
+        if (f.mouse_scroll() > 0.0f) selected = (selected + 8) % 9;
+        if (f.mouse_scroll() < 0.0f) selected = (selected + 1) % 9;
+
+        // --- move
+        if (flying) {
+            vec3 move = look.move_input(f) * 14.0f;
+            if (f.key_down(Key::Space)) move.y += 10.0f;
+            if (f.key_down(Key::LeftShift)) move.y -= 10.0f;
+            player.position += move * f.dt;
+            player.velocity = {};
+        } else {
+            player.update(solid, look.move_input(f), f.key_pressed(Key::Space), f.dt);
+        }
+        if (player.position.y < -40.0f) {
+            player.position = {save::get_float("world.spawn_x"), save::get_float("world.spawn_y", 40.0f), save::get_float("world.spawn_z")};
+            player.velocity = {};
+        }
+        camera.position = player.eye();
+        voxels.stream_around(player.position, 100.0f, 3);
+
+        // --- break and place what the crosshair points at (once the mouse is
+        // captured, so the click that captures it doesn't also dig)
+        const VoxelWorld::Hit target = voxels.raycast(Ray{camera.position, camera.forward()}, 6.0f, true);
+        if (target && mouse_locked()) {
+            world.wire_box(voxels.block_bounds(target.block), rgba{0, 0, 0, 0.7f});
+            if (f.mouse_pressed(Mouse::Left)) {
+                ParticleSettings look_of = dust.settings;
+                const BlockType& t = voxels.block_type(target.id);
+                look_of.start_color = t.textured() ? rgb(0.55f, 0.45f, 0.35f) : t.color;
+                look_of.end_color = rgba{look_of.start_color.r, look_of.start_color.g, look_of.start_color.b, 0.0f};
+                dust.emit(voxels.block_center(target.block), 16, look_of);
+                voxels.set(target.block, 0);
+            }
+            if (f.mouse_pressed(Mouse::Right)) {
+                const ivec3 place = target.block + target.normal;
+                // Don't wall yourself in: nothing goes where the player is.
+                if (!voxels.block_bounds(place).overlaps(player.bounds())) voxels.set(place, id(hotbar[selected]));
+            }
+        }
+
+        // --- the sky: a day every day_length seconds
+        time_of_day = std::fmod(time_of_day + f.dt / day_length, 1.0f);
+        const float angle = (time_of_day - 0.25f) * 2.0f * pi; // 0 at sunrise, up to noon, down at sunset
+        const vec3 sun_at = normalize(vec3{std::cos(angle), std::sin(angle), 0.35f});
+        const float day = std::clamp(sun_at.y * 3.0f + 0.3f, 0.0f, 1.0f);
+        auto mix = [&](rgba night, rgba noon) { return rgba{night.r + (noon.r - night.r) * day, night.g + (noon.g - night.g) * day, night.b + (noon.b - night.b) * day, 1.0f}; };
+        world.sun.direction = -sun_at;
+        world.sun.intensity = day;
+        world.sun.shadows = day > 0.05f;
+        world.sky.top = mix(rgb(0.02f, 0.03f, 0.08f), rgb(0.30f, 0.52f, 0.85f));
+        world.sky.horizon = mix(rgb(0.06f, 0.07f, 0.14f), rgb(0.72f, 0.82f, 0.92f));
+        world.ambient = 0.12f + 0.43f * day;
+
+        autosave -= f.dt;
+        if (autosave <= 0.0f) {
+            save_world();
+            autosave = 60.0f;
+            saved_flash = 1.5f;
+        }
+        saved_flash -= f.dt;
+
+        // --- draw
+        dust.update(f.dt);
+        world.draw(voxels);
+        world.draw(dust);
+        world.render(f, camera);
+
+        const float cx = f.width * 0.5f, cy = f.height * 0.5f;
+        f.rect({cx - 1, cy - 9}, {2, 18}, rgba{1, 1, 1, 0.85f});
+        f.rect({cx - 9, cy - 1}, {18, 2}, rgba{1, 1, 1, 0.85f});
+        // The hotbar, each slot showing its block's side tile from the atlas.
+        for (int i = 0; i < 9; ++i) {
+            const vec2 slot{cx - 9 * 27.0f + i * 54.0f, f.height - 70.0f};
+            f.rect(slot - vec2{3, 3}, {54, 54}, i == selected ? rgba{1, 1, 1, 0.95f} : rgba{0, 0, 0, 0.5f});
+            const BlockType& t = voxels.block_type(id(hotbar[i]));
+            const int tile = t.tile_side;
+            SpriteOpts s;
+            s.size = {48, 48};
+            s.src = Rect{{static_cast<float>((tile % kCols) * kTile), static_cast<float>((tile / kCols) * kTile)}, {kTile, kTile}};
+            f.sprite(atlas, slot, s);
+        }
+        const std::string name = hotbar[selected];
+        const vec2 nsz = f.measure_text(name, {.size = 18});
+        f.text(name, {cx - nsz.x * 0.5f, f.height - 98.0f}, {.size = 18, .color = white});
+        if (saved_flash > 0.0f) f.text("saved", {f.width - 90.0f, 20}, {.size = 16, .color = rgba{1, 1, 1, 0.7f}});
+        if (flying) f.text("flying (F)", {24, 20}, {.size = 18, .color = white});
+        if (debug) {
+            char buf[160];
+            std::snprintf(buf, sizeof buf, "x %.1f  y %.1f  z %.1f   chunks %d   %.0f fps   time %.2f", player.position.x, player.position.y,
+                          player.position.z, voxels.chunk_count(), 1.0f / std::max(f.dt, 1e-4f), time_of_day);
+            f.text(buf, {24, 48}, {.size = 16, .color = white});
+        }
+        if (!mouse_locked()) {
+            const char* hint = "Click to play  -  WASD move, Space jump, left click break, right click place, 1-9 pick, F fly, N new world, Esc frees the mouse";
+            const vec2 sz = f.measure_text(hint, {.size = 17});
+            f.rect({cx - sz.x * 0.5f - 12, 60.0f}, {sz.x + 24, 32}, rgba{0, 0, 0, 0.5f});
+            f.text(hint, {cx - sz.x * 0.5f, 67.0f}, {.size = 17, .color = white});
+        }
+    });
+    return app.run();
+}

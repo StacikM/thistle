@@ -1,0 +1,228 @@
+// {{name}} — a third-person starter made with Thistle.
+//
+// Run and jump across a level made in the Thistle Editor
+// (assets/scenes/level.scene.json): collect the coins, ride the jump pad,
+// reach the flag. Open the level in the editor (`thistle editor run` in
+// this folder) to change it: anything with coin = true is a coin, a trigger
+// named "jump_pad" throws you to the entity its "to" property names, the
+// trigger named "goal" is the finish, and "player_start" is where you begin.
+//
+// Click to capture the mouse (Esc lets go); the mouse turns the camera,
+// the wheel zooms. WASD to run (Shift to walk), Space to jump, R to start over.
+#include <thistle.hpp>
+#include <version.hpp>
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <string>
+#include <vector>
+using namespace thistle;
+using namespace thistle::three;
+
+namespace {
+
+float wrap_angle(float a) {
+    while (a > pi) a -= 2.0f * pi;
+    while (a < -pi) a += 2.0f * pi;
+    return a;
+}
+
+} // namespace
+
+int main() {
+    App app{{.title = "{{name}} v" + std::string(GAME_VERSION), .width = 1280, .height = 720, .save_name = "{{name}}"}};
+    load_font("assets/fonts/inter-regular.ttf");
+
+    Scene3D level;
+    CollisionWorld solid;
+    std::vector<int> coins;          // entities with coin = true
+    std::vector<vec3> coin_home;     // where each one bobs around
+    std::vector<int> pads;           // "jump_pad" triggers
+    int goal = -1, spawn = -1;
+    CharacterController player;
+    float facing = 0.0f;             // the character's yaw, radians (0 = facing -Z)
+    float stride = 0.0f;             // walk cycle
+    bool flying = false;             // thrown by a jump pad: following an arc, not steering
+    vec3 fly_velocity;
+    int collected = 0;
+    double started = 0.0, finished = -1.0;
+    std::string message;
+    float message_time = 0.0f;
+
+    OrbitCamera orbit;
+    orbit.capture_mouse = true;
+    orbit.allow_pan = false;
+    orbit.distance = 6.0f;
+    orbit.min_distance = 2.5f;
+    orbit.max_distance = 14.0f;
+    orbit.pitch = radians(20.0f);
+
+    auto respawn = [&] {
+        const Transform at = spawn >= 0 ? level.world_transform(spawn) : Transform{};
+        player = CharacterController{};
+        player.position = at.position;
+        facing = to_euler(at.rotation).y;
+        orbit.yaw = facing;
+        flying = false;
+    };
+    // (Re)load the level and put everything back where it started.
+    auto start = [&](double now) {
+        if (!level.load("assets/scenes/level.scene.json")) log_warn("couldn't load assets/scenes/level.scene.json");
+        solid = CollisionWorld{};
+        level.add_colliders(solid);
+        coins.clear();
+        coin_home.clear();
+        pads.clear();
+        for (int i = 0; i < static_cast<int>(level.entities.size()); ++i) {
+            const SceneEntity& e = level.entities[i];
+            if (e.property("coin") == "true") {
+                coins.push_back(i);
+                coin_home.push_back(e.transform.position);
+            }
+            if (e.name == "jump_pad") pads.push_back(i);
+        }
+        goal = level.find("goal");
+        spawn = level.find("player_start");
+        respawn();
+        collected = 0;
+        started = now;
+        finished = -1.0;
+    };
+    start(0.0);
+
+    World world;
+    Camera camera;
+    ParticleSystem sparkles;
+    sparkles.settings.start_color = rgb(1.0f, 0.9f, 0.4f);
+    sparkles.settings.start_size = 0.14f;
+    sparkles.settings.lifetime = 0.6f;
+    sparkles.settings.spread = 3.0f;
+    sparkles.settings.additive = true;
+
+    app.update([&](Frame f) {
+        if (f.key_pressed(Key::R)) start(f.time);
+        const bool playing = finished < 0.0;
+
+        // --- move, relative to where the camera looks
+        orbit.update(camera, f);
+        const vec3 cam_fwd = normalize(vec3{camera.forward().x, 0.0f, camera.forward().z});
+        const vec3 cam_right = normalize(cross(cam_fwd, vec3{0, 1, 0}));
+        vec3 wish{};
+        if (playing) {
+            if (f.key_down(Key::W) || f.key_down(Key::Up)) wish = wish + cam_fwd;
+            if (f.key_down(Key::S) || f.key_down(Key::Down)) wish = wish - cam_fwd;
+            if (f.key_down(Key::D) || f.key_down(Key::Right)) wish = wish + cam_right;
+            if (f.key_down(Key::A) || f.key_down(Key::Left)) wish = wish - cam_right;
+            if (length(wish) > 1.0f) wish = normalize(wish);
+        }
+        player.move_speed = f.key_down(Key::LeftShift) ? 2.5f : 6.0f;
+        if (flying) {
+            // A jump pad's throw: a plain arc, moved against the level so a wall still stops it.
+            fly_velocity.y -= player.gravity * f.dt;
+            const vec3 want = fly_velocity * f.dt;
+            const vec3 got = player.move(solid, want);
+            if (fly_velocity.y < 0.0f && got.y > want.y + 1e-4f) { // landed
+                flying = false;
+                player.velocity = {fly_velocity.x, 0.0f, fly_velocity.z};
+            }
+        } else {
+            player.update(solid, wish, playing && f.key_pressed(Key::Space), f.dt);
+        }
+        // Face the way we're going, turning smoothly.
+        const vec3 flat{player.velocity.x, 0.0f, player.velocity.z};
+        const float speed = flying ? 0.0f : length(flat);
+        if (length(wish) > 0.1f) facing += wrap_angle(std::atan2(-wish.x, -wish.z) - facing) * std::min(1.0f, f.dt * 12.0f);
+        stride += speed * f.dt * 2.2f;
+
+        // --- the level's things
+        const vec3 body = player.position + vec3{0, 0.9f, 0};
+        for (int pad : pads) {
+            if (!flying && level.inside(pad, player.position + vec3{0, 0.1f, 0})) { // pads are on the floor: check the feet
+                // Thrown so it lands on the entity named by the pad's "to" property, in `air` seconds.
+                const int to = level.find(level.entities[pad].property("to"));
+                if (to >= 0) {
+                    const float air = 1.1f;
+                    const vec3 d = level.world_transform(to).position - player.position;
+                    fly_velocity = d / air + vec3{0, 0.5f * player.gravity * air, 0};
+                    flying = true;
+                    sparkles.emit(player.position, 30);
+                }
+            }
+        }
+        for (size_t k = 0; k < coins.size(); ++k) {
+            SceneEntity& c = level.entities[coins[k]];
+            if (c.kind == SceneEntity::Kind::Empty) continue; // collected
+            c.transform.rotation = quat::axis_angle({0, 1, 0}, static_cast<float>(f.time) * 2.5f) * quat::axis_angle({1, 0, 0}, radians(90.0f));
+            c.transform.position = coin_home[k] + vec3{0, 0.12f * std::sin(static_cast<float>(f.time) * 3.0f + k), 0};
+            if (length(level.world_transform(coins[k]).position - body) < 1.1f) {
+                sparkles.emit(level.world_transform(coins[k]).position, 24);
+                c.kind = SceneEntity::Kind::Empty; // an Empty draws nothing
+                ++collected;
+            }
+        }
+        if (playing && goal >= 0 && level.inside(goal, body)) finished = f.time;
+        if (player.position.y < -3.5f) { // in the sea
+            respawn();
+            message = "Splash! Back to the start.";
+            message_time = 1.5f;
+        }
+        message_time -= f.dt;
+
+        // --- the camera: behind the character, pulled in when a wall's in the way
+        orbit.target = player.position + vec3{0, 1.5f, 0};
+        orbit.apply(camera);
+        const vec3 back = camera.position - orbit.target;
+        if (const RaycastHit h = solid.raycast(Ray{orbit.target, normalize(back)}, length(back))) {
+            camera.position = orbit.target + normalize(back) * std::max(0.3f, h.distance - 0.25f);
+        }
+
+        // --- draw
+        sparkles.update(f.dt);
+        level.draw(world);
+        world.draw(sparkles);
+        // The character: boxes and a sphere, legs and arms swinging with the stride.
+        // Swap in your own model with load_model() + Animator (see the engine's docs/animation.md).
+        const quat turn = quat::axis_angle({0, 1, 0}, facing);
+        const float swing = std::sin(stride) * std::min(1.0f, speed / 4.0f) * 0.7f;
+        auto limb = [&](vec3 pivot, vec3 size, float angle, rgba color) {
+            const quat bend = quat::axis_angle({1, 0, 0}, angle);
+            const vec3 center = pivot + bend * vec3{0, -size.y * 0.5f, 0};
+            world.box(Transform{player.position + turn * center, turn * bend, size}, color);
+        };
+        const rgba shirt = rgb(0.25f, 0.45f, 0.85f), pants = rgb(0.2f, 0.2f, 0.28f), skin = rgb(0.95f, 0.78f, 0.62f);
+        limb({-0.13f, 0.8f, 0}, {0.18f, 0.8f, 0.2f}, swing, pants);   // legs
+        limb({0.13f, 0.8f, 0}, {0.18f, 0.8f, 0.2f}, -swing, pants);
+        world.box(Transform{player.position + turn * vec3{0, 1.12f, 0}, turn, {0.5f, 0.65f, 0.28f}}, shirt);
+        limb({-0.33f, 1.42f, 0}, {0.13f, 0.62f, 0.15f}, -swing, shirt); // arms
+        limb({0.33f, 1.42f, 0}, {0.13f, 0.62f, 0.15f}, swing, shirt);
+        world.sphere(player.position + vec3{0, 1.68f, 0}, 0.36f, skin);
+        world.box(Transform{player.position + turn * vec3{0, 1.72f, -0.17f}, turn, {0.2f, 0.06f, 0.04f}}, rgb(0.15f, 0.15f, 0.2f)); // eyes: shows which way is front
+        world.render(f, camera);
+
+        // --- the HUD
+        char buf[96];
+        const double t = (finished >= 0.0 ? finished : f.time) - started;
+        std::snprintf(buf, sizeof buf, "Coins %d / %d     %.1f s", collected, static_cast<int>(coins.size()), t);
+        f.text(buf, {24, 20}, {.size = 22, .color = white});
+        const float cx = f.width * 0.5f, cy = f.height * 0.5f;
+        if (message_time > 0.0f) {
+            const vec2 sz = f.measure_text(message, {.size = 26});
+            f.text(message, {cx - sz.x * 0.5f, cy - 140}, {.size = 26, .color = rgb(1.0f, 0.9f, 0.5f)});
+        }
+        if (!playing) {
+            f.rect({0, 0}, {static_cast<float>(f.width), static_cast<float>(f.height)}, rgba{0, 0, 0, 0.4f});
+            std::snprintf(buf, sizeof buf, "You made it! %d / %d coins in %.1f s", collected, static_cast<int>(coins.size()), t);
+            const vec2 sz = f.measure_text(buf, {.size = 40});
+            f.text(buf, {cx - sz.x * 0.5f, cy - 40}, {.size = 40, .color = white});
+            const char* again = "Press R to play again";
+            const vec2 sz2 = f.measure_text(again, {.size = 22});
+            f.text(again, {cx - sz2.x * 0.5f, cy + 20}, {.size = 22, .color = rgba{1, 1, 1, 0.8f}});
+        } else if (!mouse_locked()) {
+            const char* hint = "Click to play  -  mouse turns the camera, WASD run, Shift walk, Space jump, R restart, Esc frees the mouse";
+            const vec2 sz = f.measure_text(hint, {.size = 18});
+            f.rect({cx - sz.x * 0.5f - 12, f.height - 64.0f}, {sz.x + 24, 34}, rgba{0, 0, 0, 0.5f});
+            f.text(hint, {cx - sz.x * 0.5f, f.height - 57.0f}, {.size = 18, .color = white});
+        }
+    });
+    return app.run();
+}
