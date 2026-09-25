@@ -1,0 +1,119 @@
+// {{name}}'s dedicated server: no window, no graphics, no sound. It loads the
+// same level as the game, gives each player who joins a spawn point, and
+// checks every move before passing it on to the others.
+//
+//     thistle run --server                   run it here (in build-server/)
+//     thistle run --server -- --port 47001   with options (--help lists them)
+//     thistle build --server                 build only this, e.g. on a VPS
+//
+// Type commands into it: help lists them (list, kick, status, stop, and
+// respawn, which is defined below). Settings are in server.json next to it,
+// made on the first run; logs/ has what it printed.
+#include <thistle.hpp>
+#include <version.hpp>
+#include "shared.hpp"
+
+#include <cmath>
+#include <map>
+#include <string>
+#include <vector>
+using namespace thistle;
+using namespace thistle::three;
+
+int main(int argc, char** argv) {
+    DedicatedServer server({.port = default_port, .tick_rate = 30, .name = "{{name}} server"}, argc, argv);
+    // How fast a player may move, in meters a second; faster, and the move
+    // is refused and they're put back. A setting of this game's own, in
+    // server.json.
+    const float max_speed = server.setting("max_speed", 9.0f);
+
+    net_register_class("Player", [] { return std::make_unique<Player>(); });
+
+    // The level: where the spawn points are. (For a game that checks more,
+    // walls for instance, give the server a CollisionWorld of it too:
+    // level.add_colliders(), as the game does.)
+    Scene3D level;
+    if (!level.load("assets/scenes/level.scene.json")) log_error("couldn't load assets/scenes/level.scene.json");
+    std::vector<Transform> spawns;
+    for (int i = 0; i < static_cast<int>(level.entities.size()); ++i) {
+        if (level.entities[i].kind == SceneEntity::Kind::Spawn) spawns.push_back(level.world_transform(i));
+    }
+    if (spawns.empty()) spawns.push_back(Transform{});
+    size_t next_spawn = 0;
+
+    struct Seen {
+        Player* player = nullptr;
+        vec3 at;           // the last position we accepted
+        double when = 0.0; // and when
+    };
+    std::map<int, Seen> players; // by connection id
+
+    auto send_to_spawn = [&](Seen& s) {
+        const Transform t = spawns[next_spawn++ % spawns.size()];
+        s.player->teleport(t.position, to_euler(t.rotation).y);
+        s.at = t.position;
+        s.when = server.uptime();
+    };
+
+    const rgba colors[] = {rgb(0.25f, 0.45f, 0.85f), rgb(0.85f, 0.3f, 0.3f), rgb(0.3f, 0.7f, 0.35f), rgb(0.9f, 0.7f, 0.2f),
+                           rgb(0.6f, 0.35f, 0.8f), rgb(0.2f, 0.7f, 0.75f)};
+    server.on_join([&](int id) {
+        auto* p = static_cast<Player*>(net_spawn("Player"));
+        p->owner = id;
+        p->color = colors[id % 6];
+        players[id].player = p;
+        send_to_spawn(players[id]);
+    });
+    server.on_leave([&](int id) {
+        auto it = players.find(id);
+        if (it == players.end()) return;
+        net_despawn(it->second.player);
+        players.erase(it);
+    });
+
+    // A move from a player's game. Checked, then set: the others get it on
+    // the next tick.
+    Player::on_move = [&](Player& p, vec3 to, float facing) {
+        Seen& s = players[p.owner.get()];
+        const double now = server.uptime();
+        const float elapsed = static_cast<float>(now - s.when);
+        const vec3 d = to - s.at;
+        const float across = std::sqrt(d.x * d.x + d.z * d.z);
+        // Some slack: moves arrive in bursts, and falling is faster than running.
+        if (across > max_speed * elapsed + 1.0f || d.y > 8.0f * elapsed + 1.5f) {
+            log_warn("player " + std::to_string(p.owner.get()) + " moved too fast; put back");
+            p.teleport(s.at, p.facing.get());
+            s.when = now;
+            return;
+        }
+        p.position = to;
+        p.facing = facing;
+        s.at = to;
+        s.when = now;
+    };
+
+    server.command("respawn", "respawn <id>: puts a player back at a spawn point", [&](const ServerCommand& c) {
+        auto it = players.find(c.integer(0, -1));
+        if (it == players.end()) {
+            c.reply("Usage: respawn <id>. The ids are in list.");
+            return;
+        }
+        send_to_spawn(it->second);
+        c.reply("Player " + c.arg(0) + " is back at a spawn point");
+    });
+
+    server.start([&] {
+        log_info(std::string("{{name}} v") + GAME_VERSION + ", " + std::to_string(spawns.size()) + " spawn points");
+    });
+    server.update([&](float) {
+        for (auto& [id, s] : players) {
+            if (s.at.y < -10.0f) send_to_spawn(s); // fell out of the world
+        }
+    });
+    server.stop([&] {
+        // Nothing to keep in this template. A game that has some (a world,
+        // scores) saves it here: stop, Ctrl+C and the system shutting the
+        // server down all come through this.
+    });
+    return server.run();
+}

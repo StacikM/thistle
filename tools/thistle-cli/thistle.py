@@ -136,6 +136,7 @@ TEMPLATE_KINDS = {
     "fps": "first person: walk an editor-made level, shoot the targets, reach the exit",
     "third-person": "a character behind an orbiting camera: collect coins, reach the flag",
     "voxel": "an endless Minecraft-style block world: break, place, build, saved between runs",
+    "multiplayer": "players in an editor-made arena, with a dedicated server (src/server.cpp)",
 }
 
 
@@ -162,6 +163,9 @@ def cmd_new(args) -> None:
     main_template = "main.cpp.in" if kind == "blank" else f"{kind}/main.cpp.in"
     (dest / "src" / "main.cpp").write_text(render(main_template, name=name), encoding="utf-8")
     (dest / "src" / "version.hpp.in").write_text((TEMPLATES / "version.hpp.in").read_text(encoding="utf-8"), encoding="utf-8")
+    for extra in ("server.cpp", "shared.hpp"): # the multiplayer template's server, and what it shares with the game
+        if kind != "blank" and (TEMPLATES / kind / (extra + ".in")).exists():
+            (dest / "src" / extra).write_text(render(f"{kind}/{extra}.in", name=name), encoding="utf-8")
     about = "" if kind == "blank" else render(f"{kind}/about.md", name=name)
     (dest / "README.md").write_text(render("README.md.in", name=name, about=about), encoding="utf-8")
     if kind != "blank":
@@ -183,7 +187,11 @@ def cmd_new(args) -> None:
           + ("" if not args.modules else f", with {', '.join(args.modules)}"))
     print("next:")
     print(f"  cd {dest}")
-    print("  thistle run")
+    if (dest / "src" / "server.cpp").exists():
+        print("  thistle run --server      (the server: leave it running)")
+        print("  thistle run               (in another terminal: a player; start as many as you like)")
+    else:
+        print("  thistle run")
 
 
 def cmd_init(args) -> None:
