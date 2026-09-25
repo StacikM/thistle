@@ -250,10 +250,9 @@ void Process::read_loop() {
     while (ReadFile(static_cast<HANDLE>(out_read_), buf, sizeof(buf), &n, nullptr) && n > 0) add_output(buf, n);
     CloseHandle(static_cast<HANDLE>(out_read_));
     out_read_ = nullptr;
-    // The output closes when everything writing to it has exited. (`thistle
-    // run` hands over to the game with os.execv, which on Windows starts the
-    // game and ends Python: the game inherited the output, so this waits
-    // for the game.)
+    // The output closes when everything writing to it has exited: a game
+    // started by `thistle run` inherited it. (On Windows the CLI waits for
+    // the game and exits with its exit code, see hand_over() in thistle.py.)
     WaitForSingleObject(static_cast<HANDLE>(process_), INFINITE);
     DWORD code = 0;
     GetExitCodeProcess(static_cast<HANDLE>(process_), &code);

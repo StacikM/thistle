@@ -916,7 +916,10 @@ void BuildRunner::update() {
         if (code == -1) {
             state_ = State::Stopped;
             headline_ = ran ? name_ + " was stopped" : "Build stopped";
-        } else if (ran) {
+        } else if (ran || code == 0) {
+            // (0 without the game's "$ " line: `thistle run` only succeeds
+            // after running the game, so it ran; the line got lost. An older
+            // CLI lost it into a pipe, and this said the build had failed.)
             state_ = code == 0 ? State::Finished : State::Failed;
             headline_ = code == 0 ? name_ + " closed" : name_ + " stopped with an error (exit code " + std::to_string(code) + ")";
         } else {
