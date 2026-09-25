@@ -64,9 +64,26 @@ log_warn("falling back to default asset");
 log_error("could not open " + path);
 ```
 
-Text input is the mechanism behind every on-screen text field in Fling (level names, login username/password, comments) — it's deliberately primitive: printable ASCII, Backspace, that's the whole alphabet of editing operations. No cursor positioning, no selection, no cut/copy/paste within the field, no IME/composed-character support (so no CJK input). If your game needs a real text field, that's a real limitation to plan around, not an oversight to work around with a hack — there isn't a clever workaround, the underlying capture is genuinely that simple.
+Text input is the mechanism behind every on-screen text field in Fling (level names, login username/password, comments) — it's deliberately primitive: printable ASCII, Backspace, and pasting (Ctrl+V / Cmd+V adds the clipboard's text at the end), up to the `max_length` you pass (40 by default). No cursor positioning, no selection, no copy or cut out of the field, no IME/composed-character support (so no CJK input). If your game needs a real text field, that's a real limitation to plan around, not an oversight to work around with a hack — there isn't a clever workaround, the underlying capture is genuinely that simple.
 
 Logs print to console *and* get captured into an in-memory ring buffer (trimmed at 1000 lines) that the `THISTLE_DEBUG` overlay reads (see [building.md](building.md)). Use `log_error` for things that are actually wrong, not for routine flow — every log line is a line someone has to read while debugging a real problem later, and a log spammed with "frame 4821 ok" is a log nobody reads at all.
+
+## Choosing a folder
+
+```cpp
+if (can_pick_folder()) {
+    const std::string folder = pick_folder("Where are your mods?", save_dir);  // "" if cancelled
+}
+```
+
+`pick_folder()` opens the system's own folder dialog and returns the absolute path chosen, or `""` if the user cancelled. It blocks until the dialog closes (your frame loop pauses meanwhile). The Thistle Editor's Open folder uses it.
+
+- **Windows:** Explorer's "Select Folder" dialog (`IFileOpenDialog`).
+- **macOS:** Finder's open panel (`NSOpenPanel`), set to folders.
+- **Linux:** `zenity` or `kdialog`, whichever is installed (kdialog first under KDE). Neither installed: `can_pick_folder()` is false and `pick_folder()` returns `""`, so show your own browser or a text field instead.
+- **iOS, Android, web:** no dialog; `can_pick_folder()` is false.
+
+Verified: the zenity path on Linux (under Xvfb), and the not-installed fallback. The Windows and macOS dialogs compile in CI (MSVC and Apple Clang) and with MinGW, but haven't been opened on a real machine yet.
 
 ## Platform queries
 

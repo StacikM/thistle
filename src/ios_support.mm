@@ -16,6 +16,8 @@ extern "C" void thistle_ios_init_audio_session(void);
 extern "C" const char* thistle_apple_writable_dir(void);
 extern "C" const char* thistle_apple_device_name(void);
 extern "C" void thistle_apple_set_clipboard(const char* text);
+extern "C" const char* thistle_apple_pick_folder(const char* title, const char* start_in);
+extern "C" int thistle_apple_can_pick_folder(void);
 extern "C" void thistle_apple_haptic(int style); // 0 light 1 medium 2 heavy 3 success
 // Async HTTP (NSURLSession). Returns an opaque handle; poll it each frame.
 extern "C" void* thistle_http_start(const char* method, const char* url, const char* body);
@@ -350,6 +352,9 @@ void thistle_apple_set_clipboard(const char* text) {
     }
 }
 
+const char* thistle_apple_pick_folder(const char*, const char*) { return ""; } // no folder dialog on iOS
+int thistle_apple_can_pick_folder(void) { return 0; }
+
 void thistle_apple_haptic(int style) {
     if (@available(iOS 10.0, *)) {
         @autoreleasepool {
@@ -368,6 +373,7 @@ void thistle_apple_haptic(int style) {
 }
 
 #else // macOS
+#import <AppKit/AppKit.h>
 
 void thistle_ios_init_audio_session(void) {}
 
@@ -389,6 +395,25 @@ const char* thistle_apple_device_name(void) {
 // On macOS the clipboard is handled by sokol_app (sapp_set_clipboard_string).
 void thistle_apple_set_clipboard(const char* /*text*/) {}
 
+const char* thistle_apple_pick_folder(const char* title, const char* start_in) {
+    static std::string result;
+    result.clear();
+    @autoreleasepool {
+        NSOpenPanel* panel = [NSOpenPanel openPanel];
+        panel.canChooseFiles = NO;
+        panel.canChooseDirectories = YES;
+        panel.allowsMultipleSelection = NO;
+        panel.canCreateDirectories = YES;
+        panel.message = [NSString stringWithUTF8String:title]; // (panels no longer show a title)
+        if (start_in && *start_in) {
+            panel.directoryURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:start_in] isDirectory:YES];
+        }
+        if ([panel runModal] == NSModalResponseOK && panel.URL) result = panel.URL.path.fileSystemRepresentation;
+    }
+    return result.c_str();
+}
+int thistle_apple_can_pick_folder(void) { return 1; }
+
 void thistle_apple_haptic(int /*style*/) {} // no haptics on macOS
 
 #endif
@@ -399,6 +424,8 @@ void thistle_ios_init_audio_session(void) {}
 const char* thistle_apple_writable_dir(void) { return ""; }
 const char* thistle_apple_device_name(void) { return ""; }
 void thistle_apple_set_clipboard(const char*) {}
+const char* thistle_apple_pick_folder(const char*, const char*) { return ""; }
+int thistle_apple_can_pick_folder(void) { return 0; }
 void thistle_apple_haptic(int) {}
 void* thistle_http_start(const char*, const char*, const char*) { return nullptr; }
 int   thistle_http_poll(void*, int*, const char**, int*) { return 1; }

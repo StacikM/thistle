@@ -43,7 +43,7 @@ Requires a consumer project (game) that adds this as a subdirectory and links ag
 
 ## Thistle Editor
 
-A 3D level editor for `thistle::three`: place models, shapes, lights, trigger volumes and spawn points with move/rotate/scale gizmos, group them, give them properties your game reads, paint block objects (voxels) with brushes and a box tool, bring in models and MagicaVoxel files by dropping them on the window, set the sun, sky and fog, with undo for all of it. Levels save as `.scene.json` in your game's `assets/scenes/`, and the game loads them with `three::Scene3D` ([docs/scene3d.md](docs/scene3d.md)). It's drawn with the engine itself, not ImGui. See [tools/thistle-editor](tools/thistle-editor/README.md) for how to use it and exactly what's been tested.
+A 3D level editor for `thistle::three`: place models, shapes, lights, trigger volumes and spawn points with move/rotate/scale gizmos, group them, give them properties your game reads, paint block objects (voxels) with brushes and a box tool, bring in models and MagicaVoxel files by dropping them on the window, set the sun, sky and fog, with undo for all of it. Levels save as `.scene.json` in your game's `assets/scenes/`, and the game loads them with `three::Scene3D` ([docs/scene3d.md](docs/scene3d.md)). It starts on a projects screen: recent projects, New project (the templates, as a form), and Open folder, which checks it's a Thistle project and offers to make it one. Build & run builds and starts the game from inside the editor. It's drawn with the engine itself, not ImGui. See [tools/thistle-editor](tools/thistle-editor/README.md) for how to use it and exactly what's been tested.
 
 ```bash
 thistle editor install   # build it and put `thistle-editor` on your PATH

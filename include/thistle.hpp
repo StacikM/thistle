@@ -585,6 +585,15 @@ void log_error(const std::string& msg);
 // Copy text to the system clipboard (where the platform supports it).
 void set_clipboard(const std::string& text);
 
+// The system's own "choose a folder" dialog (Explorer on Windows, Finder's
+// open panel on macOS, zenity or kdialog on Linux), starting in `start_in`
+// if given. Returns the chosen folder's absolute path, or "" if the user
+// cancelled or there's no such dialog: iOS, Android, the web, and Linux
+// without zenity or kdialog installed. can_pick_folder() says which ahead
+// of time. It blocks until the dialog is closed.
+std::string pick_folder(const std::string& title = "Choose a folder", const std::string& start_in = "");
+bool can_pick_folder();
+
 // Hides the cursor and keeps it inside the window, so the mouse can turn a
 // first-person camera forever without hitting the screen edge; read
 // Frame::mouse_delta() for the movement. The OS may unlock it on its own

@@ -292,7 +292,7 @@ elseif(WIN32)
     # linker doesn't honor, so d3d11/dxgi need to be listed explicitly here (MSVC
     # builds just get them twice, which is harmless).
     target_sources(thistle PRIVATE src/win32_support.cpp)
-    target_link_libraries(thistle PRIVATE winhttp d3d11 dxgi ws2_32 dbghelp user32 xinput)
+    target_link_libraries(thistle PRIVATE winhttp d3d11 dxgi ws2_32 dbghelp user32 xinput ole32 shell32 uuid)
 elseif(EMSCRIPTEN)
     # sokol uses WebGL2 (SOKOL_GLES3); the executable sets the emcc link flags.
     # Nothing to link into the engine library itself here.
@@ -602,4 +602,11 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(animation_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME scene3d_smoketest COMMAND thistle_scene3d_smoketest)
     set_tests_properties(scene3d_smoketest PROPERTIES TIMEOUT 30)
+    # The `thistle` CLI's new/init, which the Thistle Editor's projects screen
+    # runs. Python, like the CLI; skipped where there's no Python 3.
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME cli_smoketest COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/thistle-cli/test_cli.py")
+        set_tests_properties(cli_smoketest PROPERTIES TIMEOUT 60)
+    endif()
 endif()

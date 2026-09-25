@@ -7,7 +7,9 @@ old Cocos2d tooling) an end-of-life Python 2 install. If this runs at all,
 it has everything it needs.
 
 Commands:
-    thistle new <name> [--at PATH]   create a new project
+    thistle new <name> [--at PATH] [--template KIND] [--with MODULE]...
+                                     create a new project
+    thistle init [--name NAME]       make the current folder a project (overwrites nothing)
     thistle build [--release]        configure + build the project in cwd
     thistle run [--release]          build, then run the result
     thistle version show             print the current version
@@ -109,6 +111,9 @@ def cmd_new(args) -> None:
     kind = args.template
     if not VALID_NAME.match(name):
         die(f"'{name}' isn't a valid project name — use letters, numbers, - and _, starting with a letter")
+    for m in args.modules:
+        if m not in MODULES:
+            die(f"no module called '{m}' — `thistle modules` lists them")
 
     dest = Path(args.at).resolve() if args.at else (ENGINE_ROOT.parent / name)
     if dest.exists():
@@ -136,12 +141,63 @@ def cmd_new(args) -> None:
         for f in ("inter-regular.ttf", "inter-OFL-LICENSE.txt"):
             shutil.copy2(editor_assets / f, fonts / f)
     (dest / ".gitignore").write_text("build/\n.DS_Store\n")
-    write_project(dest, {"name": name, "version": "1.0.0"})
+    project = {"name": name, "version": "1.0.0", "template": kind}
+    if args.modules:
+        project["modules"] = {m: True for m in args.modules}
+    write_project(dest, project)
 
-    print(f"created {dest}" + ("" if kind == "blank" else f" ({kind} template)"))
+    print(f"created {dest}" + ("" if kind == "blank" else f" ({kind} template)")
+          + ("" if not args.modules else f", with {', '.join(args.modules)}"))
     print("next:")
     print(f"  cd {dest}")
     print("  thistle run")
+
+
+def cmd_init(args) -> None:
+    """Turns the current folder into a Thistle project: adds what `thistle
+    new` would have made, but never overwrites a file that's already there."""
+    dest = Path.cwd().resolve()
+    if (dest / "thistle.json").exists():
+        die(f"{dest} is already a Thistle project (it has a thistle.json)")
+    name = args.name
+    if not name:
+        # The folder's name, made valid: "My Game!" -> "My-Game".
+        name = re.sub(r"[^A-Za-z0-9_-]+", "-", dest.name).strip("-_")
+        if not name or not name[0].isalpha():
+            name = "game-" + name if name else "game"
+    if not VALID_NAME.match(name):
+        die(f"'{name}' isn't a valid project name — use letters, numbers, - and _, starting with a letter")
+
+    rel_engine = os.path.relpath(ENGINE_ROOT, dest).replace("\\", "/")
+    added, kept = [], []
+
+    def add(rel: str, text: str) -> None:
+        path = dest / rel
+        if path.exists():
+            kept.append(rel)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        added.append(rel)
+
+    add("CMakeLists.txt", render("CMakeLists.txt.in", name=name, engine_dir=rel_engine))
+    add("src/main.cpp", render("main.cpp.in", name=name))
+    add("src/version.hpp.in", (TEMPLATES / "version.hpp.in").read_text())
+    add("README.md", render("README.md.in", name=name, about=""))
+    add(".gitignore", "build/\n.DS_Store\n")
+    if not (dest / "assets").exists():
+        (dest / "assets").mkdir()
+        added.append("assets/")
+    write_project(dest, {"name": name, "version": "1.0.0", "template": "blank"})
+    added.append("thistle.json")
+
+    print(f"made {dest} a Thistle project called '{name}'")
+    print("added: " + ", ".join(added))
+    if kept:
+        print("kept as they were: " + ", ".join(kept))
+    if "CMakeLists.txt" in kept:
+        print("note: your own CMakeLists.txt was kept, so `thistle build` builds whatever it describes. To use the")
+        print("engine from it, see docs/building.md (add_subdirectory + target_link_libraries(... thistle)).")
 
 
 # --- build / run ---------------------------------------------------------
@@ -156,7 +212,9 @@ def cmd_build(args) -> None:
     config = _config_name(args)
     if not (build_dir / "CMakeCache.txt").exists():
         run(["cmake", "-S", str(root), "-B", str(build_dir), f"-DCMAKE_BUILD_TYPE={config}"])
-    run(["cmake", "--build", str(build_dir), "--config", config])
+    # All cores: without it Make builds one file at a time, and the first
+    # build (the whole engine) takes many times longer than it needs to.
+    run(["cmake", "--build", str(build_dir), "--config", config, "--parallel", str(os.cpu_count() or 2)])
 
 
 def _find_executable(build_dir: Path, name: str, config: str) -> "Path | None":
@@ -211,7 +269,7 @@ def _build_editor() -> Path:
     build_dir = editor_dir / "build"
     if not (build_dir / "CMakeCache.txt").exists():
         run(["cmake", "-S", str(editor_dir), "-B", str(build_dir)])
-    run(["cmake", "--build", str(build_dir)])
+    run(["cmake", "--build", str(build_dir), "--parallel", str(os.cpu_count() or 2)])
     # "Debug" matches what a multi-config generator (Visual Studio, Xcode)
     # produces when no --config is passed to the build step above.
     exe = _find_executable(build_dir, "thistle_editor", "Debug")
@@ -367,7 +425,13 @@ def main() -> None:
     p_new.add_argument("--at", help="where to create it (default: next to the engine)")
     p_new.add_argument("--template", "-t", choices=list(TEMPLATE_KINDS), default="blank",
                        help="what to start from: " + "; ".join(f"{k}: {v}" for k, v in TEMPLATE_KINDS.items()))
+    p_new.add_argument("--with", dest="modules", action="append", default=[], metavar="MODULE",
+                       help="turn an optional engine module on from the start (repeatable): " + ", ".join(MODULES))
     p_new.set_defaults(func=cmd_new)
+
+    p_init = sub.add_parser("init", help="make the current folder a Thistle project (adds what's missing, overwrites nothing)")
+    p_init.add_argument("--name", help="the project's name (default: the folder's name)")
+    p_init.set_defaults(func=cmd_init)
 
     p_build = sub.add_parser("build", help="configure + build the project in the current directory")
     p_build.add_argument("--release", action="store_true")

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
@@ -42,18 +43,29 @@ SceneEntity::Kind kind_from(const std::string& s) {
 
 // Models are shared between every scene (and every reload of one): the
 // editor reloads the scene on every undo.
+// Keyed by the full path: scene files use paths relative to the working
+// directory, so "assets/models/tree.glb" is a different file after a
+// program (the editor, switching projects) changes it.
+std::string cache_key(const std::string& path) {
+    std::error_code ec;
+    const std::filesystem::path full = std::filesystem::absolute(path, ec);
+    return ec ? path : full.lexically_normal().generic_string();
+}
+
 Model cached_model(const std::string& path) {
     static std::unordered_map<std::string, Model> cache;
-    auto it = cache.find(path);
-    if (it == cache.end()) it = cache.emplace(path, load_model(path)).first;
+    const std::string key = cache_key(path);
+    auto it = cache.find(key);
+    if (it == cache.end()) it = cache.emplace(key, load_model(path)).first;
     return it->second;
 }
 
 // Block atlases likewise: several block objects usually share one.
 Texture cached_texture(const std::string& path) {
     static std::unordered_map<std::string, Texture> cache;
-    auto it = cache.find(path);
-    if (it == cache.end()) it = cache.emplace(path, load_texture(path)).first;
+    const std::string key = cache_key(path);
+    auto it = cache.find(key);
+    if (it == cache.end()) it = cache.emplace(key, load_texture(path)).first;
     return it->second;
 }
 

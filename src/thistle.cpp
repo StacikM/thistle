@@ -83,6 +83,8 @@ extern "C" void thistle_ios_init_audio_session(void);
 extern "C" const char* thistle_apple_writable_dir(void);
 extern "C" const char* thistle_apple_device_name(void);
 extern "C" void thistle_apple_set_clipboard(const char* text);
+extern "C" const char* thistle_apple_pick_folder(const char* title, const char* start_in); // "" = cancelled
+extern "C" int thistle_apple_can_pick_folder(void);
 extern "C" void thistle_apple_haptic(int style);
 extern "C" void* thistle_http_start(const char* method, const char* url, const char* body);
 extern "C" int   thistle_http_poll(void* h, int* status, const char** body, int* len);
@@ -99,6 +101,7 @@ extern "C" void        thistle_iap_restore_purchases(void);
 extern "C" void        thistle_iap_finish_transaction(const char* transaction_id);
 extern "C" const char* thistle_iap_poll_event_json(void);
 #elif defined(_WIN32)
+std::string thistle_win32_pick_folder(void* owner, const std::string& title, const std::string& start_in);
 // Real async HTTP on Windows too (see src/win32_support.cpp) — same poll-based
 // interface as the Apple side, just backed by WinHTTP instead of NSURLSession.
 extern "C" void* thistle_http_start(const char* method, const char* url, const char* body);
@@ -2236,6 +2239,84 @@ void set_clipboard(const std::string& text) {
     thistle_apple_set_clipboard(text.c_str());
 #endif
     sapp_set_clipboard_string(text.c_str());
+}
+
+#if defined(__linux__) && !defined(__ANDROID__)
+namespace {
+// Linux has no one folder dialog: zenity (GTK) and kdialog (KDE) are the
+// common ones, run as programs. KDE users get kdialog when both exist.
+const std::string& folder_dialog_program() {
+    static const std::string program = [] {
+    const char* path = std::getenv("PATH");
+    auto has = [&](const char* exe) {
+        std::string dirs = path ? path : "/usr/bin:/bin";
+        size_t start = 0;
+        while (start <= dirs.size()) {
+            const size_t end = std::min(dirs.find(':', start), dirs.size());
+            const std::string candidate = dirs.substr(start, end - start) + "/" + exe;
+            if (end > start && access(candidate.c_str(), X_OK) == 0) return true;
+            start = end + 1;
+        }
+        return false;
+    };
+    const char* desktop = std::getenv("XDG_CURRENT_DESKTOP");
+    const bool kde = desktop && std::strstr(desktop, "KDE");
+    if (kde && has("kdialog")) return std::string("kdialog");
+    if (has("zenity")) return std::string("zenity");
+    if (has("kdialog")) return std::string("kdialog");
+    return std::string();
+    }(); // looked for once: can_pick_folder() is called every frame by UIs that show a button for it
+    return program;
+}
+std::string shell_quote(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) out += c == '\'' ? std::string("'\\''") : std::string(1, c);
+    return out + "'";
+}
+} // namespace
+#endif
+
+std::string pick_folder(const std::string& title, const std::string& start_in) {
+#if defined(__APPLE__)
+    return thistle_apple_pick_folder(title.c_str(), start_in.c_str());
+#elif defined(_WIN32)
+    return thistle_win32_pick_folder(const_cast<void*>(sapp_win32_get_hwnd()), title, start_in);
+#elif defined(__linux__) && !defined(__ANDROID__)
+    const std::string& program = folder_dialog_program();
+    if (program.empty()) return "";
+    std::string cmd;
+    if (program == "zenity") {
+        cmd = "zenity --file-selection --directory --title=" + shell_quote(title);
+        if (!start_in.empty()) cmd += " --filename=" + shell_quote(start_in + "/");
+    } else {
+        cmd = "kdialog --title " + shell_quote(title) + " --getexistingdirectory " + shell_quote(start_in.empty() ? "." : start_in);
+    }
+    cmd += " 2>/dev/null";
+    FILE* p = popen(cmd.c_str(), "r");
+    if (!p) return "";
+    std::string out;
+    char buf[512];
+    while (std::fgets(buf, sizeof buf, p)) out += buf;
+    const int status = pclose(p);
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+    return status == 0 ? out : ""; // cancelled: a non-zero exit
+#else
+    (void)title;
+    (void)start_in;
+    return "";
+#endif
+}
+
+bool can_pick_folder() {
+#if defined(__APPLE__)
+    return thistle_apple_can_pick_folder() != 0;
+#elif defined(_WIN32)
+    return true;
+#elif defined(__linux__) && !defined(__ANDROID__)
+    return !folder_dialog_program().empty();
+#else
+    return false;
+#endif
 }
 
 void haptic(Haptic style) {
