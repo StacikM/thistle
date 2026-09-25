@@ -173,7 +173,7 @@ MagicaVoxel is Z-up, so models are turned to stand upright here, not mirrored. E
   - changed-only saves (above)
 - **`scene3d_smoketest`**: `copy()` makes a separate world, `set_block_type()` changes a type (and ignores air and unknown ids), `grid_bounds()` follows edits.
 - **`terrain_smoketest`**: streaming generates nearest first and keeps to its budget, never generates a chunk twice, drops far chunks, keeps edited ones, makes dropped ones again, and never overwrites a loaded save.
-- **`character_smoketest`**: walking, stepping and jumping on blocks. **`voxelnet_smoketest`** and **`destruction_smoketest`**: see their docs.
+- **`character_smoketest`**: walking, stepping and jumping on blocks, and standing still on them at 144 to 3000 fps (a character used to sink through blocks above ~144 fps, found on a real GPU). **`voxelnet_smoketest`** and **`destruction_smoketest`**: see their docs.
 - **Seen rendered (Xvfb + Mesa llvmpipe, a software renderer, not a GPU):**
   - `voxel_demo`: textured terrain, cutout leaves, water, a glass hut, a flat-colored statue, ambient occlusion and shadows. Played: landed, dug a hole, placed blocks.
   - `endless_demo`: flown forward, going from 62 to 90 chunks as new land streamed in.
