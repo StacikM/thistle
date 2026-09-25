@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -35,10 +36,66 @@ namespace thistle::detail {
 
 namespace {
 
+// Shared between the console and the thread reading plain lines, which
+// can outlive it (see ServerConsole::close()).
 struct TypedLines {
     std::mutex mutex;
     std::deque<std::string> lines;
+    std::atomic<bool> stop{false};
+    std::atomic<bool> done{false};
 };
+
+// Plain mode: lines from stdin. Raw reads, not std::getline: a thread
+// blocked in getline holds the C library's lock on stdin, and exit() waits
+// for that lock to flush the streams, so a server whose stdin stayed open
+// without input (docker run -i, no -t) hung instead of exiting after its
+// save. Waits in slices where it can, to notice `stop`.
+void read_lines(std::shared_ptr<TypedLines> typed) {
+    std::string partial;
+    auto take = [&](const char* data, size_t n) {
+        partial.append(data, n);
+        size_t nl;
+        while ((nl = partial.find('\n')) != std::string::npos) {
+            std::string line = partial.substr(0, nl);
+            partial.erase(0, nl + 1);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            std::lock_guard<std::mutex> lock(typed->mutex);
+            typed->lines.push_back(std::move(line));
+        }
+    };
+    char buf[512];
+#if defined(_WIN32)
+    const HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    const DWORD type = GetFileType(h);
+    bool can_peek = type == FILE_TYPE_PIPE;
+    while (!typed->stop) {
+        if (can_peek) { // a pipe can't be waited on: ask how much is there
+            DWORD avail = 0;
+            if (!PeekNamedPipe(h, nullptr, 0, nullptr, &avail, nullptr)) {
+                if (GetLastError() == ERROR_BROKEN_PIPE) break; // closed
+                can_peek = false; // a pipe that can't be asked (Wine's): plain reads, then
+            } else if (avail == 0) {
+                Sleep(50);
+                continue;
+            }
+        } else if (type == FILE_TYPE_CHAR) {
+            if (WaitForSingleObject(h, 100) != WAIT_OBJECT_0) continue;
+        }
+        DWORD n = 0;
+        if (!ReadFile(h, buf, sizeof(buf), &n, nullptr) || n == 0) break;
+        take(buf, n);
+    }
+#else
+    while (!typed->stop) {
+        pollfd p{STDIN_FILENO, POLLIN, 0};
+        if (::poll(&p, 1, 100) <= 0) continue;
+        const ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
+        if (n <= 0) break; // end of input
+        take(buf, static_cast<size_t>(n));
+    }
+#endif
+    typed->done = true;
+}
 
 bool is_continuation(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
 
@@ -91,54 +148,6 @@ struct ServerConsole::Impl {
     bool interactive = false;
     std::atomic<bool> stopping{false};
     std::thread reader;
-    std::string partial; // plain mode: a line not finished yet
-
-    // Plain mode: lines from stdin. Raw reads, not std::getline: a thread
-    // blocked in getline holds the C library's lock on stdin, and exit()
-    // waits for that lock to flush the streams, so a server whose stdin
-    // stayed open without input (docker run -i, no -t) hung instead of
-    // exiting after its save.
-    void take(const char* data, size_t n) {
-        partial.append(data, n);
-        size_t nl;
-        while ((nl = partial.find('\n')) != std::string::npos) {
-            std::string line = partial.substr(0, nl);
-            partial.erase(0, nl + 1);
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            std::lock_guard<std::mutex> lock(typed->mutex);
-            typed->lines.push_back(std::move(line));
-        }
-    }
-#if defined(_WIN32)
-    void read_lines() {
-        const HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
-        const DWORD type = GetFileType(h);
-        char buf[512];
-        while (!stopping) {
-            DWORD n = 0;
-            if (type == FILE_TYPE_PIPE) { // pipes can't be waited on: ask how much is there
-                DWORD avail = 0;
-                if (!PeekNamedPipe(h, nullptr, 0, nullptr, &avail, nullptr)) return; // closed
-                if (avail == 0) { Sleep(50); continue; }
-            } else if (type == FILE_TYPE_CHAR) {
-                if (WaitForSingleObject(h, 100) != WAIT_OBJECT_0) continue;
-            }
-            if (!ReadFile(h, buf, sizeof(buf), &n, nullptr) || n == 0) return;
-            take(buf, n);
-        }
-    }
-#else
-    void read_lines() {
-        char buf[512];
-        while (!stopping) {
-            pollfd p{STDIN_FILENO, POLLIN, 0};
-            if (::poll(&p, 1, 100) <= 0) continue;
-            const ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
-            if (n <= 0) return; // end of input
-            take(buf, static_cast<size_t>(n));
-        }
-    }
-#endif
 
     std::vector<std::string> words; // for Tab
     std::string line;               // being typed (UTF-8)
@@ -424,17 +433,27 @@ void ServerConsole::open(std::vector<std::string> words) {
         im.redraw();
         return;
     }
-    im.stopping = false;
-    im.reader = std::thread([&im] { im.read_lines(); });
+    im.typed->stop = false;
+    im.typed->done = false;
+    im.reader = std::thread(read_lines, im.typed);
 }
 
 void ServerConsole::close() {
     Impl& im = *impl_;
     if (!im.open) return;
     im.open = false;
+    if (!im.interactive) {
+        // Stopped between reads, it's done within a slice. Stuck in a read
+        // that can't be interrupted (a pipe that can't be asked), it's let
+        // go: all it holds is the shared TypedLines.
+        im.typed->stop = true;
+        for (int i = 0; i < 30 && !im.typed->done; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (im.typed->done) im.reader.join();
+        else im.reader.detach();
+        return;
+    }
     im.stopping = true;
     if (im.reader.joinable()) im.reader.join();
-    if (!im.interactive) return;
     {
         std::lock_guard<std::mutex> lock(im.mutex);
         im.write_out("\r\x1b[2K");
