@@ -856,7 +856,8 @@ public:
     NetServer(const NetServer&) = delete;
     NetServer& operator=(const NetServer&) = delete;
 
-    bool listen(int port);   // starts accepting connections; false on bind/listen failure
+    bool listen(int port);   // starts accepting connections; false on bind/listen failure. 0: any free port
+    int port() const;        // the port it's listening on (what listen(0) picked); 0 when not listening
     void update();            // call every tick: accept, read+dispatch Commands, flush dirty NetVars
     // Tells every player the server stopped, then closes everything.
     void stop();

@@ -451,6 +451,7 @@ int DedicatedServer::run() {
         detail::set_log_sink(nullptr);
         return 1;
     }
+    im.config.port = im.net.port(); // what port 0 ("any free one") turned out to be
     install_stop_handlers();
     log_info(im.config.name + " is listening on port " + std::to_string(im.config.port) + ", " + std::to_string(im.config.tick_rate) +
              " ticks a second" + (im.config.max_players > 0 ? ", at most " + std::to_string(im.config.max_players) + (im.config.max_players == 1 ? " player" : " players") : "") +

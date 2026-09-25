@@ -80,11 +80,12 @@ int main() {
 
     NetServer server;
     NetClient client;
-    const int port = 47931;
-    if (!server.listen(port)) {
-        std::printf("  FAIL couldn't listen on %d\n", port);
+    // Any free port: a fixed one can be taken (see net_smoketest).
+    if (!server.listen(0)) {
+        std::printf("  FAIL couldn't listen\n");
         return 1;
     }
+    const int port = server.port();
     server_sync.host();
     Probe* probe = static_cast<Probe*>(net_spawn("Probe"));
     check(client.connect("127.0.0.1", port), "client connects over loopback");
