@@ -207,6 +207,7 @@ void finish(Link& l) {
 // anything below dereferences a NetServer*/NetClient*'s impl_.
 struct NetServer::Impl {
     SocketFd listen_fd = kInvalidSocket;
+    int port = 0;
     struct Conn { Link link; int id = 0; std::string address; double since = 0.0; };
     std::vector<Conn> conns;   // joined
     struct Pending { Link link; std::string address; double since = 0.0; };
@@ -388,6 +389,10 @@ bool NetServer::listen(int port) {
         return false;
     }
     set_nonblocking(impl_->listen_fd);
+    sockaddr_in bound{};
+    NetSockLen len = sizeof(bound);
+    getsockname(impl_->listen_fd, reinterpret_cast<sockaddr*>(&bound), &len); // the port listen(0) picked
+    impl_->port = ntohs(bound.sin_port);
     g_active_server = this;
     return true;
 }
@@ -512,6 +517,7 @@ bool NetServer::kick(int conn_id, const std::string& reason) {
 void NetServer::stop() {
     Impl& im = *impl_;
     if (im.listen_fd != kInvalidSocket) { close_socket(im.listen_fd); im.listen_fd = kInvalidSocket; }
+    im.port = 0;
     for (auto& c : im.conns) {
         send_json(c.link, { {"t", "bye"}, {"why", "stopped"} });
         finish(c.link);
@@ -525,6 +531,7 @@ void NetServer::stop() {
     if (g_active_server == this) g_active_server = nullptr;
 }
 
+int NetServer::port() const { return impl_->port; }
 int NetServer::connection_count() const { return static_cast<int>(impl_->conns.size()); }
 
 std::vector<NetConnection> NetServer::connections() const {

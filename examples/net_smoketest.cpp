@@ -48,8 +48,8 @@ public:
 };
 
 int fails = 0;
-void check(bool cond, const char* what) {
-    std::printf("%s %s\n", cond ? "  ok " : "FAIL ", what);
+void check(bool cond, const std::string& what) {
+    std::printf("%s %s\n", cond ? "  ok " : "FAIL ", what.c_str());
     if (!cond) ++fails;
 }
 
@@ -65,16 +65,22 @@ void pump(NetServer& server, NetClient& client, int ms) {
 } // namespace
 
 int main() {
+    // Unbuffered: if a check crashes the test, what it printed so far still shows.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     net_register_class("Player", [] { return std::make_unique<Player>(); });
     net_register_class("Blob", [] { return std::make_unique<Blob>(); });
 
     NetServer server;
-    check(server.listen(47100), "server.listen(47100)");
+    // Port 0: any free one. A fixed port can be taken, even by this test's own
+    // earlier connections (a closed one lingers in TIME_WAIT); that crashed a CI run.
+    check(server.listen(0), "server.listen(0) picks a free port");
+    const int port1 = server.port();
+    check(port1 > 0, "port() says which");
 
     NetClient client;
     bool connected_cb = false;
     client.on_connect = [&] { connected_cb = true; };
-    check(client.connect("127.0.0.1", 47100), "client.connect(127.0.0.1, 47100)");
+    check(client.connect("127.0.0.1", port1), "client.connect(127.0.0.1, that port)");
 
     server.update(); client.update();   // let the accept()/on_connect handshake settle
     check(connected_cb, "client on_connect fired");
@@ -134,19 +140,20 @@ int main() {
         s.max_players = 1;
         std::vector<int> left;
         s.on_disconnect = [&](int id) { left.push_back(id); };
-        check(s.listen(47101), "a second server listens (password, 1 player at most)");
+        check(s.listen(0), "a second server listens (password, 1 player at most)");
+        const int port = s.port();
 
         NetClient a;
-        check(!a.connect("127.0.0.1", 47101, "nope"), "a wrong password is refused");
+        check(!a.connect("127.0.0.1", port, "nope"), "a wrong password is refused");
         check(a.disconnect_reason() == "Wrong password", "... and says \"Wrong password\"");
         check(s.connection_count() == 0, "... and never counted as a player");
-        check(a.connect("127.0.0.1", 47101, "hunter2"), "the right password gets in");
+        check(a.connect("127.0.0.1", port, "hunter2"), "the right password gets in");
         const std::vector<NetConnection> list = s.connections();
         check(list.size() == 1 && list[0].id == a.connection_id() && list[0].address.rfind("127.0.0.1:", 0) == 0,
               "connections() lists them with their id and address");
 
         NetClient b;
-        check(!b.connect("127.0.0.1", 47101, "hunter2"), "a second player is turned away");
+        check(!b.connect("127.0.0.1", port, "hunter2"), "a second player is turned away");
         check(b.disconnect_reason() == "The server is full", "... with \"The server is full\"");
 
         std::string reason_in_callback;
@@ -159,13 +166,14 @@ int main() {
         check(reason_in_callback == "Kicked: griefing", "... already inside its on_disconnect");
         check(!s.kick(999), "kick() of nobody is false");
 
-        check(a.connect("127.0.0.1", 47101, "hunter2"), "there's room again after the kick");
+        check(a.connect("127.0.0.1", port, "hunter2"), "there's room again after the kick");
         s.stop();
         pump(s, a, 300);
         check(!a.connected() && a.disconnect_reason() == "The server stopped", "stopping the server tells the client why");
         NetClient c;
-        check(!c.connect("127.0.0.1", 47101) && c.disconnect_reason() == "Couldn't reach 127.0.0.1:47101",
-              "connecting to nothing fails with \"Couldn't reach 127.0.0.1:47101\"");
+        const std::string where = "127.0.0.1:" + std::to_string(port);
+        check(!c.connect("127.0.0.1", port) && c.disconnect_reason() == "Couldn't reach " + where,
+              "connecting to nothing fails with \"Couldn't reach " + where + "\"");
     }
 
     // --- a client that stops reading can't stall the server -------------
@@ -175,12 +183,13 @@ int main() {
         NetServer s;
         int dropped = 0;
         s.on_disconnect = [&](int) { ++dropped; };
-        check(s.listen(47102), "a third server listens");
+        check(s.listen(0), "a third server listens");
         NetClient lazy;
-        check(lazy.connect("127.0.0.1", 47102), "a client connects, then never reads again");
+        check(lazy.connect("127.0.0.1", s.port()), "a client connects, then never reads again");
         auto* blob = static_cast<Blob*>(net_spawn("Blob"));
+        check(blob != nullptr, "the server spawns something big to send");
         double worst = 0.0;
-        for (int i = 0; i < 100 && dropped == 0; ++i) {
+        for (int i = 0; i < 100 && dropped == 0 && blob; ++i) {
             blob->data = std::string(1 << 20, static_cast<char>('a' + i % 26)); // 1 MB to send every update
             const auto t0 = std::chrono::steady_clock::now();
             s.update();

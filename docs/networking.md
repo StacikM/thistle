@@ -105,6 +105,7 @@ On the server:
 - **`kick(conn_id, reason)`**: disconnects a player and tells their game why ("Kicked: reason", or "Kicked by the server"). `on_disconnect` runs for them. False if there's no such player.
 - **`connections()`**: every player's id, address (`"203.0.113.7:51544"`) and time connected.
 - **`stop()`** tells every player "The server stopped" before closing.
+- **`listen(0)`** listens on any free port, and **`port()`** says which one it picked (handy for tests, or a local game the player hosts). `listen()` returns false when it can't have the port.
 
 A kick or a refusal closes the connection gently (it stops sending, reads what's left, then closes), because closing a socket with unread data resets it, and a reset can throw away the message just sent, the reason with it.
 

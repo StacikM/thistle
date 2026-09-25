@@ -51,12 +51,21 @@ int main() {
     fs::create_directories(dir);
     fs::current_path(dir);
 
+    // Ports: free ones the system picks (a fixed port can be taken, even by an
+    // earlier connection lingering in TIME_WAIT). A server listening on one
+    // and stopped leaves it free for --port to use.
+    auto free_port = [] {
+        NetServer probe;
+        return probe.listen(0) ? probe.port() : 0;
+    };
+
     // --- a first run: flags, server.json, the loop, commands, a client -------
     {
-        const char* args[] = {"server", "--port", "47210", "--max-players", "1", "--mine", nullptr};
+        const std::string port = std::to_string(free_port());
+        const char* args[] = {"server", "--port", port.c_str(), "--max-players", "1", "--mine", nullptr};
         DedicatedServer server({.port = 47200, .tick_rate = 50, .name = "Test server"}, 6, const_cast<char**>(args));
         check(fs::exists("server.json"), "the first run writes server.json");
-        check(server.config().port == 47210 && server.config().max_players == 1, "--port and --max-players override");
+        check(server.config().port == std::stoi(port) && server.config().max_players == 1, "--port and --max-players override");
         check(server.setting("world_seed", 99) == 99, "setting() gives its fallback the first time");
         const nlohmann::json written = nlohmann::json::parse(read_file("server.json"));
         check(written.value("port", 0) == 47200 && written.value("name", "") == "Test server" && written.value("world_seed", 0) == 99,
@@ -82,8 +91,8 @@ int main() {
             ++ticks;
             dt_seen = dt;
             if (ticks == 2) {
-                check(a.connect("127.0.0.1", 47210), "a client joins");
-                check(!b.connect("127.0.0.1", 47210) && b.disconnect_reason() == "The server is full",
+                check(a.connect("127.0.0.1", server.net().port()), "a client joins");
+                check(!b.connect("127.0.0.1", server.net().port()) && b.disconnect_reason() == "The server is full",
                       "a second one is turned away (--max-players 1)");
                 server.run_command("/ECHO first \"two words\" 42");
                 server.run_command("nope");
@@ -125,12 +134,13 @@ int main() {
     // --- a second run: an edited server.json, a password, a replaced built-in --
     {
         nlohmann::json edited = nlohmann::json::parse(read_file("server.json"));
-        edited["port"] = 47211;
+        const int port = free_port();
+        edited["port"] = port;
         edited["password"] = "hunter2";
         std::ofstream("server.json") << edited.dump(2);
 
         DedicatedServer server({.port = 47200, .tick_rate = 50}, 0, nullptr);
-        check(server.config().port == 47211 && server.config().password == "hunter2", "a later run reads server.json");
+        check(server.config().port == port && server.config().password == "hunter2", "a later run reads server.json");
         check(server.setting("world_seed", 5) == 99, "setting() reads the game's value back");
         bool mine = false;
         server.command("kick", "kick: the game's own", [&](const ServerCommand&) { mine = true; });
@@ -138,8 +148,8 @@ int main() {
         NetClient a;
         server.update([&](float) {
             if (++ticks == 2) {
-                check(!a.connect("127.0.0.1", 47211, "wrong") && a.disconnect_reason() == "Wrong password", "a wrong password is refused");
-                check(a.connect("127.0.0.1", 47211, "hunter2"), "the right one gets in");
+                check(!a.connect("127.0.0.1", port, "wrong") && a.disconnect_reason() == "Wrong password", "a wrong password is refused");
+                check(a.connect("127.0.0.1", port, "hunter2"), "the right one gets in");
                 server.run_command("kick 1");
             }
             if (ticks == 5) server.quit();
@@ -150,14 +160,15 @@ int main() {
 
     // --- a broken server.json, and a port that's taken -----------------------
     {
-        std::ofstream("server.json") << "{ not json";
-        DedicatedServer server({.port = 47212}, 0, nullptr);
-        check(server.config().port == 47212, "a broken server.json: the code's defaults are used");
-        check(read_file("server.json") == "{ not json", "... and the file is left as it was");
         NetServer squatter;
-        check(squatter.listen(47212), "something else takes the port");
-        check(server.run() == 1, "run() returns 1 when it can't listen");
-        check(has(log_text(), "couldn't listen on port 47212"), "... and says why");
+        check(squatter.listen(0), "something else takes a port");
+        const int taken = squatter.port();
+        std::ofstream("server.json") << "{ not json";
+        DedicatedServer server({.port = taken}, 0, nullptr);
+        check(server.config().port == taken, "a broken server.json: the code's defaults are used");
+        check(read_file("server.json") == "{ not json", "... and the file is left as it was");
+        check(server.run() == 1, "run() returns 1 when it can't listen on its port");
+        check(has(log_text(), "couldn't listen on port " + std::to_string(taken)), "... and says why");
     }
 
     fs::current_path(home);
