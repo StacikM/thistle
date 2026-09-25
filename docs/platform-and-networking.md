@@ -83,7 +83,7 @@ if (can_pick_folder()) {
 - **Linux:** `zenity` or `kdialog`, whichever is installed (kdialog first under KDE). Neither installed: `can_pick_folder()` is false and `pick_folder()` returns `""`, so show your own browser or a text field instead.
 - **iOS, Android, web:** no dialog; `can_pick_folder()` is false.
 
-Verified: the zenity path on Linux (under Xvfb), and the not-installed fallback. Windows: the fix was checked with the Windows build (MinGW) under Wine, which reproduces the hang with the old code, in a test program and in the Thistle Editor. With the new code the dialog opens, returns the folder chosen, Cancel returns `""`, and the window keeps redrawing afterwards. It hasn't been re-tested on a real Windows machine yet. macOS: compiles in CI (Apple Clang), not opened on a real machine yet.
+Verified: the zenity path on Linux (under Xvfb), and the not-installed fallback. Windows: the fix was checked with the Windows build (MinGW) under Wine, which reproduces the hang with the old code, in a test program and in the Thistle Editor. With the new code the dialog opens, returns the folder chosen, Cancel returns `""`, and the window keeps redrawing afterwards. The owner then confirmed it on their Windows 11 PC: Open folder opens the dialog and opens the folder chosen. macOS: compiles in CI (Apple Clang), not opened on a real machine yet.
 
 ## Platform queries
 
