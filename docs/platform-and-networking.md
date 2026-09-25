@@ -78,12 +78,12 @@ if (can_pick_folder()) {
 
 `pick_folder()` opens the system's own folder dialog and returns the absolute path chosen, or `""` if the user cancelled. It blocks until the dialog closes (your frame loop pauses meanwhile). The Thistle Editor's Open folder uses it.
 
-- **Windows:** Explorer's "Select Folder" dialog (`IFileOpenDialog`).
+- **Windows:** Explorer's "Select Folder" dialog (`IFileOpenDialog`). It runs on a thread of its own while the main thread keeps the window answering. The dialog needs a single-threaded COM apartment, and a game's main thread is a multithreaded one: miniaudio makes it one when the engine starts its audio. The first version showed the dialog from the main thread anyway, and on Windows 11 the dialog never appeared and the window went Not Responding.
 - **macOS:** Finder's open panel (`NSOpenPanel`), set to folders.
 - **Linux:** `zenity` or `kdialog`, whichever is installed (kdialog first under KDE). Neither installed: `can_pick_folder()` is false and `pick_folder()` returns `""`, so show your own browser or a text field instead.
 - **iOS, Android, web:** no dialog; `can_pick_folder()` is false.
 
-Verified: the zenity path on Linux (under Xvfb), and the not-installed fallback. The Windows and macOS dialogs compile in CI (MSVC and Apple Clang) and with MinGW, but haven't been opened on a real machine yet.
+Verified: the zenity path on Linux (under Xvfb), and the not-installed fallback. Windows: the fix was checked with the Windows build (MinGW) under Wine, which reproduces the hang with the old code, in a test program and in the Thistle Editor. With the new code the dialog opens, returns the folder chosen, Cancel returns `""`, and the window keeps redrawing afterwards. It hasn't been re-tested on a real Windows machine yet. macOS: compiles in CI (Apple Clang), not opened on a real machine yet.
 
 ## Platform queries
 

@@ -37,50 +37,104 @@ extern "C" void  thistle_http_free(void* h);
 std::string thistle_win32_pick_folder(void* owner, const std::string& title, const std::string& start_in);
 
 // pick_folder(): the Explorer "Select Folder" dialog (Vista and later).
-std::string thistle_win32_pick_folder(void* owner, const std::string& title, const std::string& start_in) {
-    auto widen = [](const std::string& s) {
-        std::wstring w(static_cast<size_t>(MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0)), L'\0');
-        if (!w.empty()) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), static_cast<int>(w.size()));
-        if (!w.empty()) w.pop_back(); // the terminator
-        return w;
-    };
-    // COM on this thread for the dialog. Already on (in the other mode):
-    // RPC_E_CHANGED_MODE, and the dialog still works, so carry on.
-    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+//
+// The dialog needs a single-threaded COM apartment, and the main thread is a
+// multithreaded one by the time a game runs: miniaudio makes it one
+// (CoInitializeEx with COINIT_MULTITHREADED, in ma_engine_init). Shown from
+// there, the dialog hung and the whole window went Not Responding (found on
+// Windows 11, in the Thistle Editor's Open folder). So the dialog gets a
+// thread of its own, and the main thread keeps handling its window's messages
+// until the dialog closes.
+namespace {
+
+struct FolderDialog {
+    HWND owner = nullptr;
+    std::wstring title, start_in;
     std::string result;
+};
+
+std::wstring widen_utf8(const std::string& s) {
+    if (s.empty()) return {};
+    std::wstring w(static_cast<size_t>(MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0)), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), static_cast<int>(w.size()));
+    return w;
+}
+
+void show_folder_dialog(FolderDialog& d) {
     IFileOpenDialog* dialog = nullptr;
-    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
-        DWORD options = 0;
-        dialog->GetOptions(&options);
-        dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
-        dialog->SetTitle(widen(title).c_str());
-        if (!start_in.empty()) {
-            IShellItem* folder = nullptr;
-            if (SUCCEEDED(SHCreateItemFromParsingName(widen(start_in).c_str(), nullptr, IID_PPV_ARGS(&folder)))) {
-                dialog->SetFolder(folder);
-                folder->Release();
-            }
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) return;
+    DWORD options = 0;
+    dialog->GetOptions(&options);
+    dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+    dialog->SetTitle(d.title.c_str());
+    if (!d.start_in.empty()) {
+        IShellItem* folder = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(d.start_in.c_str(), nullptr, IID_PPV_ARGS(&folder)))) {
+            dialog->SetFolder(folder);
+            folder->Release();
         }
-        if (SUCCEEDED(dialog->Show(static_cast<HWND>(owner)))) {
-            IShellItem* item = nullptr;
-            if (SUCCEEDED(dialog->GetResult(&item))) {
-                PWSTR path = nullptr;
-                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
-                    const int n = WideCharToMultiByte(CP_UTF8, 0, path, -1, nullptr, 0, nullptr, nullptr);
-                    if (n > 1) {
-                        result.resize(static_cast<size_t>(n));
-                        WideCharToMultiByte(CP_UTF8, 0, path, -1, result.data(), n, nullptr, nullptr);
-                        result.pop_back(); // the terminator
-                    }
-                    CoTaskMemFree(path);
-                }
-                item->Release();
-            }
-        }
-        dialog->Release();
     }
-    if (SUCCEEDED(com)) CoUninitialize();
-    return result;
+    if (SUCCEEDED(dialog->Show(d.owner))) {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dialog->GetResult(&item))) {
+            PWSTR path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                const int n = WideCharToMultiByte(CP_UTF8, 0, path, -1, nullptr, 0, nullptr, nullptr);
+                if (n > 1) {
+                    d.result.resize(static_cast<size_t>(n));
+                    WideCharToMultiByte(CP_UTF8, 0, path, -1, d.result.data(), n, nullptr, nullptr);
+                    d.result.pop_back(); // the terminator
+                }
+                CoTaskMemFree(path);
+            }
+            item->Release();
+        }
+    }
+    dialog->Release();
+}
+
+DWORD WINAPI folder_dialog_thread(void* arg) {
+    if (SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) {
+        show_folder_dialog(*static_cast<FolderDialog*>(arg));
+        CoUninitialize();
+    }
+    return 0;
+}
+
+} // namespace
+
+std::string thistle_win32_pick_folder(void* owner, const std::string& title, const std::string& start_in) {
+    FolderDialog d;
+    d.owner = static_cast<HWND>(owner);
+    d.title = widen_utf8(title);
+    d.start_in = widen_utf8(start_in);
+    HANDLE thread = CreateThread(nullptr, 0, folder_dialog_thread, &d, 0, nullptr);
+    if (!thread) return {};
+    // While it's up the dialog disables its owner, our window, and Windows
+    // does that by sending it a message and waiting for the answer: this
+    // thread has to keep answering. Input can't reach the window meanwhile.
+    bool quit = false;
+    WPARAM quit_code = 0;
+    for (;;) {
+        const DWORD r = MsgWaitForMultipleObjectsEx(1, &thread, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (r != WAIT_OBJECT_0 + 1) {
+            if (r != WAIT_OBJECT_0) WaitForSingleObject(thread, INFINITE); // d must outlive the thread
+            break;
+        }
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                quit = true;
+                quit_code = msg.wParam;
+                continue;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    CloseHandle(thread);
+    if (quit) PostQuitMessage(static_cast<int>(quit_code)); // for the app's own loop
+    return d.result;
 }
 
 namespace {
