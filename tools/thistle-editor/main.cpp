@@ -16,9 +16,10 @@
 //
 // It works inside a project: models come from its assets/ folder (.glb,
 // .gltf, .obj), scenes are saved to assets/scenes/, so they ship with the
-// game like everything else in assets/. Without a folder it uses the
-// current one when that looks like a project (has assets/ or thistle.json),
-// else the folder the editor itself is in. If the editor
+// game like everything else in assets/. It starts on the projects screen
+// (hub.cpp: recent projects, New project, Open folder), or straight in the
+// project given on the command line or the one it was started in (a
+// folder with a thistle.json). If the editor
 // that came before this one (a prop placer that saved a Node tree to one
 // file in the save folder) left a layout behind, Open offers to import it.
 //
@@ -55,18 +56,9 @@
 #include <unordered_set>
 #include <vector>
 
-#if defined(__APPLE__)
-#include <climits>
-#include <mach-o/dyld.h>
-#elif defined(_WIN32)
-#ifndef NOMINMAX // windows.h's min/max macros would break std::min/std::max
-#define NOMINMAX
-#endif
-#include <windows.h>
-#elif defined(__linux__)
-#include <climits>
-#include <unistd.h>
-#endif
+#include "hub.hpp"
+#include "platform.hpp"
+#include "theme.hpp"
 
 using namespace thistle;
 using namespace thistle::three;
@@ -74,43 +66,9 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// Where the editor's own files (its UI font) are: next to the executable,
-// wherever the project being edited is.
-fs::path executable_dir() {
-#if defined(__APPLE__)
-    char path[PATH_MAX];
-    uint32_t size = sizeof(path);
-    char resolved[PATH_MAX];
-    if (_NSGetExecutablePath(path, &size) == 0 && realpath(path, resolved)) return fs::path(resolved).parent_path();
-#elif defined(_WIN32)
-    char path[MAX_PATH];
-    if (GetModuleFileNameA(nullptr, path, MAX_PATH) != 0) return fs::path(path).parent_path();
-#elif defined(__linux__)
-    char path[PATH_MAX];
-    const ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
-    if (len > 0) {
-        path[len] = '\0';
-        return fs::path(path).parent_path();
-    }
-#endif
-    return fs::current_path();
-}
+using editor::executable_dir;
 
-namespace theme {
-const rgba chrome = rgb(0.10f, 0.10f, 0.11f);
-const rgba panel = rgb(0.16f, 0.16f, 0.17f);
-const rgba field = rgb(0.22f, 0.22f, 0.24f);
-const rgba field_hover = rgb(0.27f, 0.27f, 0.30f);
-const rgba field_active = rgb(0.18f, 0.30f, 0.40f);
-const rgba text = rgb(0.88f, 0.88f, 0.88f);
-const rgba dim = rgb(0.58f, 0.58f, 0.62f);
-const rgba faint = rgb(0.42f, 0.42f, 0.45f);
-const rgba accent = rgb(0.95f, 0.55f, 0.18f); // Blender-ish orange: the selection
-const rgba axis_x = rgb(0.92f, 0.28f, 0.30f);
-const rgba axis_y = rgb(0.45f, 0.82f, 0.25f);
-const rgba axis_z = rgb(0.25f, 0.52f, 0.95f);
-const rgba hover = rgb(1.0f, 0.88f, 0.25f);
-} // namespace theme
+namespace theme = editor::theme;
 
 const char* kind_label(SceneEntity::Kind k) {
     switch (k) {
@@ -294,18 +252,30 @@ std::vector<std::string> model_dependencies(const fs::path& file) {
 
 int main(int argc, char** argv) {
     const fs::path editor_dir = executable_dir();
+    // A folder on the command line is the game to edit (Finder may add a
+    // "-psn_..." argument to an app it launches; that isn't one), else the
+    // project it was started in. Neither: the projects screen.
+    std::optional<fs::path> start_project;
     {
         std::error_code ec;
         const fs::path cwd = fs::current_path(ec);
-        // A folder on the command line is the game to edit. (Finder may add a
-        // "-psn_..." argument to an app it launches; that isn't one.)
-        if (argc >= 2 && std::string(argv[1]).rfind("-psn", 0) != 0) fs::current_path(argv[1], ec);
-        else if (!(fs::exists(cwd / "assets") || fs::exists(cwd / "thistle.json"))) fs::current_path(editor_dir, ec);
-        if (ec) log_warn("Thistle Editor: couldn't open the project folder: " + ec.message());
+        if (argc >= 2 && std::string(argv[1]).rfind("-psn", 0) != 0) start_project = fs::absolute(argv[1], ec);
+        else if (!ec && fs::exists(cwd / "thistle.json", ec)) start_project = cwd;
     }
 
     App app{{.title = "Thistle Editor", .width = 1440, .height = 860}};
     load_font((editor_dir / "editor_assets" / "inter-regular.ttf").string());
+
+    // The projects screen, and which project is open.
+    editor::Hub hub;
+    bool in_hub = true;
+    if (start_project) hub.request_open(*start_project); // checked like any other: straight in if it's a Thistle project
+    fs::path project_root;
+    std::string project_name;
+    bool project_is_thistle = false;
+    editor::BuildRunner runner;
+    bool show_build_log = false;
+    float build_log_scroll = 0.0f;
 
     // ---------------------------------------------------------------- state
     Scene3D scene;
@@ -497,6 +467,7 @@ int main(int argc, char** argv) {
             dirty = false;
             say("saved " + path);
             rescan();
+            if (!project_root.empty()) hub.remember(project_root, path);
         } else {
             say("couldn't save " + path);
         }
@@ -514,6 +485,7 @@ int main(int argc, char** argv) {
         dirty = false;
         frame_opened = true;
         say("opened " + path);
+        if (!project_root.empty()) hub.remember(project_root, path);
     };
 
     // The editor before this one placed minor-3D props as a Node tree, one
@@ -903,7 +875,70 @@ int main(int argc, char** argv) {
     float outliner_scroll = 0.0f;
     bool prev_left = false;
 
+    // Build & run: `thistle run` in the project. The game loads the scene
+    // as saved, so a saved scene with changes is saved first.
+    auto start_build = [&] {
+        if (!project_is_thistle) return say("Build & run needs a Thistle project (one with a thistle.json)");
+        if (dirty && !file_path.empty()) save_to(file_path);
+        else if (dirty) say("this scene isn't saved, so the game won't have it");
+        show_build_log = false;
+        build_log_scroll = 0.0f;
+        runner.start(project_root);
+    };
+
+    // Opening a project: work in its folder, start with the scene it had
+    // open last (or its only one), and forget everything from the one before.
+    auto open_project = [&](const editor::OpenRequest& req) {
+        std::error_code ec;
+        fs::current_path(req.folder, ec);
+        if (ec) {
+            hub.say("Couldn't open " + editor::pretty_path(req.folder) + ": " + ec.message());
+            return;
+        }
+        if (runner.active() && runner.project() != req.folder) {
+            runner.stop();
+            runner.dismiss();
+        }
+        if (!text_field.empty()) {
+            end_text_input();
+            text_field.clear();
+        }
+        popup = Popup::None;
+        project_root = req.folder;
+        project_is_thistle = fs::exists(req.folder / "thistle.json", ec);
+        project_name = req.folder.filename().string();
+        if (project_is_thistle) {
+            try {
+                std::ifstream in(req.folder / "thistle.json");
+                project_name = nlohmann::json::parse(in).value("name", project_name);
+            } catch (const std::exception&) {
+            }
+        }
+        new_scene();
+        swatch_atlases.clear();
+        rescan();
+        auto usable = [&](const std::string& s) { return !s.empty() && fs::is_regular_file(s, ec); };
+        std::string first = req.scene;
+        if (!usable(first)) first = hub.last_scene(req.folder);
+        if (!usable(first) && scene_files.size() == 1) first = scene_files[0];
+        if (usable(first)) {
+            open_file(first);
+        } else {
+            target = {0, 0.5f, 0};
+            distance = 14.0f;
+        }
+        hub.remember(req.folder, file_path);
+        in_hub = false;
+        say(project_is_thistle ? "opened " + project_name : "opened " + project_name + " (not a Thistle project, so no Build & run)");
+        if (req.build_and_run) start_build();
+    };
+
     app.update([&](Frame f) {
+        runner.update();
+        if (in_hub) {
+            if (auto req = hub.update(f)) open_project(*req);
+            return;
+        }
         if (frame_opened) {
             frame_scene();
             frame_opened = false;
@@ -924,6 +959,15 @@ int main(int argc, char** argv) {
         if (!f.dropped_files().empty()) {
             float offset = 0.0f;
             for (const std::string& path : f.dropped_files()) {
+                std::error_code dir_ec;
+                if (fs::is_directory(path, dir_ec)) { // a folder: open it as the project (checked like any other)
+                    const std::string folder = path;
+                    unless_unsaved("open another folder", [&, folder] {
+                        in_hub = true;
+                        hub.request_open(folder);
+                    });
+                    break;
+                }
                 const size_t before = scene.entities.size();
                 if (import_path(path) && scene.entities.size() > before) {
                     const int e = static_cast<int>(scene.entities.size()) - 1;
@@ -935,7 +979,9 @@ int main(int argc, char** argv) {
         }
         const bool typing = !text_field.empty();
         const bool popup_open = popup != Popup::None;
-        const bool over_view = view.contains(m) && !popup_open;
+        // The Build & run strip (and its log) cover the bottom of the view.
+        const bool over_build_ui = runner.active() && (show_build_log || m.y > H - BOTTOM - 34);
+        const bool over_view = view.contains(m) && !popup_open && !over_build_ui;
 
         // ------------------------------------------------------ camera
         const vec2 d = f.mouse_delta();
@@ -1589,6 +1635,8 @@ int main(int argc, char** argv) {
             x += w + 4;
             return r;
         };
+        if (top_button("Projects", 80)) unless_unsaved("go back to the projects", [&] { in_hub = true; });
+        x += 14;
         if (top_button("New", 52)) unless_unsaved("start a new scene", new_scene);
         if (top_button("Open", 60)) { rescan(); popup = Popup::Open; popup_at = {x - 64, TOP}; }
         if (top_button("Save", 56)) {
@@ -1606,10 +1654,20 @@ int main(int argc, char** argv) {
         x += 14;
         if (top_button("+ Add", 70)) { rescan(); popup = Popup::Add; popup_at = {x - 74, TOP}; }
         if (top_button("Import", 70)) popup = Popup::Import;
+        if (project_is_thistle) {
+            x += 14;
+            const bool going = runner.state() == editor::BuildRunner::State::Building || runner.state() == editor::BuildRunner::State::Running;
+            if (going ? top_button("Stop", 64, true) : top_button("Build & run", 104)) {
+                if (going) runner.stop();
+                else start_build();
+            }
+        }
         {
             const std::string name = (file_path.empty() ? std::string("untitled") : fs::path(file_path).filename().string()) + (dirty ? " *" : "");
             const vec2 tsz = f.measure_text(name, {.size = 15});
             f.text(name, {W - tsz.x - 14, 12}, {.size = 15, .color = dirty ? theme::accent : theme::dim});
+            const vec2 psz = f.measure_text(project_name + "  /", {.size = 15});
+            f.text(project_name + "  /", {W - tsz.x - psz.x - 20, 12}, {.size = 15, .color = theme::faint});
         }
 
         // ------------------------------------------------------ outliner
@@ -2051,6 +2109,79 @@ int main(int argc, char** argv) {
         if (!status.empty() && now_seconds() - status_time < 5.0) {
             const vec2 ssz = f.measure_text(status, {.size = 13});
             label(status, {W - ssz.x - 12, H - BOTTOM + 5}, theme::accent, 13);
+        }
+
+        // ------------------------------------------------------ build & run
+        {
+            using State = editor::BuildRunner::State;
+            if ((runner.state() == State::Finished || runner.state() == State::Stopped) && runner.since_finished() > 6.0 && !show_build_log) {
+                runner.dismiss(); // a clean finish goes away by itself; a failure stays until closed
+            }
+        }
+        if (runner.active()) {
+            using State = editor::BuildRunner::State;
+            const State st = runner.state();
+            const bool going = st == State::Building || st == State::Running;
+            const rgba tone = st == State::Failed ? theme::bad : st == State::Running ? theme::good : st == State::Building ? theme::accent : theme::dim;
+            const float py = H - BOTTOM - 34;
+            f.rect({0, py}, {W, 34}, rgb(0.12f, 0.12f, 0.13f));
+            f.rect({0, py}, {W, 2}, tone);
+            float tx = 34;
+            if (st == State::Building) {
+                const Rect bar{{12, py + 12}, {150, 12}};
+                f.rect(bar.pos, bar.size, theme::field);
+                if (runner.progress() >= 0.0f) {
+                    f.rect(bar.pos, {bar.size.x * std::clamp(runner.progress(), 0.0f, 1.0f), bar.size.y}, theme::accent);
+                } else { // no percentage (MSBuild prints none): a block sliding back and forth
+                    const float t = std::fabs(std::fmod(static_cast<float>(now_seconds()) * 0.8f, 2.0f) - 1.0f);
+                    f.rect({bar.pos.x + (bar.size.x - 30) * t, bar.pos.y}, {30, bar.size.y}, theme::accent);
+                }
+                tx = 174;
+            } else {
+                f.circle({18, py + 18}, 6, tone);
+            }
+            std::string head = runner.headline();
+            if (st == State::Building && runner.progress() >= 0.0f) head += "   " + std::to_string(static_cast<int>(runner.progress() * 100.0f)) + "%";
+            f.text(head, {tx, py + 9}, {.size = 14, .color = theme::text});
+            const float hx = tx + f.measure_text(head, {.size = 14}).x + 18;
+            const Rect close_btn{{W - 86, py + 5}, {76, 24}};
+            const Rect log_btn{{W - 168, py + 5}, {76, 24}};
+            if (button(going ? "Stop" : "Close", close_btn, false, 13)) {
+                if (going) {
+                    runner.stop();
+                } else {
+                    runner.dismiss();
+                    show_build_log = false;
+                }
+            }
+            if (button(show_build_log ? "Hide log" : "Log", log_btn, show_build_log, 13)) show_build_log = !show_build_log;
+            // Cut text to a width without measuring it a character at a time.
+            auto fit = [&](std::string t, float room, float size) {
+                const float w = f.measure_text(t, {.size = size}).x;
+                if (w <= room || t.empty()) return t;
+                t.resize(static_cast<size_t>(t.size() * room / w * 0.97f));
+                return t + "...";
+            };
+            f.text(fit(runner.last_line(), log_btn.pos.x - hx - 12, 12), {hx, py + 11},
+                   {.size = 12, .color = st == State::Failed ? theme::bad : theme::faint});
+            if (show_build_log) {
+                constexpr float LH = 16.0f;
+                const float top = std::max(TOP + 10.0f, py - H * 0.55f);
+                const Rect panel{{8, top}, {W - 16, py - top - 6}};
+                f.rect(panel.pos - vec2{1, 1}, panel.size + vec2{2, 2}, theme::accent);
+                f.rect(panel.pos, panel.size, rgba{0.07f, 0.07f, 0.08f, 0.97f});
+                const std::vector<std::string>& lines = runner.log();
+                const int rows = std::max(1, static_cast<int>((panel.size.y - 16) / LH));
+                if (panel.contains(m) && f.mouse_scroll() != 0.0f) build_log_scroll += f.mouse_scroll() * 3.0f; // wheel up: older lines
+                build_log_scroll = std::clamp(build_log_scroll, 0.0f, std::max(0.0f, static_cast<float>(lines.size()) - rows));
+                const int last = static_cast<int>(lines.size()) - static_cast<int>(build_log_scroll);
+                const int first = std::max(0, last - rows);
+                for (int i = first; i < last; ++i) {
+                    f.text(fit(lines[static_cast<size_t>(i)], panel.size.x - 20, 12), {panel.pos.x + 10, panel.pos.y + 8 + (i - first) * LH},
+                           {.size = 12, .color = theme::dim});
+                }
+                if (lines.empty()) f.text("(nothing printed yet)", panel.pos + vec2{10, 8}, {.size = 12, .color = theme::faint});
+            }
         }
 
         // ------------------------------------------------------ popups

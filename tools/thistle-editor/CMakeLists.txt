@@ -10,13 +10,21 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # engine instead of a copied/vendored one.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../.. ${CMAKE_BINARY_DIR}/thistle_engine)
 
+set(THISTLE_EDITOR_SOURCES main.cpp hub.cpp platform.cpp)
 if(APPLE)
-    add_executable(thistle_editor MACOSX_BUNDLE main.cpp)
+    add_executable(thistle_editor MACOSX_BUNDLE ${THISTLE_EDITOR_SOURCES})
 else()
-    add_executable(thistle_editor main.cpp)
+    add_executable(thistle_editor ${THISTLE_EDITOR_SOURCES})
 endif()
 
 target_link_libraries(thistle_editor PRIVATE thistle)
+# Where the engine checkout is, so New Project and Build & run can use its
+# `thistle` CLI (tools/thistle-cli/thistle.py): the same code as the command line.
+get_filename_component(THISTLE_EDITOR_ENGINE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+target_compile_definitions(thistle_editor PRIVATE THISTLE_ENGINE_DIR="${THISTLE_EDITOR_ENGINE_DIR}")
+if(WIN32)
+    target_compile_definitions(thistle_editor PRIVATE NOMINMAX)
+endif()
 
 # The editor's own UI font (Inter Regular, OFL — https://github.com/rsms/inter;
 # same font Blender's own UI uses), copied next to the built executable as its

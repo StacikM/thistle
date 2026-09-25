@@ -24,6 +24,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <xinput.h>
+#include <shobjidl.h> // IFileOpenDialog, for pick_folder()
 
 #include "thistle_gamepad.h"
 
@@ -33,6 +34,54 @@
 extern "C" void* thistle_http_start(const char* method, const char* url, const char* body);
 extern "C" int   thistle_http_poll(void* h, int* status, const char** body, int* len);
 extern "C" void  thistle_http_free(void* h);
+std::string thistle_win32_pick_folder(void* owner, const std::string& title, const std::string& start_in);
+
+// pick_folder(): the Explorer "Select Folder" dialog (Vista and later).
+std::string thistle_win32_pick_folder(void* owner, const std::string& title, const std::string& start_in) {
+    auto widen = [](const std::string& s) {
+        std::wstring w(static_cast<size_t>(MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0)), L'\0');
+        if (!w.empty()) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), static_cast<int>(w.size()));
+        if (!w.empty()) w.pop_back(); // the terminator
+        return w;
+    };
+    // COM on this thread for the dialog. Already on (in the other mode):
+    // RPC_E_CHANGED_MODE, and the dialog still works, so carry on.
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    std::string result;
+    IFileOpenDialog* dialog = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+        DWORD options = 0;
+        dialog->GetOptions(&options);
+        dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+        dialog->SetTitle(widen(title).c_str());
+        if (!start_in.empty()) {
+            IShellItem* folder = nullptr;
+            if (SUCCEEDED(SHCreateItemFromParsingName(widen(start_in).c_str(), nullptr, IID_PPV_ARGS(&folder)))) {
+                dialog->SetFolder(folder);
+                folder->Release();
+            }
+        }
+        if (SUCCEEDED(dialog->Show(static_cast<HWND>(owner)))) {
+            IShellItem* item = nullptr;
+            if (SUCCEEDED(dialog->GetResult(&item))) {
+                PWSTR path = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                    const int n = WideCharToMultiByte(CP_UTF8, 0, path, -1, nullptr, 0, nullptr, nullptr);
+                    if (n > 1) {
+                        result.resize(static_cast<size_t>(n));
+                        WideCharToMultiByte(CP_UTF8, 0, path, -1, result.data(), n, nullptr, nullptr);
+                        result.pop_back(); // the terminator
+                    }
+                    CoTaskMemFree(path);
+                }
+                item->Release();
+            }
+        }
+        dialog->Release();
+    }
+    if (SUCCEEDED(com)) CoUninitialize();
+    return result;
+}
 
 namespace {
 

@@ -18,8 +18,42 @@ It's drawn with Thistle's own 2D API, not Dear ImGui, and it renders the level w
 ```bash
 thistle editor run              # from inside a game project: edits that project
 thistle editor run path/to/game # or name the project
+thistle editor run              # anywhere else: starts on the projects screen
 thistle editor install          # put `thistle-editor` on your PATH, then: thistle-editor [project]
 ```
+
+Started in a project (a folder with a `thistle.json`) or given one, it opens straight into it. Otherwise it starts on the **projects screen**.
+
+## The projects screen
+
+Recent projects on the right, and what to do on the left:
+
+- **New project** is `thistle new` with a form. You pick:
+  - a name and where to make it
+  - what to start from: first person, third person, block world, or blank 2D
+  - optional engine modules: 3D physics (Jolt), and the debug UI (Dear ImGui)
+  - whether to open it in the editor straight away, and then build and run it
+
+  It runs the engine's own `thistle` command-line tool (`tools/thistle-cli`, found next to the editor), so a project made here is exactly what the command line makes. That needs Python 3, as the CLI does. The bottom left says whether it was found.
+- **Open folder** uses the system's own folder dialog: Explorer on Windows, Finder's on macOS, zenity or kdialog on Linux. Where there's none (Linux without either installed), it opens the editor's own folder browser instead, and with one, "Browse inside the editor" is there too. You can also paste a path, or drop a folder on the window.
+- **Opening checks it's a Thistle project** (a `thistle.json` in it):
+  - A project opens.
+  - A folder inside one (its `assets/`, say) offers to open the project it's in.
+  - Any other folder asks first, with three choices:
+    - **Open anyway** edits its `assets/` as it is.
+    - **Make it a Thistle project** runs `thistle init`, which adds `thistle.json`, a `CMakeLists.txt` and a starter `src/main.cpp`, and changes nothing that's already there.
+    - **Cancel**.
+- **Recent projects** are remembered between runs, with each one's template, when it was last opened, and the scene it had open. A project's scene reopens with it. One whose folder is gone says so; the x forgets it.
+
+**Projects** at the top left of the editor goes back to this screen (asking first about unsaved changes).
+
+## Build & run
+
+**Build & run** in the top bar (for Thistle projects) runs `thistle run` in the project: it builds the game and starts it. A saved scene with changes is saved first, since the game loads what's on disk.
+
+A strip at the bottom shows how it's going: the build's percentage, then "running", then how it ended. **Log** shows everything the build printed, which is where a compile error is. **Stop** stops the build, or the game and everything it started. The first build compiles the engine, which takes a few minutes; later ones only rebuild what changed. It needs CMake and a C++ compiler, like `thistle build` (see [docs/cli.md](../../docs/cli.md#installing)).
+
+## Working in a project
 
 The editor works on one project folder:
 
@@ -27,11 +61,9 @@ The editor works on one project folder:
 - **Scenes** are saved to `assets/scenes/`. They're in `assets/` on purpose: `thistle_bundle_assets()` ships that folder with the game on every platform, so a level the editor saves is a level the game can load, with nothing else to set up.
 - Paths inside a scene are relative to the project folder (`assets/ship.glb`), which is also how the game sees them once `assets/` is next to it.
 
-Without a folder, it uses the current one if it has `assets/` or `thistle.json`, else the folder the editor itself is in.
-
 ## The window
 
-- **Top bar**: New, Open, Save, Save as, Undo, Redo, the Move/Rotate/Scale tools, `+ Add`, Import, and the file name (orange with a `*` when there are unsaved changes).
+- **Top bar**: Projects, New, Open, Save, Save as, Undo, Redo, the Move/Rotate/Scale tools, `+ Add`, Import, Build & run, and the project and file name (orange with a `*` when there are unsaved changes).
 - **Outliner** (left): everything in the scene as a tree.
 - **Viewport** (middle): the level, drawn by the engine, with a grid, gizmos, and icons for the things that don't draw in the game (lights, triggers, spawn points, empties).
 - **Inspector** (right): whatever's selected. With nothing selected, it shows the scene's own settings: sun direction/height/color/intensity/shadows, sky colors, ambient light, fog.
@@ -183,10 +215,24 @@ Run under Xvfb + llvmpipe (software OpenGL) on Linux and driven with `xdotool`, 
 - The three `thistle new` template levels, opened from the Open menu. Each one came up framed (the whole level in view), after a fix: opening used to keep the previous camera, and the voxel template's scene opened looking at a wall from inside its house. Home frames the whole scene again after F zoomed to one crate.
 - Editor to game: a target deleted from the fps template's level and saved, then `thistle run` showed 7 targets instead of 8 (see [docs/scene3d.md](../../docs/scene3d.md#whats-been-verified)).
 - Importing a hand-written old-editor layout. The positions were checked against hand-computed ones, including a child under a rotated, stretched parent. A malformed old file is refused, not a crash. It was a crash on the first try, since `load_scene()` throws.
+- The projects screen, with a fresh home folder so the list started empty:
+  - **New project**: an fps project made with "then build and run it". The CLI made it (`"template": "fps"` in its `thistle.json`) and it opened with its level. The build ran with its percentage on the strip, and the game started ("Targets 0 / 8"). Stop closed it, and nothing was left running.
+  - **Name checks** live as you type: an invalid name, and one whose folder exists. Esc stops typing first and closes the form second.
+  - **Open folder with zenity**: the dialog came up and its folder went through the Thistle-project check. Also the other way in, with neither zenity nor kdialog installed: Open folder is the built-in browser.
+  - **Make it a Thistle project** on a plain folder: `thistle init` added its files and left the folder's own `assets/` file alone, then it opened.
+  - **Open anyway** on a dropped folder (a real X11 drag and drop): it opened, and nothing was added to the folder.
+  - **A folder inside a project** (its `assets/`, pasted as a path): it offered the project, which reopened with the scene it last had open.
+  - **The built-in browser**: going into folders, a project marked as one, with its own Open button.
+  - **The recent list**: survived a restart, and one whose folder was deleted said so and was forgotten with its x.
+  - **Starting with a project folder** (as `thistle editor run` does): straight in, skipping the list.
+  - **A failed build**: a syntax error put "The build failed" and the compiler's error line on the strip, and Log showed the whole output.
+- Bugs this testing found, all fixed:
+  - Coming back to Projects after New project opened a project showed the "Creating..." dialog again.
+  - Long paths in command output ran off the dialog.
 
-`scene3d_smoketest` (ctest) covers the file format and the transform math the editor relies on.
+`scene3d_smoketest` (ctest) covers the file format and the transform math the editor relies on. `cli_smoketest` (ctest) covers `thistle new --template --with` and `thistle init`, which the projects screen runs.
 
-Windows: the owner ran it on Windows 11 with an NVIDIA RTX 4070 Super (D3D11) (`thistle editor run` on a template project) and reported it working. Not verified: macOS (CI compiles it there). Drag and drop is tested only on X11. On macOS and Windows it goes through sokol's own drop support, which Thistle hadn't turned on before. On a Retina/HiDPI screen, mouse coordinates vs. drawing coordinates are the thing most likely to be off, and that hasn't been seen. The window is 1440×860 by default. The panels are fixed widths, so it's cramped much below about 1100 px wide.
+Windows: the owner ran it on Windows 11 with an NVIDIA RTX 4070 Super (D3D11) (`thistle editor run` on a template project) and reported it working. That was before the projects screen existed: its Windows parts are still untested on a real machine. They compile with MSVC in CI and with MinGW here: the Explorer folder dialog, and running the CLI as a child process (`CreateProcess` in a job object, so Stop ends the build or the game and everything they started). Not verified: macOS (CI compiles it there), including Finder's folder dialog. Drag and drop is tested only on X11. On macOS and Windows it goes through sokol's own drop support, which Thistle hadn't turned on before. On a Retina/HiDPI screen, mouse coordinates vs. drawing coordinates are the thing most likely to be off, and that hasn't been seen. The window is 1440×860 by default. The panels are fixed widths, so it's cramped much below about 1100 px wide.
 
 ## Building it by hand
 
