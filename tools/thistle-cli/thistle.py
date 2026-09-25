@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -78,8 +79,21 @@ def render(template_name: str, **subs: str) -> str:
     return text
 
 
+# `thistle new --template <kind>`: a starter game. "blank" is the 2D one in
+# templates/ itself; the others each have a folder under templates/ with a
+# main.cpp.in, an about.md for the README, and an assets/ folder (levels
+# made with the Thistle Editor) that's copied as is.
+TEMPLATE_KINDS = {
+    "blank": "a window and two shapes: the smallest 2D start",
+    "fps": "first person: walk an editor-made level, shoot the targets, reach the exit",
+    "third-person": "a character behind an orbiting camera: collect coins, reach the flag",
+    "voxel": "an endless Minecraft-style block world: break, place, build, saved between runs",
+}
+
+
 def cmd_new(args) -> None:
     name = args.name
+    kind = args.template
     if not VALID_NAME.match(name):
         die(f"'{name}' isn't a valid project name — use letters, numbers, - and _, starting with a letter")
 
@@ -94,13 +108,24 @@ def cmd_new(args) -> None:
     (dest / "assets").mkdir()
 
     (dest / "CMakeLists.txt").write_text(render("CMakeLists.txt.in", name=name, engine_dir=rel_engine))
-    (dest / "src" / "main.cpp").write_text(render("main.cpp.in", name=name))
+    main_template = "main.cpp.in" if kind == "blank" else f"{kind}/main.cpp.in"
+    (dest / "src" / "main.cpp").write_text(render(main_template, name=name))
     (dest / "src" / "version.hpp.in").write_text((TEMPLATES / "version.hpp.in").read_text())
-    (dest / "README.md").write_text(render("README.md.in", name=name))
+    about = "" if kind == "blank" else render(f"{kind}/about.md", name=name)
+    (dest / "README.md").write_text(render("README.md.in", name=name, about=about))
+    if kind != "blank":
+        shutil.copytree(TEMPLATES / kind / "assets", dest / "assets", dirs_exist_ok=True)
+        # The 3D templates draw a HUD, and text needs a font: the same one
+        # the Thistle Editor uses (Inter, OFL), with its license.
+        fonts = dest / "assets" / "fonts"
+        fonts.mkdir(parents=True, exist_ok=True)
+        editor_assets = ENGINE_ROOT / "tools" / "thistle-editor" / "editor_assets"
+        for f in ("inter-regular.ttf", "inter-OFL-LICENSE.txt"):
+            shutil.copy2(editor_assets / f, fonts / f)
     (dest / ".gitignore").write_text("build/\n.DS_Store\n")
     write_project(dest, {"name": name, "version": "1.0.0"})
 
-    print(f"created {dest}")
+    print(f"created {dest}" + ("" if kind == "blank" else f" ({kind} template)"))
     print("next:")
     print(f"  cd {dest}")
     print("  thistle run")
@@ -322,6 +347,8 @@ def main() -> None:
     p_new = sub.add_parser("new", help="create a new project")
     p_new.add_argument("name")
     p_new.add_argument("--at", help="where to create it (default: next to the engine)")
+    p_new.add_argument("--template", "-t", choices=list(TEMPLATE_KINDS), default="blank",
+                       help="what to start from: " + "; ".join(f"{k}: {v}" for k, v in TEMPLATE_KINDS.items()))
     p_new.set_defaults(func=cmd_new)
 
     p_build = sub.add_parser("build", help="configure + build the project in the current directory")

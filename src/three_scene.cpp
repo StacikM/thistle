@@ -374,6 +374,49 @@ void Scene3D::place_voxels() {
     }
 }
 
+std::vector<int> Scene3D::add_colliders(CollisionWorld& world) const {
+    // The same unit shapes World::box() and friends draw, as models the
+    // collision world can read triangles from. Made once, shared.
+    static Model shapes[5];
+    static bool made = false;
+    if (!made) {
+        shapes[0] = make_model(box_mesh());
+        shapes[1] = make_model(sphere_mesh());
+        shapes[2] = make_model(cylinder_mesh());
+        shapes[3] = make_model(cone_mesh());
+        shapes[4] = make_model(plane_mesh());
+        made = true;
+    }
+    std::vector<int> ids;
+    for (size_t i = 0; i < entities.size(); ++i) {
+        const SceneEntity& e = entities[i];
+        if (e.property("solid") == "false") continue;
+        const Transform t = world_transform(static_cast<int>(i));
+        switch (e.kind) {
+            case SceneEntity::Kind::Box: ids.push_back(world.add(shapes[0], t)); break;
+            case SceneEntity::Kind::Sphere: ids.push_back(world.add(shapes[1], t)); break;
+            case SceneEntity::Kind::Cylinder: ids.push_back(world.add(shapes[2], t)); break;
+            case SceneEntity::Kind::Cone: ids.push_back(world.add(shapes[3], t)); break;
+            case SceneEntity::Kind::Plane: ids.push_back(world.add(shapes[4], t)); break;
+            case SceneEntity::Kind::Model:
+                if (Model m = model(static_cast<int>(i)); m.valid()) ids.push_back(world.add(m, t));
+                break;
+            case SceneEntity::Kind::Voxels:
+                if (e.voxels) {
+                    if (std::fabs(std::fabs(t.rotation.w) - 1.0f) > 1e-4f) {
+                        log_warn("Scene3D::add_colliders: '" + e.name + "' is turned, but its blocks collide as if it weren't");
+                    }
+                    e.voxels->origin = t.position; // (place_voxels() isn't const)
+                    e.voxels->rotation = t.rotation;
+                    ids.push_back(world.add(*e.voxels));
+                }
+                break;
+            default: break;
+        }
+    }
+    return ids;
+}
+
 void Scene3D::draw(World& world, bool environment) const {
     if (environment) {
         const Skybox keep = world.sky.skybox; // not part of the file: leave whatever the game set

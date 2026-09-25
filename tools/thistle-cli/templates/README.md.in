@@ -1,7 +1,7 @@
 # {{name}}
 
 Made with [Thistle](https://github.com/StacikM/thistle).
-
+{{about}}
 ## Build & run
 
 ```bash

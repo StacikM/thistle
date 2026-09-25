@@ -11,7 +11,7 @@
 using namespace thistle;
 
 int main() {
-    App app{{.title = "{{name}} v" + std::string(GAME_VERSION), .width = 1280, .height = 720}};
+    App app{{.title = "{{name}} v" + std::string(GAME_VERSION), .width = 1280, .height = 720, .save_name = "{{name}}"}};
 
     app.update([&](Frame f) {
         f.clear(rgb(0.08f, 0.09f, 0.14f));

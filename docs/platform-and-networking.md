@@ -21,7 +21,9 @@ A flat key/value store, one file, written to the correct writable directory per 
 | Windows | `%APPDATA%\Thistle\<sanitized app title>` |
 | Linux/other | `$XDG_DATA_HOME/thistle/<sanitized app title>`, or `~/.local/share/thistle/...` |
 
-The folder name comes from your `AppConfig::title` — set it before you rely on save data existing, and don't change it later expecting old saves to carry over, because they won't; a title change is a folder change is a fresh save file. This has nothing to do with your bundle ID or product name anywhere else, it's specifically the string you passed to `App{{.title = "..."}}`.
+The folder name comes from `AppConfig::save_name`, or from `AppConfig::title` when that's empty. Don't change it later expecting old saves to carry over, because they won't: a name change is a folder change is a fresh save file. This has nothing to do with your bundle ID or product name anywhere else.
+
+If the title changes between versions (`"My Game v1.2"`), set `save_name`, or every update starts players from nothing. The `thistle new` templates put the version in the title and set `save_name` to the project name for exactly that reason. Projects made before `save_name` existed keep their saves in a folder named after the full title, version included. Changing the title changed the folder, and that was true of every version bump.
 
 That's the entire feature set: flat keys, four value types (string/int/float, plus existence/removal). No nested structures, no schema, no migration system. If your save data is complex enough to need structure, serialize your own JSON with nlohmann (already vendored, `third_party/nlohmann/json.hpp`) into a single string value and store *that* under one key — don't try to bolt a document database onto four functions that were never meant to be one. This is exactly what community-level upload in Fling does for level geometry; it does not use `save::` for that at all, and neither should you for anything beyond simple flags/scores/settings.
 

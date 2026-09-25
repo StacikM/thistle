@@ -40,7 +40,22 @@ was_in_exit = in_exit;
 ```
 
 - **Block objects** (`Kind::Voxels`): `e.voxels` is a `std::shared_ptr<VoxelWorld>` with the blocks. It's a real world: `raycast()` it, edit it with `set()`, sync it with `VoxelSync`. Its grid's corner (block 0,0,0) is at the entity's position and it turns with the entity's rotation, through its parents; scale doesn't apply (the size is `voxel_size`). Copies of a `SceneEntity` or a `Scene3D` share these worlds; `e.voxels->copy()` makes a separate one.
-- **Physics**: a level doesn't make physics bodies by itself, because only your game knows what should be solid, what should fall and what's decoration. With `Physics3D` (see [physics3d.md](physics3d.md)), the usual start is to make the shapes solid:
+- **Walking on it**: `level.add_colliders(solid)` fills a `CollisionWorld` for the built-in `CharacterController` (no physics library needed).
+
+```cpp
+CollisionWorld solid;
+level.add_colliders(solid);
+// every frame:
+player.update(solid, look.move_input(f), f.key_pressed(Key::Space), f.dt);
+```
+
+  What becomes solid:
+  - Shapes and models, by their triangles, turned and scaled as placed. Planes are one-sided floors.
+  - Block objects, as their live voxel worlds. Breaking a block opens the gap at once. They collide as if unturned: the built-in collision treats grids as axis-aligned, and a turned one logs a warning.
+  - Not lights, triggers, spawn points or empties, and not anything with the property `solid` = `false` (decoration, pickups, a sea you should fall into).
+
+  It returns the collision ids it added. The level's voxel worlds must outlive the `CollisionWorld`. The `fps`, `third-person` and `voxel` templates (`thistle new --template ...`) are complete games built this way.
+- **Physics**: a level doesn't make rigid bodies by itself, because only your game knows what should fall and what's decoration. With `Physics3D` (see [physics3d.md](physics3d.md)), the usual start is to make the shapes solid:
 
 ```cpp
 for (int i = 0; i < (int)level.entities.size(); ++i) {
@@ -125,6 +140,11 @@ JSON, written with sorted keys and two-space indents so it diffs well in git:
     - damaged block data loads as an empty object
     - `VoxelWorld::copy()` is separate from the original
     - `set_block_type()` changes a type (and ignores air and unknown ids)
+  - `add_colliders()`: a floor, a wall turned 45° (a ray stops exactly at its turned face), a decoration with `solid` = `false` that doesn't block, a light that isn't added, and a block object a character dropped over lands on
+- The three 3D templates were played under Xvfb:
+  - **fps:** shooting a target, the exit refusing while one is left, then finishing.
+  - **third-person:** coins collected, the jump pad's throw landing on its marker, the goal, falling into the sea.
+  - **voxel:** a new world with the house stamped in, then an edit surviving a quit and relaunch.
   - `draw()` applying the environment
   - `to_euler()`, which the editor uses to show rotations as angles
 - The editor was used to make, save and reopen scenes under Xvfb. The saved files were checked value by value (see the editor's README for exactly what was clicked).

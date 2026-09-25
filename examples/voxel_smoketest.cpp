@@ -2,11 +2,13 @@
 // chunk boundaries and negative coordinates, hidden-face removal (including
 // between chunks, and glass-against-glass), greedy merging of flat faces
 // (and not of textured ones), ambient-occlusion darkening in corners, and
-// that every emitted triangle faces outward. No GPU: mesh_chunk() returns
+// that every emitted triangle faces outward; saving only the chunks a
+// player changed in a generated world. No GPU: mesh_chunk() returns
 // plain ModelData, the same thing the renderer uploads. Constructs an App
 // (never run) only because the textured-block check needs make_texture().
 #include <thistle.hpp>
 #include <cmath>
+#include <memory>
 #include <cstdio>
 #include <vector>
 #include <string>
@@ -232,6 +234,35 @@ int main() {
         check(r.to_block(c) == ivec3{2, 0, 0}, "to_block undoes it");
         const auto h = r.raycast(Ray{{10.5f, 0.5f, 5.0f}, {0, 0, -1}});
         check(h.hit && h.block == ivec3{2, 0, 0} && std::fabs(h.distance - 7.0f) < 1e-3f, "raycast walks the rotated grid");
+    }
+
+    // --- saving only what the player changed in an endless world ---
+    {
+        auto make = [] {
+            auto g = std::make_unique<VoxelWorld>();
+            g->add_block({.name = "ground"});
+            g->add_block({.name = "brick"});
+            g->set_generator([](VoxelWorld& w, ivec3 c) {
+                if (c.y != 0) return;
+                for (int z = 0; z < 32; ++z)
+                    for (int x = 0; x < 32; ++x)
+                        for (int y = 0; y < 4; ++y) w.set(c.x * 32 + x, y, c.z * 32 + z, 1);
+            });
+            return g;
+        };
+        auto a = make();
+        a->stream_around({0, 2, 0}, 70.0f, 1000);
+        const int generated = a->chunk_count();
+        a->set(5, 4, 5, 2);                              // a brick placed in chunk (0,0,0)
+        a->fill({32, 0, 0}, {63, 31, 31}, 0);           // chunk (1,0,0) dug out completely
+        const std::vector<uint8_t> all = a->serialize(), changed = a->serialize(true);
+        check(generated > 4 && changed.size() < all.size(), "serialize(true) is smaller: " + std::to_string(changed.size()) + " vs " +
+                                                                  std::to_string(all.size()) + " bytes for " + std::to_string(generated) + " generated chunks");
+        auto b = make();
+        check(b->deserialize(changed.data(), changed.size()) && b->chunk_count() == 2, "it holds just the two changed chunks, the emptied one included");
+        b->stream_around({0, 2, 0}, 70.0f, 1000);
+        check(b->get(5, 4, 5) == 2 && b->get(5, 3, 5) == 1, "after loading, the edit is there and the rest was generated again");
+        check(b->get(40, 1, 10) == 0 && b->get(10, 1, 40) == 1, "and the dug-out chunk stays empty instead of being regrown");
     }
 
     if (g_failures) { std::printf("%d check(s) failed\n", g_failures); return 1; }

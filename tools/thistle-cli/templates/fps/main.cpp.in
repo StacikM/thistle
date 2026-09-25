@@ -1,0 +1,197 @@
+// {{name}} — a first-person starter made with Thistle.
+//
+// Walk a level made in the Thistle Editor (assets/scenes/level.scene.json),
+// shoot every target, then reach the exit. Open the level in the editor
+// (`thistle editor run` in this folder) to change it: anything with the
+// property target = true is a target, the trigger named "exit" is the way
+// out, and "player_start" is where you begin.
+//
+// Click to capture the mouse (Esc lets go). WASD to move, Shift to sprint,
+// Space to jump, left click to shoot, R to start over.
+#include <thistle.hpp>
+#include <version.hpp>
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <string>
+#include <vector>
+using namespace thistle;
+using namespace thistle::three;
+
+namespace {
+
+// Where a ray first enters an entity's box (turned and scaled as placed),
+// or a miss. Good enough for targets of any shape.
+RaycastHit hit_entity(const Scene3D& level, int i, const Ray& ray) {
+    const mat4 m = level.world_transform(i).matrix();
+    const mat4 inv = inverse(m);
+    const vec3 o = inv.transform_point(ray.origin);
+    const vec3 d = inv.transform_direction(ray.direction);
+    const float len = length(d);
+    RaycastHit h = raycast(Ray{o, d / len}, level.local_bounds(i));
+    if (h) {
+        h.point = m.transform_point(h.point);
+        h.distance = length(h.point - ray.origin);
+    }
+    return h;
+}
+
+} // namespace
+
+int main() {
+    App app{{.title = "{{name}} v" + std::string(GAME_VERSION), .width = 1280, .height = 720, .save_name = "{{name}}"}};
+    load_font("assets/fonts/inter-regular.ttf");
+
+    Scene3D level;
+    CollisionWorld solid;
+    std::vector<int> targets; // entities with target = true
+    int exit = -1;
+    CharacterController player;
+    MouseLook look;
+    int hits = 0;
+    double started = 0.0, finished = -1.0;
+
+    // (Re)load the level and put everything back where it started.
+    auto start = [&](double now) {
+        if (!level.load("assets/scenes/level.scene.json")) log_warn("couldn't load assets/scenes/level.scene.json");
+        solid = CollisionWorld{};
+        level.add_colliders(solid);
+        targets.clear();
+        for (int i = 0; i < static_cast<int>(level.entities.size()); ++i) {
+            if (level.entities[i].property("target") == "true") targets.push_back(i);
+        }
+        exit = level.find("exit");
+        const int spawn = level.find("player_start");
+        const Transform at = spawn >= 0 ? level.world_transform(spawn) : Transform{};
+        player = CharacterController{};
+        player.position = at.position;
+        look.yaw = to_euler(at.rotation).y; // face the way the spawn point faces
+        look.pitch = 0.0f;
+        hits = 0;
+        started = now;
+        finished = -1.0;
+    };
+    start(0.0);
+
+    World world;
+    Camera camera;
+    camera.fov = radians(75.0f);
+    ParticleSystem sparks;
+    sparks.settings.start_color = rgb(1.0f, 0.85f, 0.4f);
+    sparks.settings.end_color = rgba{1.0f, 0.3f, 0.1f, 0.0f};
+    sparks.settings.start_size = 0.08f;
+    sparks.settings.end_size = 0.02f;
+    sparks.settings.lifetime = 0.35f;
+    sparks.settings.spread = 3.0f;
+    sparks.settings.additive = true;
+    ParticleSettings burst = sparks.settings; // a target breaking
+    burst.start_color = rgb(1.0f, 0.3f, 0.2f);
+    burst.start_size = 0.18f;
+    burst.lifetime = 0.8f;
+    burst.spread = 5.0f;
+    burst.gravity = {0, -9, 0};
+    burst.additive = false;
+    float cooldown = 0.0f, recoil = 0.0f, flash = 0.0f;
+    std::string message;
+    float message_time = 0.0f;
+
+    app.update([&](Frame f) {
+        if (f.key_pressed(Key::R)) start(f.time);
+        const bool playing = finished < 0.0;
+
+        // --- move and look
+        look.update(camera, f);
+        player.move_speed = f.key_down(Key::LeftShift) ? 8.5f : 5.0f;
+        player.update(solid, playing ? look.move_input(f) : vec3{}, playing && f.key_pressed(Key::Space), f.dt);
+        if (player.position.y < -20.0f) start(f.time); // fell out of the level
+        camera.position = player.eye();
+
+        // --- shoot
+        cooldown -= f.dt;
+        recoil = std::max(0.0f, recoil - f.dt * 6.0f);
+        flash -= f.dt;
+        if (mouse_locked() && playing && f.mouse_pressed(Mouse::Left) && cooldown <= 0.0f) {
+            cooldown = 0.18f;
+            recoil = 1.0f;
+            flash = 0.05f;
+            const Ray ray{camera.position, camera.forward()};
+            const RaycastHit wall = solid.raycast(ray, 200.0f);
+            int best = -1;
+            RaycastHit best_hit;
+            for (int t : targets) {
+                if (level.entities[t].kind == SceneEntity::Kind::Empty) continue; // already down
+                const RaycastHit h = hit_entity(level, t, ray);
+                if (h && (!wall || h.distance < wall.distance) && (best < 0 || h.distance < best_hit.distance)) {
+                    best = t;
+                    best_hit = h;
+                }
+            }
+            if (best >= 0) {
+                sparks.emit(best_hit.point, 40, burst);
+                level.entities[best].kind = SceneEntity::Kind::Empty; // an Empty draws nothing
+                ++hits;
+                message = hits == static_cast<int>(targets.size()) ? "All targets down! Find the exit." : "Hit!";
+                message_time = 1.2f;
+            } else if (wall) {
+                sparks.emit(wall.point + wall.normal * 0.02f, 12);
+            }
+        }
+
+        // --- the exit
+        if (playing && exit >= 0 && level.inside(exit, player.position + vec3{0, 0.9f, 0})) {
+            const int left = static_cast<int>(targets.size()) - hits;
+            if (left == 0) {
+                finished = f.time;
+            } else {
+                message = std::to_string(left) + (left == 1 ? " target left" : " targets left");
+                message_time = 0.2f;
+            }
+        }
+        message_time -= f.dt;
+
+        // --- draw the 3D
+        sparks.update(f.dt);
+        level.draw(world);
+        world.draw(sparks);
+        // The gun: a few boxes held in front of the camera, kicked back when it fires.
+        auto held = [&](vec3 offset, vec3 size, rgba color) {
+            const vec3 o = offset + vec3{0, 0.01f * recoil, 0.06f * recoil};
+            world.box(Transform{camera.position + camera.rotation * o, camera.rotation, size}, color);
+        };
+        held({0.16f, -0.15f, -0.55f}, {0.05f, 0.06f, 0.24f}, rgb(0.2f, 0.21f, 0.24f));  // body
+        held({0.16f, -0.13f, -0.72f}, {0.025f, 0.025f, 0.14f}, rgb(0.12f, 0.12f, 0.14f)); // barrel
+        held({0.16f, -0.2f, -0.49f}, {0.04f, 0.09f, 0.045f}, rgb(0.35f, 0.25f, 0.18f)); // grip
+        if (flash > 0.0f) world.light(PointLight{camera.position + camera.rotation * vec3{0.16f, -0.12f, -0.85f}, rgb(1.0f, 0.8f, 0.5f), 6.0f, 3.0f});
+        world.render(f, camera);
+
+        // --- the HUD
+        const float cx = f.width * 0.5f, cy = f.height * 0.5f;
+        f.rect({cx - 1, cy - 8}, {2, 6}, white);
+        f.rect({cx - 1, cy + 2}, {2, 6}, white);
+        f.rect({cx - 8, cy - 1}, {6, 2}, white);
+        f.rect({cx + 2, cy - 1}, {6, 2}, white);
+        char buf[96];
+        const double t = (finished >= 0.0 ? finished : f.time) - started;
+        std::snprintf(buf, sizeof buf, "Targets %d / %d     %.1f s", hits, static_cast<int>(targets.size()), t);
+        f.text(buf, {24, 20}, {.size = 22, .color = white});
+        if (message_time > 0.0f && playing) {
+            const vec2 sz = f.measure_text(message, {.size = 26});
+            f.text(message, {cx - sz.x * 0.5f, cy + 60}, {.size = 26, .color = rgb(1.0f, 0.9f, 0.5f)});
+        }
+        if (!playing) {
+            f.rect({0, 0}, {static_cast<float>(f.width), static_cast<float>(f.height)}, rgba{0, 0, 0, 0.45f});
+            std::snprintf(buf, sizeof buf, "Level complete in %.1f s", t);
+            const vec2 sz = f.measure_text(buf, {.size = 44});
+            f.text(buf, {cx - sz.x * 0.5f, cy - 40}, {.size = 44, .color = white});
+            const char* again = "Press R to play again";
+            const vec2 sz2 = f.measure_text(again, {.size = 22});
+            f.text(again, {cx - sz2.x * 0.5f, cy + 20}, {.size = 22, .color = rgba{1, 1, 1, 0.8f}});
+        } else if (!mouse_locked()) {
+            const char* hint = "Click to play  -  WASD move, Shift sprint, Space jump, click shoot, R restart, Esc frees the mouse";
+            const vec2 sz = f.measure_text(hint, {.size = 18});
+            f.rect({cx - sz.x * 0.5f - 12, f.height - 64.0f}, {sz.x + 24, 34}, rgba{0, 0, 0, 0.5f});
+            f.text(hint, {cx - sz.x * 0.5f, f.height - 57.0f}, {.size = 18, .color = white});
+        }
+    });
+    return app.run();
+}

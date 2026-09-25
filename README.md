@@ -23,6 +23,7 @@ Almost every line here (~99%) was written by Claude (Anthropic's AI), directed a
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StacikM/thistle/main/install.sh | bash
 thistle new mygame && cd mygame && thistle run
+thistle new myshooter --template fps     # or third-person, or voxel: a 3D game to start from
 ```
 
 On Windows, download [`install.bat`](install.bat) and run it locally (same defaults, no one-liner published yet).

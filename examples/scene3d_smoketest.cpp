@@ -249,6 +249,50 @@ int main() {
         check(r.entities.size() == 3 && r.find("a") == 0 && r.find("b") == 1 && r.find("d") == 2,
               "remove(several): a parent after its child and another after both, all gone and only them");
     }
+    std::printf("colliders\n");
+    {
+        // A floor, a turned box on it, a decoration that mustn't block, a
+        // light, and a block object off to the side.
+        Scene3D c;
+        SceneEntity floor;
+        floor.kind = SceneEntity::Kind::Plane;
+        floor.transform.scale = {20, 1, 20};
+        c.add(floor);
+        SceneEntity wall;
+        wall.kind = SceneEntity::Kind::Box;
+        wall.transform = Transform{{0, 1, -3}, quat::euler(0, radians(45.0f)), {4, 2, 0.5f}};
+        c.add(wall);
+        SceneEntity deco = wall;
+        deco.transform.position = {0, 1, 3};
+        deco.set_property("solid", "false");
+        c.add(deco);
+        SceneEntity lamp;
+        lamp.kind = SceneEntity::Kind::PointLight;
+        c.add(lamp);
+        SceneEntity steps;
+        steps.kind = SceneEntity::Kind::Voxels;
+        steps.transform.position = {6, 0, 0};
+        steps.voxels = std::make_shared<VoxelWorld>();
+        steps.voxels->add_block({.name = "stone"});
+        steps.voxels->fill({0, 0, 0}, {3, 1, 3}, 1); // 4 x 2 x 4 m of blocks at x 6..10
+        c.add(steps);
+
+        CollisionWorld cw;
+        const std::vector<int> ids = c.add_colliders(cw);
+        check(ids.size() == 3, "add_colliders(): the floor, the wall and the blocks; not the decoration or the light");
+        const RaycastHit down = cw.raycast(Ray{{1, 5, 1}, {0, -1, 0}});
+        check(down && near(down.point.y, 0.0f, 1e-3f), "the floor is there");
+        const RaycastHit into_wall = cw.raycast(Ray{{0, 1, 0}, {0, 0, -1}});
+        // The wall's front face, turned 45 degrees, crosses x = 0 at z = -3 + 0.25 * sqrt(2).
+        check(into_wall && near(into_wall.point.z, -3.0f + 0.25f * std::sqrt(2.0f), 1e-3f), "the turned wall blocks where its turned face is");
+        check(!cw.raycast(Ray{{0, 1, 0}, {0, 0, 1}}, 10.0f), "the decoration (solid = false) doesn't block");
+        const RaycastHit on_blocks = cw.raycast(Ray{{8, 5, 2}, {0, -1, 0}});
+        check(on_blocks && near(on_blocks.point.y, 2.0f, 1e-3f), "the block object is there, where its entity is");
+        CharacterController who;
+        who.position = {8, 3, 2};
+        for (int k = 0; k < 120; ++k) who.update(cw, {}, false, 1.0f / 60.0f);
+        check(who.on_ground() && near(who.position.y, 2.0f, 1e-2f), "a character dropped over the blocks lands on top of them");
+    }
     s.remove(g); // the group and the crate under it
     check(s.entities.size() == 3 && s.find("crate") == -1 && s.find("lamp") == 0 && s.find("player_start") == 1,
           "remove() takes the children too and renumbers what's left");

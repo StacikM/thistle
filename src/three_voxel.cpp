@@ -645,7 +645,10 @@ struct Reader {
 
 } // namespace
 
-std::vector<uint8_t> VoxelWorld::serialize() const {
+std::vector<uint8_t> VoxelWorld::serialize(bool changed_only) const {
+    // Changed chunks are kept even when emptied (dug out completely):
+    // otherwise the generator would grow them back after loading.
+    auto keep = [&](const Chunk& chunk) { return changed_only ? chunk.modified : chunk.non_air > 0; };
     Writer w;
     w.u32(kVoxelMagic);
     w.u32(kVoxelVersion);
@@ -663,10 +666,10 @@ std::vector<uint8_t> VoxelWorld::serialize() const {
         w.u8(t.solid ? 1 : 0);
     }
     uint32_t chunks = 0;
-    for (const auto& [key, chunk] : impl_->chunks) chunks += chunk.non_air > 0;
+    for (const auto& [key, chunk] : impl_->chunks) chunks += keep(chunk);
     w.u32(chunks);
     for (const auto& [key, chunk] : impl_->chunks) {
-        if (chunk.non_air == 0) continue;
+        if (!keep(chunk)) continue;
         const ivec3 c = key_chunk(key);
         w.i32(c.x); w.i32(c.y); w.i32(c.z);
         // Runs of equal ids: a mostly-solid or mostly-empty chunk (which is
@@ -787,8 +790,8 @@ std::vector<ivec3> VoxelWorld::chunks() const {
     return out;
 }
 
-bool VoxelWorld::save(const std::string& path) const {
-    const std::vector<uint8_t> bytes = serialize();
+bool VoxelWorld::save(const std::string& path, bool changed_only) const {
+    const std::vector<uint8_t> bytes = serialize(changed_only);
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) {
         log_warn("VoxelWorld::save: can't write " + path);

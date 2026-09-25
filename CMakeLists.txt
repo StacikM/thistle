@@ -424,6 +424,29 @@ if(THISTLE_BUILD_SMOKETEST)
         endif()
     endif()
 
+    # The `thistle new` templates, compiled the way a new project compiles
+    # them ({{name}} filled in, a stand-in version.hpp), so an engine change
+    # can't break a template unnoticed. Like the demos, built but not run.
+    set(_thistle_tpl_dir "${CMAKE_CURRENT_SOURCE_DIR}/tools/thistle-cli/templates")
+    set(_thistle_tpl_gen "${CMAKE_CURRENT_BINARY_DIR}/template_gen")
+    set(THISTLE_PROJECT_VERSION "0.0.0")
+    configure_file("${_thistle_tpl_dir}/version.hpp.in" "${_thistle_tpl_gen}/version.hpp" @ONLY)
+    foreach(_kind blank fps third-person voxel)
+        if(_kind STREQUAL "blank")
+            set(_src "${_thistle_tpl_dir}/main.cpp.in")
+        else()
+            set(_src "${_thistle_tpl_dir}/${_kind}/main.cpp.in")
+        endif()
+        string(REPLACE "-" "_" _id "${_kind}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_src}")
+        file(READ "${_src}" _text)
+        string(REPLACE "{{name}}" "template_${_id}" _text "${_text}")
+        file(CONFIGURE OUTPUT "${_thistle_tpl_gen}/${_id}.cpp" CONTENT "${_text}" @ONLY)
+        add_executable(thistle_template_${_id} "${_thistle_tpl_gen}/${_id}.cpp")
+        target_include_directories(thistle_template_${_id} PRIVATE "${_thistle_tpl_gen}")
+        target_link_libraries(thistle_template_${_id} PRIVATE thistle)
+    endforeach()
+
     # A plain console program (no window, no App/Frame) that spins up a real
     # NetServer + NetClient over localhost and checks the results — proof the
     # networking layer actually works, not just compiles. No WIN32_EXECUTABLE
