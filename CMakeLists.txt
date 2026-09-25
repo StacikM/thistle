@@ -32,7 +32,11 @@ function(thistle_bundle_assets TARGET ASSETS_DIR)
         # MACOSX_PACKAGE_LOCATION only takes effect on a bundle target
         # (add_executable(... MACOSX_BUNDLE ...) on macOS, or any iOS app
         # target) — a plain non-bundle executable ignores it harmlessly.
-        file(GLOB_RECURSE _thistle_asset_files "${ASSETS_DIR}/*")
+        # CONFIGURE_DEPENDS: a file added later (a level saved under a new
+        # name, a model the editor imported) makes the next build re-run
+        # this, instead of the bundle silently missing it until someone
+        # reconfigures by hand.
+        file(GLOB_RECURSE _thistle_asset_files CONFIGURE_DEPENDS "${ASSETS_DIR}/*")
         foreach(_thistle_asset_file ${_thistle_asset_files})
             file(RELATIVE_PATH _thistle_asset_rel "${ASSETS_DIR}" "${_thistle_asset_file}")
             get_filename_component(_thistle_asset_reldir "${_thistle_asset_rel}" DIRECTORY)
@@ -41,12 +45,22 @@ function(thistle_bundle_assets TARGET ASSETS_DIR)
         endforeach()
         target_sources(${TARGET} PRIVATE ${_thistle_asset_files})
     else()
-        # Windows/Linux: a plain post-build copy next to the executable.
-        add_custom_command(TARGET ${TARGET} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
+        # Windows/Linux: copied next to the executable on every build. (A
+        # POST_BUILD step only runs when the program is relinked, so a level
+        # saved in the editor or a changed texture never reached a game
+        # whose code hadn't changed.) Only changed files are copied, on
+        # CMake 3.26+.
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.26)
+            set(_thistle_copy copy_directory_if_different)
+        else()
+            set(_thistle_copy copy_directory)
+        endif()
+        add_custom_target(${TARGET}_thistle_assets
+            COMMAND ${CMAKE_COMMAND} -E ${_thistle_copy}
                     "${ASSETS_DIR}" "$<TARGET_FILE_DIR:${TARGET}>/assets"
             COMMENT "thistle_bundle_assets: copying assets next to ${TARGET}"
         )
+        add_dependencies(${TARGET} ${TARGET}_thistle_assets)
     endif()
 endfunction()
 
@@ -442,9 +456,21 @@ if(THISTLE_BUILD_SMOKETEST)
         file(READ "${_src}" _text)
         string(REPLACE "{{name}}" "template_${_id}" _text "${_text}")
         file(CONFIGURE OUTPUT "${_thistle_tpl_gen}/${_id}.cpp" CONTENT "${_text}" @ONLY)
-        add_executable(thistle_template_${_id} "${_thistle_tpl_gen}/${_id}.cpp")
+        # An app bundle on Apple, like the project `thistle new` makes, so
+        # CI builds thistle_bundle_assets() both ways.
+        if(APPLE)
+            add_executable(thistle_template_${_id} MACOSX_BUNDLE "${_thistle_tpl_gen}/${_id}.cpp")
+        else()
+            add_executable(thistle_template_${_id} "${_thistle_tpl_gen}/${_id}.cpp")
+        endif()
         target_include_directories(thistle_template_${_id} PRIVATE "${_thistle_tpl_gen}")
         target_link_libraries(thistle_template_${_id} PRIVATE thistle)
+        # Each in its own folder: their assets/ would overwrite each other's
+        # (fps and third-person both have assets/scenes/level.scene.json).
+        set_target_properties(thistle_template_${_id} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/templates/${_id}")
+        if(EXISTS "${_thistle_tpl_dir}/${_kind}/assets")
+            thistle_bundle_assets(thistle_template_${_id} "${_thistle_tpl_dir}/${_kind}/assets")
+        endif()
     endforeach()
 
     # A plain console program (no window, no App/Frame) that spins up a real
