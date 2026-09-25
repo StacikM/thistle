@@ -179,4 +179,5 @@ MagicaVoxel is Z-up, so models are turned to stand upright here, not mirrored. E
   - `endless_demo`: flown forward, going from 62 to 90 chunks as new land streamed in.
   - Four of MagicaVoxel's own sample files, upright and not mirrored.
   - The voxel template: a new world with the house, then a placed block surviving a real quit and relaunch.
-- **Not yet seen on Metal or D3D11** (macOS, iOS, Windows), or on any real GPU. See [3d.md](3d.md#whats-been-verified).
+- **Run on a real GPU (Windows 11 with an NVIDIA RTX 4070 Super (D3D11)), by the owner:** the voxel, endless, multiplayer and destruction demos and the voxel template, reported working after the sinking fix above.
+- **Not yet seen on Metal** (macOS, iOS). See [3d.md](3d.md#whats-been-verified).

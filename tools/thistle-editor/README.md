@@ -186,7 +186,7 @@ Run under Xvfb + llvmpipe (software OpenGL) on Linux and driven with `xdotool`, 
 
 `scene3d_smoketest` (ctest) covers the file format and the transform math the editor relies on.
 
-Not verified: any real GPU or display. macOS and Windows haven't been run at all (CI compiles the editor on both, and it cross-compiles with MinGW here). Drag and drop is tested only on X11. On macOS and Windows it goes through sokol's own drop support, which Thistle hadn't turned on before. On a Retina/HiDPI screen, mouse coordinates vs. drawing coordinates are the thing most likely to be off, and that hasn't been seen. The window is 1440×860 by default. The panels are fixed widths, so it's cramped much below about 1100 px wide.
+Windows: the owner ran it on Windows 11 with an NVIDIA RTX 4070 Super (D3D11) (`thistle editor run` on a template project) and reported it working. Not verified: macOS (CI compiles it there). Drag and drop is tested only on X11. On macOS and Windows it goes through sokol's own drop support, which Thistle hadn't turned on before. On a Retina/HiDPI screen, mouse coordinates vs. drawing coordinates are the thing most likely to be off, and that hasn't been seen. The window is 1440×860 by default. The panels are fixed widths, so it's cramped much below about 1100 px wide.
 
 ## Building it by hand
 

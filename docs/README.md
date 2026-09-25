@@ -25,7 +25,7 @@ A small immediate-mode game engine, 2D and 3D, glued together from other people'
 
 In 2D it draws rectangles, circles, sprites, and text through one function call each, every frame, and gets out of your way. In 3D (`thistle::three`, see [3d.md](3d.md)) it's the same idea: draw models, shapes, block worlds and lights every frame, then `render()`. There's a level editor for the 3D side ([tools/thistle-editor](../tools/thistle-editor/README.md)), and `thistle new --template fps|third-person|voxel` gives you a playable game to start from.
 
-It is not Unreal. It is not even close to Unreal. The lighting is classic (a sun with shadows, point and spot lights, sky-colored ambient), not physically-based: no normal maps, no reflections, no global illumination, no material editor. The level editor places things and paints blocks; it doesn't script, animate or build a game for you. And the 3D renderer has so far only been run on a software renderer under Linux, not on a GPU, Metal or D3D11 — [3d.md](3d.md#whats-been-verified) says exactly what that means. Know all that before you invest a week in it.
+It is not Unreal. It is not even close to Unreal. The lighting is classic (a sun with shadows, point and spot lights, sky-colored ambient), not physically-based: no normal maps, no reflections, no global illumination, no material editor. The level editor places things and paints blocks; it doesn't script, animate or build a game for you. And the 3D renderer has been run on Windows with a real GPU (D3D11) and on a software renderer under Linux, but not yet on a Mac (Metal), a phone or the web — [3d.md](3d.md#whats-been-verified) says exactly what's been checked where. Know all that before you invest a week in it.
 
 ## The one idea that matters
 
