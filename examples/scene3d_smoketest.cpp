@@ -3,8 +3,9 @@
 // set_world_transform/set_parent keeping things where they are, refusing
 // to parent something under itself, remove() taking children along and
 // renumbering the rest, properties, a JSON round trip (and repairing a file
-// with bad parents), inside() on a turned, scaled trigger, and draw()
-// running. Headless.
+// with bad parents), inside() on a turned, scaled trigger, block objects
+// (voxels: saved in the file, placed through their parents, copy(),
+// set_block_type()), and draw() running. Headless.
 #include <thistle.hpp>
 #include <cmath>
 #include <cstdio>
@@ -161,6 +162,92 @@ int main() {
                   !t.inside(z, center + vec3{4, 0, 0}),
               "and points just past each face are out (including one an unturned box would contain)");
         check(!t.inside(99, center) && !t.inside(-1, center), "a missing index is never inside");
+    }
+    std::printf("voxels\n");
+    {
+        Scene3D v;
+        SceneEntity turned;
+        turned.name = "turned";
+        turned.transform = Transform{{5, 0, 0}, quat::euler(0, radians(90.0f))};
+        const int t = v.add(turned);
+        SceneEntity house;
+        house.name = "house";
+        house.kind = SceneEntity::Kind::Voxels;
+        house.parent = t;
+        house.transform.position = {1, 0, 0};
+        house.voxels = std::make_shared<VoxelWorld>();
+        VoxelWorld& w = *house.voxels;
+        w.voxel_size = 0.25f;
+        const BlockId stone = w.add_block({.name = "stone", .color = rgb(0.5f, 0.5f, 0.5f)});
+        const BlockId glass = w.add_block({.name = "glass", .color = rgba{0.6f, 0.8f, 1.0f, 0.3f}, .alpha = AlphaMode::Blend});
+        w.fill({0, 0, 0}, {3, 2, 1}, stone);
+        w.set(1, 1, 0, glass);
+        house.atlas = "assets/blocks.png";
+        house.atlas_tile = 8;
+        const int h = v.add(house);
+
+        const Bounds gb = v.local_bounds(h);
+        check(near3(gb.min, {0, 0, 0}) && near3(gb.max, {1.0f, 0.75f, 0.5f}), "local_bounds of blocks: the blocks' box times the block size");
+        w.set(20, 0, 0, stone);
+        check(near(v.local_bounds(h).max.x, 5.25f), "and it follows edits (grid_bounds is cached until one)");
+        w.set(20, 0, 0, 0);
+
+        v.place_voxels();
+        const Transform hw = v.world_transform(h);
+        check(near3(w.origin, hw.position) && near3(w.origin, {5, 0, -1}) && same_rotation(w.rotation, hw.rotation),
+              "place_voxels(): the grid sits at the entity's world position and turns with it, through its parent");
+        check(v.inside(h, w.block_center({1, 1, 1})) && !v.inside(h, w.block_center({1, 1, 3})), "inside() uses the blocks' box");
+
+        const std::string json = v.to_json();
+        Scene3D back;
+        check(back.from_json(json) && back.entities[1].voxels != nullptr, "voxels come back from JSON");
+        const SceneEntity& bh = back.entities[1];
+        check(bh.voxels && bh.voxels->serialize() == w.serialize() && bh.voxels->get(1, 1, 0) == glass &&
+                  bh.voxels->block_type(glass).alpha == AlphaMode::Blend && near(bh.voxels->voxel_size, 0.25f),
+              "with every block, the block types and the block size (" + std::to_string(bh.voxels->block_count()) + " blocks)");
+        check(bh.atlas == "assets/blocks.png" && bh.atlas_tile == 8, "and the atlas path and tile size");
+        check(bh.voxels && near3(bh.voxels->origin, {5, 0, -1}), "load places them (no draw needed first)");
+        check(back.to_json() == json, "saving what was loaded gives the identical file, blocks and all");
+        const std::string light = v.to_json(false);
+        check(light.find("\"blocks\"") == std::string::npos && json.find("\"blocks\"") != std::string::npos && light.size() < json.size(),
+              "to_json(false) leaves the blocks out");
+
+        std::string damaged = json;
+        const size_t at = damaged.find("\"blocks\": \"") + 11;
+        damaged.replace(at, 8, "AAAAAAAA");
+        Scene3D hurt;
+        check(hurt.from_json(damaged) && hurt.entities.size() == 2 && hurt.entities[1].voxels && hurt.entities[1].voxels->block_count() == 0,
+              "damaged block data: the scene still loads, that object is empty");
+
+        VoxelWorld twin = w.copy();
+        twin.set(0, 0, 0, 0);
+        check(w.get(0, 0, 0) == stone && twin.get(0, 0, 0) == 0 && twin.block_count() == w.block_count() - 1 &&
+                  twin.find_block("glass") == glass && near3(twin.origin, w.origin),
+              "VoxelWorld::copy() is a separate world with the same blocks, types and placement");
+        BlockType st = w.block_type(stone);
+        st.color = rgb(0.9f, 0.1f, 0.1f);
+        w.set_block_type(stone, st);
+        w.set_block_type(0, st);
+        w.set_block_type(99, st);
+        check(near(w.block_type(stone).color.r, 0.9f) && w.block_type(0).name == "air", "set_block_type() changes a type (and ignores air and unknown ids)");
+        World vw;
+        v.draw(vw);
+        check(true, "draw() with a block object runs");
+    }
+
+    {
+        // A parent listed after its own child, plus an unrelated one after
+        // both: removing them one at a time would shift the indices under it.
+        Scene3D r;
+        for (const char* n : {"a", "child", "b", "parent", "c", "d"}) {
+            SceneEntity e;
+            e.name = n;
+            r.add(e);
+        }
+        r.entities[1].parent = 3;
+        r.remove(std::vector<int>{3, 4, 1});
+        check(r.entities.size() == 3 && r.find("a") == 0 && r.find("b") == 1 && r.find("d") == 2,
+              "remove(several): a parent after its child and another after both, all gone and only them");
     }
     s.remove(g); // the group and the crate under it
     check(s.entities.size() == 3 && s.find("crate") == -1 && s.find("lamp") == 0 && s.find("player_start") == 1,

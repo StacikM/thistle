@@ -1,10 +1,17 @@
 # Thistle Editor
 
-A 3D level editor for `thistle::three`. Place models, shapes, lights, trigger volumes and spawn points, move/rotate/scale them with gizmos, group them, give them properties your game reads, set the sun, sky and fog, and save the result as a `.scene.json` that your game loads with `three::Scene3D` (see [docs/scene3d.md](../../docs/scene3d.md)).
+A 3D level editor for `thistle::three`. You can:
+
+- place models, shapes, lights, trigger volumes and spawn points
+- build block objects (voxels, flat-colored or Minecraft-style textured) block by block
+- move, rotate and scale things with gizmos, and group them
+- give things properties your game reads
+- set the sun, sky and fog
+- drag models in from anywhere
+
+The result saves as a `.scene.json` that your game loads with `three::Scene3D` (see [docs/scene3d.md](../../docs/scene3d.md)).
 
 It's drawn with Thistle's own 2D API, not Dear ImGui, and it renders the level with the same `three::World` renderer your game uses: what you see in the editor is what the game draws, lights and shadows included.
-
-Voxel painting and sculpting aren't in it yet. That's the next step.
 
 ## Running it
 
@@ -16,7 +23,7 @@ thistle editor install          # put `thistle-editor` on your PATH, then: thist
 
 The editor works on one project folder:
 
-- **Models** are the `.glb`, `.gltf` and `.obj` files anywhere under its `assets/`.
+- **Models** are the `.glb`, `.gltf` and `.obj` files anywhere under its `assets/`. Models from elsewhere are copied in when you import them (see [Importing](#importing)).
 - **Scenes** are saved to `assets/scenes/`. They're in `assets/` on purpose: `thistle_bundle_assets()` ships that folder with the game on every platform, so a level the editor saves is a level the game can load, with nothing else to set up.
 - Paths inside a scene are relative to the project folder (`assets/ship.glb`), which is also how the game sees them once `assets/` is next to it.
 
@@ -24,7 +31,7 @@ Without a folder, it uses the current one if it has `assets/` or `thistle.json`,
 
 ## The window
 
-- **Top bar**: New, Open, Save, Save as, Undo, Redo, the Move/Rotate/Scale tools, `+ Add`, and the file name (orange with a `*` when there are unsaved changes).
+- **Top bar**: New, Open, Save, Save as, Undo, Redo, the Move/Rotate/Scale tools, `+ Add`, Import, and the file name (orange with a `*` when there are unsaved changes).
 - **Outliner** (left): everything in the scene as a tree.
 - **Viewport** (middle): the level, drawn by the engine, with a grid, gizmos, and icons for the things that don't draw in the game (lights, triggers, spawn points, empties).
 - **Inspector** (right): whatever's selected. With nothing selected, it shows the scene's own settings: sun direction/height/color/intensity/shadows, sky colors, ambient light, fog.
@@ -46,7 +53,15 @@ That's Blender's orbit-and-pan plus Unity's and Unreal's right-button fly mode.
 
 ## Editing
 
-- **Add**: `+ Add` (or Shift+A) has Box, Sphere, Cylinder, Cone, Plane, Point light, Spot light, Trigger volume, Spawn point, Empty (a group), and Model..., which lists the models in `assets/`. New things go below the point the camera orbits around, resting on the ground. Lights go 3 m up.
+- **Add**: `+ Add` (or Shift+A) has:
+  - the shapes (Box, Sphere, Cylinder, Cone, Plane)
+  - Point light, Spot light, Trigger volume, Spawn point
+  - Empty (a group)
+  - Blocks (a new block object; see below)
+  - Model..., which lists the models in `assets/`
+  - Voxel model (.vox)..., which lists the MagicaVoxel files in `assets/`
+
+  New things go below the point the camera orbits around, resting on the ground. Lights go 3 m up.
 - **Select**: click in the viewport or the Outliner. Ctrl- or Shift-click adds or removes. Ctrl+A selects everything, Esc selects nothing. Clicking picks the nearest thing under the cursor, and for models that's a test against their triangles, not their box.
 - **Gizmos**: W / E / R switch between move, rotate and scale.
   - Move: drag an arrow to go along that axis, or a colored square to slide in that plane.
@@ -60,7 +75,51 @@ That's Blender's orbit-and-pan plus Unity's and Unreal's right-button fly mode.
 - **Hierarchy**: drag a row in the Outliner onto another to put it under that one, or onto empty space to move it back to the top. It keeps its place in the world either way. Moving a parent moves what's under it. You can't put something under its own child: the editor says so and doesn't change anything.
 - **Right-click a row**: Rename, Duplicate, Delete, Unparent, Frame.
 - **Duplicate** Ctrl+D, **Delete** Del / X / Backspace. Deleting something deletes what's under it.
-- **Undo / Redo**: Ctrl+Z, and Ctrl+Shift+Z or Ctrl+Y. That covers every change (adding, gizmo drags, typed values, reparenting, scene settings), 200 steps back.
+- **Undo / Redo**: Ctrl+Z, and Ctrl+Shift+Z or Ctrl+Y. That covers every change (adding, gizmo drags, typed values, reparenting, scene settings, block strokes), 200 steps back.
+
+## Block objects (voxels)
+
+A block object is a grid of blocks placed in the level like anything else: it has a position and rotation, can sit under a parent, and moves with the gizmo. The engine gives your game a real `VoxelWorld` for each one, so Physics3D, destruction and multiplayer sync work on it directly (see [docs/scene3d.md](../../docs/scene3d.md)). Its size comes from its block size, not a scale, so it has no Scale field and the scale gizmo leaves it alone.
+
+**Add → Blocks** makes one: an 8×8 grass platform with 13 block types to start with, among them stone, dirt, wood, brick, glass (see-through), water (see-through, not solid) and lamp (glows). It opens straight into **block mode**. **Tab**, or "Edit blocks" in the Inspector, enters block mode for the selected block object. Tab or Esc leaves it.
+
+In block mode, clicking in the viewport edits blocks instead of selecting:
+
+| | |
+|---|---|
+| **1** Add | Puts the chosen type in front of the face you click |
+| **2** Erase | Removes the block you click |
+| **3** Paint | Changes the block you click to the chosen type |
+| **B** Box | Drag from corner to corner to fill (or erase, or paint) a box |
+| **[ ]** | Brush size, 1 to 16 blocks. The Inspector switches between a square and a round brush. In box mode, it's the box's depth |
+| **Shift+click** | Picks up the type of the block you click |
+
+- **Dragging stays in one layer.** A drag stays in the layer of blocks where it started, so dragging across a floor draws on the floor, and dragging up a wall draws on the wall. Otherwise each new block would become the next surface, and a line would climb toward the camera (or, erasing, dig a pit). Fast drags are filled in between, so they leave lines, not dots.
+- **The box tool works the same way.** Its rectangle lies in the plane of the face you started on, and it goes as deep as the brush size: out from the surface when adding, into it when erasing or painting. Start on a floor for a slab, on a wall for a wall.
+- **Past the edge, the object's floor counts as a surface.** You can add blocks beyond the edge of what's there, and start an empty object from nothing.
+- **What you'll change is outlined.** A box in the viewport shows it: white for add, red for erase, the block's color for paint.
+- **Every stroke, box and block-type edit is one undo step.**
+
+The Inspector in block mode shows the tools and the **block types**: click a swatch to use it. **+ type** adds one. The chosen type's name, color, and "See-through" / "Glows" / "Solid" switches edit it in place, so every block of that type changes. **Block size** is 0.1 m (Teardown), 0.25, 0.5 or 1 m (Minecraft). The object stays where it is and its blocks grow or shrink from its corner.
+
+**Textured blocks** (the Minecraft look): **Texture** picks an image from `assets/` as the object's atlas, a grid of square tiles; set **Tile size** to their size in pixels. Each type then gets **Tiles** fields: which tile its top, sides and bottom use, counted left to right, top to bottom (-1 = plain color). Its color becomes a tint, so set it to white for the texture as drawn.
+
+Adding a block type can't be undone (types only accumulate; an unused one costs nothing).
+
+## Importing
+
+- **Drag files onto the editor window**, or click **Import** and type or paste a path (Ctrl+V; Cmd+V on a Mac).
+- **Models from outside the project** are copied into it, with everything they need to load on another machine:
+  - `.glb` → `assets/models/`
+  - `.gltf` → its own folder under `assets/models/`, with its `.bin` buffers and images, laid out as its references expect
+  - `.obj` → its own folder under `assets/models/`, with its `.mtl` files and the textures they name
+
+  Then it's placed in the scene. Importing the same file again reuses the copy, and a different file with the same name gets a numbered name instead of overwriting it. A file already under `assets/` is used where it is.
+- **`.vox` (MagicaVoxel)** becomes a block object with 0.1 m blocks. Its blocks are stored in the scene, so the `.vox` isn't copied.
+- **Images** (`.png`, `.jpg`) are copied to `assets/textures/`, where a block object's Texture can use them.
+- **A `.scene.json`** is opened.
+
+Several files dropped at once are placed side by side. A model whose references point outside its own folder (`../textures/x.png`) is imported without those files, and the status bar says how many were missing.
 
 ## Files
 
@@ -81,7 +140,6 @@ Two things don't carry over exactly:
 
 ## What it doesn't do (yet)
 
-- No voxel tools. That's the next step.
 - No prefabs, no multiple scenes open at once, no copy/paste between scenes.
 - No play button: run your game to see the level in it.
 - Physics isn't set up here. A game reads the scene and makes bodies for what it wants (see [docs/scene3d.md](../../docs/scene3d.md)).
@@ -105,11 +163,27 @@ Run under Xvfb + llvmpipe (software OpenGL) on Linux and driven with `xdotool`, 
 - The right-click menu's Delete (and undoing it) and Duplicate. Custom properties. Turning fog on.
 - Save as, then Open after restarting the editor. The saved JSON was checked value by value: parents, lights' intensity/range/cone, properties, and fog.
 - New with unsaved changes asks first. Cancel keeps the changes and Discard throws them away. The asking came out of this testing: before it, New silently dropped them, and undo couldn't bring them back.
+- Block objects:
+  - Add → Blocks, then adding blocks one at a time and dragging lines (they stay in the top layer).
+  - The box tool with depth 1 and 2, including starting on a side face, which draws a box out from the side.
+  - Erase, Paint, the eyedropper, and undoing a box in one step.
+  - Moving the object with the gizmo, then undoing the move and then the paint stroke before it, in that order.
+  - Saving, restarting and reopening: every block came back.
+  - Giving an object a 16 px texture atlas and setting grass (top/side/bottom tiles) and stone. Both drew textured, the palette swatches show the tiles, and the atlas and tiles came back after a restart.
+- Importing:
+  - Three files dropped onto the window at once, through a real X11 drag and drop (a small XDND source written for the test, the protocol file managers use). `tree.vox` became a 448-block object. `Duck.gltf` was copied with `Duck data.bin` (a `%20` in its reference, decoded) and `textures/duck.png`. `crate.obj` was copied with `crate.mtl` and the `wood.png` it names after a `-s 1 1 1` option. All three drew, with their textures.
+  - A path pasted into Import from the X clipboard.
+  - Add → Voxel model (.vox) for a `.vox` inside `assets/`.
+- Engine bugs this testing turned up, all fixed:
+  - The engine's text input stopped at 40 characters. Now `begin_text_input` takes a length.
+  - Text input had no paste. It does now.
+  - Ctrl+V typed a "v" after the pasted text.
+  - Sprites drawn after any text in the same frame came out white. That's why the palette swatches were blank. It affected every Thistle game.
 - Importing a hand-written old-editor layout. The positions were checked against hand-computed ones, including a child under a rotated, stretched parent. A malformed old file is refused, not a crash. It was a crash on the first try, since `load_scene()` throws.
 
 `scene3d_smoketest` (ctest) covers the file format and the transform math the editor relies on.
 
-Not verified: any real GPU or display. macOS and Windows haven't been run at all. On a Retina/HiDPI screen, mouse coordinates vs. drawing coordinates are the thing most likely to be off, and that hasn't been seen. The window is 1440×860 by default. The panels are fixed widths, so it's cramped much below about 1100 px wide.
+Not verified: any real GPU or display. macOS and Windows haven't been run at all (CI compiles the editor on both, and it cross-compiles with MinGW here). Drag and drop is tested only on X11. On macOS and Windows it goes through sokol's own drop support, which Thistle hadn't turned on before. On a Retina/HiDPI screen, mouse coordinates vs. drawing coordinates are the thing most likely to be off, and that hasn't been seen. The window is 1440×860 by default. The panels are fixed widths, so it's cramped much below about 1100 px wide.
 
 ## Building it by hand
 

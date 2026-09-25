@@ -310,6 +310,7 @@ struct EngineState {
     float mouse_x = 0.0f;
     float mouse_y = 0.0f;
     float scroll_y = 0.0f; // accumulated this frame, reset after each frame like key_pressed
+    std::vector<std::string> dropped_files; // this frame's, cleared after it like key_pressed
     float mouse_dx = 0.0f; // same, for relative movement
     float mouse_dy = 0.0f;
 
@@ -813,7 +814,7 @@ void frame_cb() {
     sgl_ortho(0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, -1.0f, 1.0f);
     sgl_matrix_mode_modelview();
     sgl_load_identity();
-    sgl_enable_texture(); // stays on all frame; rects use the 1x1 white texture
+    sgl_enable_texture(); // rects use the 1x1 white texture; text turns it off again, so sprites re-enable it
 
     Frame f;
     f.dt = static_cast<float>(dt);
@@ -908,6 +909,7 @@ void frame_cb() {
     g_state->scroll_y = 0.0f;
     g_state->mouse_dx = 0.0f;
     g_state->mouse_dy = 0.0f;
+    g_state->dropped_files.clear();
 }
 
 void cleanup_cb() {
@@ -937,6 +939,11 @@ void cleanup_cb() {
 void event_cb(const sapp_event* e) {
     if (detail::debug_ui_event(e)) return;
     switch (e->type) {
+#if !defined(__EMSCRIPTEN__) // on the web a drop gives names, not readable paths
+        case SAPP_EVENTTYPE_FILES_DROPPED:
+            for (int i = 0; i < sapp_get_num_dropped_files(); ++i) g_state->dropped_files.emplace_back(sapp_get_dropped_file_path(i));
+            break;
+#endif
         case SAPP_EVENTTYPE_KEY_DOWN:
             if (e->key_code >= 0 && e->key_code < 512) {
                 g_state->key_held[e->key_code] = true;
@@ -945,11 +952,23 @@ void event_cb(const sapp_event* e) {
             if (g_state->text_capturing && e->key_code == SAPP_KEYCODE_BACKSPACE && !g_state->text_buffer.empty())
                 g_state->text_buffer.pop_back();
             break;
-        case SAPP_EVENTTYPE_CHAR:
+        case SAPP_EVENTTYPE_CHAR: {
             // Accumulate typed text while a field is capturing (printable ASCII).
-            if (g_state->text_capturing && e->char_code >= 32 && e->char_code < 127 &&
+            // Not with Ctrl/Cmd held: that's a shortcut (Ctrl+V's "v" would
+            // follow the pasted text). Ctrl+Alt is AltGr on Windows, which
+            // types @, { and friends on many keyboards, so that still counts.
+            const bool shortcut = (e->modifiers & (SAPP_MODIFIER_CTRL | SAPP_MODIFIER_SUPER)) && !(e->modifiers & SAPP_MODIFIER_ALT);
+            if (g_state->text_capturing && !shortcut && e->char_code >= 32 && e->char_code < 127 &&
                 g_state->text_buffer.size() < g_state->text_max)
                 g_state->text_buffer.push_back(static_cast<char>(e->char_code));
+            break;
+        }
+        case SAPP_EVENTTYPE_CLIPBOARD_PASTED:
+            if (g_state->text_capturing) {
+                for (const char* c = sapp_get_clipboard_string(); c && *c && g_state->text_buffer.size() < g_state->text_max; ++c) {
+                    if (*c >= 32 && *c < 127) g_state->text_buffer.push_back(*c);
+                }
+            }
             break;
         case SAPP_EVENTTYPE_KEY_UP:
             if (e->key_code >= 0 && e->key_code < 512) {
@@ -1198,6 +1217,11 @@ void Frame::sprite(Texture tex, vec2 pos, SpriteOpts opts) {
     const vec2 p2 = corner(hw, hh);
     const vec2 p3 = corner(-hw, hh);
 
+    // Texturing may have been switched off since the frame started: sokol's
+    // text rendering (and the minor-3D draws) end with sgl_disable_texture(),
+    // and a quad drawn with it off samples white. Sprites after text came out
+    // as white boxes before this.
+    sgl_enable_texture();
     sgl_texture(rec.view, g_state->sampler);
     sgl_c4f(opts.tint.r, opts.tint.g, opts.tint.b, opts.tint.a);
     sgl_begin_quads();
@@ -1233,6 +1257,7 @@ void Frame::sprite9(Texture tex, vec2 pos, vec2 size, float border, rgba tint) {
     const float u[4] = {0.0f, bu, 1.0f - bu, 1.0f};
     const float v[4] = {0.0f, bv, 1.0f - bv, 1.0f};
 
+    sgl_enable_texture(); // see sprite()
     sgl_texture(rec.view, g_state->sampler);
     sgl_c4f(tint.r, tint.g, tint.b, tint.a);
     sgl_begin_quads();
@@ -1270,6 +1295,8 @@ bool Frame::mouse_pressed(Mouse b) const {
     const int i = static_cast<int>(b);
     return i >= 0 && i < 3 && g_state->mouse_pressed[i];
 }
+
+const std::vector<std::string>& Frame::dropped_files() const { return g_state->dropped_files; }
 
 float Frame::mouse_scroll() const {
     return g_state->scroll_y;
@@ -2219,7 +2246,8 @@ void haptic(Haptic style) {
 #endif
 }
 
-void begin_text_input(const std::string& initial) {
+void begin_text_input(const std::string& initial, size_t max_length) {
+    g_state->text_max = std::max<size_t>(1, max_length);
     g_state->text_buffer = initial.substr(0, g_state->text_max);
     g_state->text_capturing = true;
     sapp_show_keyboard(true);
@@ -3924,6 +3952,9 @@ int App::run() {
     d.logger.func = slog_func;
     d.enable_clipboard = true;
     d.clipboard_size = 16384;
+    d.enable_dragndrop = true;
+    d.max_dropped_files = 32;
+    d.max_dropped_file_path_length = 4096;
     if (icon_px) {
         d.icon.sokol_default = false;
         d.icon.images[0].width = iw;

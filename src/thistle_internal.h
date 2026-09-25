@@ -34,6 +34,12 @@ int frame_height();
 // such a ray *exits* and so would wrongly skip a box you're standing in.
 bool ray_reaches_box(const three::Ray& ray, const three::Bounds& box, float max_distance);
 
+// --- implemented in three_net.cpp ---
+// Bytes as text for JSON (VoxelSync's chunks, scenes' voxel entities), and back.
+// Decoding skips anything that isn't base64.
+std::string b64_encode(const std::vector<uint8_t>& in);
+std::vector<uint8_t> b64_decode(const std::string& in);
+
 // --- implemented in three_voxel.cpp ---
 struct VoxelWorldAccess {
     // Bumped by every change to any of the world's chunks.

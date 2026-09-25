@@ -1,10 +1,16 @@
 // Thistle Editor — a 3D level editor for thistle::three scenes (Scene3D).
 //
-// Place models, shapes, lights, trigger volumes and spawn points; move,
-// rotate and scale them with gizmos; group them into hierarchies; give
-// them properties your game reads; set the sun, sky and fog; save as
-// .scene.json, which a game loads with Scene3D::load() and draws with
-// Scene3D::draw() (or reads to place its own things).
+// Place models, shapes, block objects, lights, trigger volumes and spawn
+// points; move, rotate and scale them with gizmos; group them into
+// hierarchies; give them properties your game reads; set the sun, sky and
+// fog; save as .scene.json, which a game loads with Scene3D::load() and
+// draws with Scene3D::draw() (or reads to place its own things).
+//
+// Block objects (voxels) are edited in block mode (Tab): add, erase and
+// paint with a brush or a box, a stroke staying in the layer it started
+// in. Files dropped on the window (or typed into Import) are brought into
+// the project: models copied into assets/models/ with the files they
+// refer to, .vox files turned into block objects.
 //
 //   thistle-editor [project folder]
 //
@@ -32,12 +38,20 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iterator>
+#include <map>
 #include <memory>
+#include <optional>
+#include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -111,6 +125,7 @@ const char* kind_label(SceneEntity::Kind k) {
         case SceneEntity::Kind::SpotLight: return "Spot light";
         case SceneEntity::Kind::Trigger: return "Trigger";
         case SceneEntity::Kind::Spawn: return "Spawn point";
+        case SceneEntity::Kind::Voxels: return "Blocks";
     }
     return "?";
 }
@@ -186,6 +201,95 @@ bool point_in_triangle(vec2 p, vec2 a, vec2 b, vec2 c) {
     return !(neg && pos);
 }
 
+bool detail_read(const fs::path& path, std::string& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    out = ss.str();
+    return true;
+}
+
+std::string lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+bool same_file_contents(const fs::path& a, const fs::path& b) {
+    std::error_code ec;
+    if (fs::file_size(a, ec) != fs::file_size(b, ec) || ec) return false;
+    std::ifstream fa(a, std::ios::binary), fb(b, std::ios::binary);
+    return std::equal(std::istreambuf_iterator<char>(fa), std::istreambuf_iterator<char>(), std::istreambuf_iterator<char>(fb));
+}
+
+// "My%20Model.bin" -> "My Model.bin": glTF URIs are percent-encoded.
+std::string uri_decode(const std::string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size() && std::isxdigit(static_cast<unsigned char>(s[i + 1])) && std::isxdigit(static_cast<unsigned char>(s[i + 2]))) {
+            out += static_cast<char>(std::stoi(s.substr(i + 1, 2), nullptr, 16));
+            i += 2;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+// The files a model file refers to, relative to its folder: a .gltf's
+// buffers and images, an .obj's material libraries and their textures.
+std::vector<std::string> model_dependencies(const fs::path& file) {
+    std::vector<std::string> out;
+    const std::string ext = lower(file.extension().string());
+    std::string text;
+    if (!detail_read(file, text)) return out;
+    if (ext == ".gltf") {
+        try {
+            const nlohmann::json j = nlohmann::json::parse(text);
+            for (const char* list : {"buffers", "images"}) {
+                if (!j.contains(list)) continue;
+                for (const auto& item : j[list]) {
+                    const std::string uri = item.value("uri", std::string());
+                    if (!uri.empty() && uri.rfind("data:", 0) != 0) out.push_back(uri_decode(uri));
+                }
+            }
+        } catch (...) {
+        }
+    } else if (ext == ".obj") {
+        std::istringstream lines(text);
+        std::string line;
+        std::vector<std::string> mtls;
+        while (std::getline(lines, line)) {
+            std::istringstream words(line);
+            std::string word;
+            words >> word;
+            if (word != "mtllib") continue;
+            std::string rest;
+            std::getline(words, rest);
+            rest.erase(0, rest.find_first_not_of(" \t"));
+            while (!rest.empty() && (rest.back() == '\r' || rest.back() == ' ')) rest.pop_back();
+            if (!rest.empty()) mtls.push_back(rest); // one name, possibly with spaces (what most exporters write)
+        }
+        for (const std::string& mtl : mtls) {
+            out.push_back(mtl);
+            std::string mtext;
+            if (!detail_read(file.parent_path() / mtl, mtext)) continue;
+            std::istringstream mlines(mtext);
+            while (std::getline(mlines, line)) {
+                std::istringstream words(line);
+                std::string key;
+                words >> key;
+                static const char* maps[] = {"map_Kd", "map_Ka", "map_Ks", "map_Ke", "map_Ns", "map_d", "map_Bump", "map_bump", "bump", "norm", "disp"};
+                if (std::find_if(std::begin(maps), std::end(maps), [&](const char* m) { return key == m; }) == std::end(maps)) continue;
+                std::string last, word; // options like "-bm 0.5" come first: the file name is the last word
+                while (words >> word) last = word;
+                if (!last.empty()) out.push_back(last);
+            }
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -223,55 +327,123 @@ int main(int argc, char** argv) {
     bool flying = false;
     Camera camera;
 
-    // Undo: whole-scene JSON snapshots.
-    std::vector<std::string> undo_stack, redo_stack;
-    std::string edit_before; // snapshot taken when a drag/edit began
+    // Undo. A step is either a copy of the whole scene (entities, settings),
+    // or edits to one block object's blocks: copies of the scene share their
+    // VoxelWorlds (shared_ptr), so blocks aren't copied with every step,
+    // and a brush stroke keeps only the blocks it changed. That works because
+    // steps are undone strictly in reverse: when a scene copy comes back,
+    // every block edit made after it has already been undone in the worlds it
+    // shares.
+    struct BlockEdit {
+        ivec3 at;
+        BlockId before;
+    };
+    struct UndoStep {
+        std::optional<Scene3D> scene;
+        std::shared_ptr<VoxelWorld> world;
+        std::vector<BlockEdit> blocks;
+        std::vector<std::pair<BlockId, BlockType>> types; // block types to put back
+        float voxel_size = 0.0f;                          // > 0: the block size to put back
+    };
+    std::vector<UndoStep> undo_stack, redo_stack;
+    Scene3D edit_before; // snapshot taken when a drag/edit began
     bool editing = false;
-    auto record = [&] { // call right before a one-shot change
-        undo_stack.push_back(scene.to_json());
+    auto push_undo = [&](UndoStep step) {
+        undo_stack.push_back(std::move(step));
         if (undo_stack.size() > 200) undo_stack.erase(undo_stack.begin());
         redo_stack.clear();
         dirty = true;
     };
+    auto record = [&] { // call right before a one-shot change
+        UndoStep step;
+        step.scene = scene;
+        push_undo(std::move(step));
+    };
     auto begin_edit = [&] {
         if (editing) return;
-        edit_before = scene.to_json();
+        edit_before = scene;
         editing = true;
     };
     auto end_edit = [&] {
         if (!editing) return;
         editing = false;
-        if (scene.to_json() == edit_before) return; // a click without a change
-        undo_stack.push_back(edit_before);
-        if (undo_stack.size() > 200) undo_stack.erase(undo_stack.begin());
-        redo_stack.clear();
-        dirty = true;
+        if (scene.to_json(false) == edit_before.to_json(false)) return; // a click without a change
+        UndoStep step;
+        step.scene = std::move(edit_before);
+        push_undo(std::move(step));
+    };
+    // Puts a step's state back and returns the step that goes the other way.
+    auto apply_step = [&](UndoStep step) {
+        UndoStep back;
+        if (step.scene) {
+            back.scene = scene;
+            scene = std::move(*step.scene);
+        }
+        if (step.world) {
+            VoxelWorld& w = *step.world;
+            back.world = step.world;
+            for (const BlockEdit& b : step.blocks) {
+                back.blocks.push_back({b.at, w.get(b.at)});
+                w.set(b.at, b.before);
+            }
+            for (const auto& [id, type] : step.types) {
+                back.types.push_back({id, w.block_type(id)});
+                w.set_block_type(id, type);
+            }
+            if (step.voxel_size > 0.0f) {
+                back.voxel_size = w.voxel_size;
+                w.voxel_size = step.voxel_size;
+            }
+        }
+        return back;
     };
     auto clamp_selection = [&] {
         const int n = static_cast<int>(scene.entities.size());
         selection.erase(std::remove_if(selection.begin(), selection.end(), [&](int i) { return i < 0 || i >= n; }), selection.end());
     };
+    // Atlases are applied to the (shared) worlds only when an entity's
+    // atlas setting differs from what its world has: set_atlas re-meshes
+    // everything, which shouldn't happen on every undo.
+    std::unordered_map<const VoxelWorld*, std::pair<std::string, int>> applied_atlas;
+    auto sync_atlases = [&] {
+        for (SceneEntity& e : scene.entities) {
+            if (e.kind != SceneEntity::Kind::Voxels || !e.voxels) continue;
+            auto it = applied_atlas.find(e.voxels.get());
+            if (it == applied_atlas.end()) { // first seen: as loaded (Scene3D::load applies atlases) or made here
+                applied_atlas[e.voxels.get()] = {e.atlas, e.atlas_tile};
+                continue;
+            }
+            if (it->second.first == e.atlas && it->second.second == e.atlas_tile) continue;
+            it->second = {e.atlas, e.atlas_tile};
+            e.voxels->set_atlas(e.atlas.empty() ? Texture{} : load_texture(e.atlas), e.atlas_tile);
+        }
+    };
+    bool block_mode = false; // editing the selected block object's blocks (Tab)
     auto undo = [&] {
         if (undo_stack.empty()) return say("nothing to undo");
-        redo_stack.push_back(scene.to_json());
-        scene.from_json(undo_stack.back());
+        UndoStep step = std::move(undo_stack.back());
         undo_stack.pop_back();
+        redo_stack.push_back(apply_step(std::move(step)));
         clamp_selection();
+        sync_atlases();
         dirty = true;
     };
     auto redo = [&] {
         if (redo_stack.empty()) return say("nothing to redo");
-        undo_stack.push_back(scene.to_json());
-        scene.from_json(redo_stack.back());
+        UndoStep step = std::move(redo_stack.back());
         redo_stack.pop_back();
+        undo_stack.push_back(apply_step(std::move(step)));
         clamp_selection();
+        sync_atlases();
         dirty = true;
     };
 
     std::vector<std::string> model_files = scan("assets", {".glb", ".gltf", ".obj"});
-    std::vector<std::string> scene_files;
+    std::vector<std::string> scene_files, vox_files, image_files;
     auto rescan = [&] {
         model_files = scan("assets", {".glb", ".gltf", ".obj"});
+        vox_files = scan("assets", {".vox"});
+        image_files = scan("assets", {".png", ".jpg", ".jpeg"});
         // Scenes live in assets/ so they ship with the game (only assets/ is
         // bundled). Also any lying right in the project folder, but not deeper:
         // build folders hold far too many files to walk every time.
@@ -310,6 +482,8 @@ int main(int argc, char** argv) {
         file_path.clear();
         undo_stack.clear();
         redo_stack.clear();
+        applied_atlas.clear();
+        block_mode = false;
         dirty = false;
     };
     new_scene();
@@ -334,6 +508,8 @@ int main(int argc, char** argv) {
         selection.clear();
         undo_stack.clear();
         redo_stack.clear();
+        applied_atlas.clear();
+        block_mode = false;
         dirty = false;
         say("opened " + path);
     };
@@ -393,6 +569,8 @@ int main(int argc, char** argv) {
         selection.clear();
         undo_stack.clear();
         redo_stack.clear();
+        applied_atlas.clear();
+        block_mode = false;
         dirty = true;
         say("imported " + std::to_string(scene.entities.size()) + " things from the old editor: Save as to keep them");
     };
@@ -467,14 +645,169 @@ int main(int argc, char** argv) {
         add_entity(e);
     };
 
+    enum class Popup { None, Open, Add, AddModel, AddVox, SaveAs, Import, Context, ChangeModel, Atlas, Confirm } popup = Popup::None;
+    vec2 popup_at{};
+    int context_entity = -1;
+    // New/Open with unsaved changes asks first: they clear the undo history,
+    // so there'd be no getting the changes back.
+    std::string confirm_text;
+    std::function<void()> confirm_action;
+    auto unless_unsaved = [&](const std::string& what, std::function<void()> action) {
+        if (!dirty) return action();
+        confirm_text = what;
+        confirm_action = std::move(action);
+        popup = Popup::Confirm;
+    };
+
+    // Block objects. A new one comes with block types to paint with and a
+    // small platform, so there's something to see and click.
+    auto add_blocks = [&](std::shared_ptr<VoxelWorld> w, const std::string& name) {
+        record();
+        SceneEntity e;
+        e.kind = SceneEntity::Kind::Voxels;
+        e.name = unique_name(name);
+        const Bounds gb = w->grid_bounds();
+        // Centered under the view, standing on the ground.
+        e.transform.position = vec3{target.x, 0.0f, target.z} - (gb.valid() ? vec3{gb.center().x, gb.min.y, gb.center().z} : vec3{});
+        e.voxels = std::move(w);
+        const int index = scene.add(e);
+        selection = {index};
+        return index;
+    };
+    auto new_block_object = [&] {
+        auto w = std::make_shared<VoxelWorld>();
+        w->voxel_size = 0.5f;
+        w->add_block({.name = "stone", .color = rgb(0.52f, 0.52f, 0.54f)});
+        w->add_block({.name = "dirt", .color = rgb(0.45f, 0.32f, 0.22f)});
+        w->add_block({.name = "grass", .color = rgb(0.36f, 0.62f, 0.27f)});
+        w->add_block({.name = "wood", .color = rgb(0.50f, 0.34f, 0.20f)});
+        w->add_block({.name = "planks", .color = rgb(0.76f, 0.60f, 0.38f)});
+        w->add_block({.name = "leaves", .color = rgb(0.25f, 0.50f, 0.20f)});
+        w->add_block({.name = "sand", .color = rgb(0.86f, 0.80f, 0.58f)});
+        w->add_block({.name = "brick", .color = rgb(0.66f, 0.30f, 0.24f)});
+        w->add_block({.name = "white", .color = rgb(0.92f, 0.92f, 0.90f)});
+        w->add_block({.name = "dark", .color = rgb(0.16f, 0.16f, 0.18f)});
+        w->add_block({.name = "glass", .color = rgba{0.70f, 0.85f, 1.0f, 0.35f}, .alpha = AlphaMode::Blend});
+        w->add_block({.name = "water", .color = rgba{0.20f, 0.45f, 0.80f, 0.6f}, .alpha = AlphaMode::Blend, .solid = false});
+        w->add_block({.name = "lamp", .color = rgb(1.0f, 0.85f, 0.5f), .emissive = rgb(1.0f, 0.8f, 0.45f)});
+        w->fill({0, 0, 0}, {7, 0, 7}, w->find_block("grass"));
+        add_blocks(w, "Blocks");
+        block_mode = true;
+        say("block mode: click to add blocks (Tab when done)");
+    };
+    auto import_vox = [&](const std::string& path) {
+        auto w = std::make_shared<VoxelWorld>();
+        w->voxel_size = 0.1f; // MagicaVoxel models are usually made at about Teardown's scale
+        if (!w->load_vox(path)) {
+            say("couldn't read " + path + " as a MagicaVoxel file");
+            return false;
+        }
+        const int blocks = w->block_count();
+        add_blocks(w, fs::path(path).stem().string());
+        say("imported " + fs::path(path).filename().string() + ": " + std::to_string(blocks) + " blocks, 0.1 m each");
+        return true;
+    };
+
+    // Importing: a model from anywhere is copied into assets/models/ with
+    // the files it refers to (so the project has everything it needs to
+    // ship), and placed. A file already under assets/ is used where it is.
+    auto inside_assets = [&](const fs::path& p) {
+        std::error_code ec;
+        const fs::path rel = fs::relative(fs::weakly_canonical(p, ec), fs::weakly_canonical("assets", ec), ec);
+        return !ec && !rel.empty() && rel.native()[0] != '.';
+    };
+    auto project_relative = [&](const fs::path& p) {
+        std::error_code ec;
+        return fs::relative(fs::weakly_canonical(p, ec), fs::current_path(), ec).generic_string();
+    };
+    // Copies `src` into `dir`, keeping an identical file that's already
+    // there, renaming ("name 2.glb") when a different one is.
+    auto copy_in = [&](const fs::path& src, const fs::path& dir) -> fs::path {
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        fs::path dst = dir / src.filename();
+        for (int n = 2; fs::exists(dst) && !same_file_contents(src, dst); ++n) {
+            dst = dir / (src.stem().string() + " " + std::to_string(n) + src.extension().string());
+        }
+        if (!fs::exists(dst)) fs::copy_file(src, dst, ec);
+        return ec ? fs::path{} : dst;
+    };
+    auto import_model = [&](const fs::path& src, int& missing) -> std::string {
+        missing = 0;
+        if (inside_assets(src)) return project_relative(src);
+        const std::string ext = lower(src.extension().string());
+        if (ext == ".glb") { // everything's inside
+            const fs::path dst = copy_in(src, fs::path("assets") / "models");
+            return dst.empty() ? std::string() : dst.generic_string();
+        }
+        // .gltf and .obj refer to other files by relative path: they get a
+        // folder of their own, laid out the same way.
+        fs::path dir = fs::path("assets") / "models" / src.stem();
+        for (int n = 2; fs::exists(dir / src.filename()) && !same_file_contents(src, dir / src.filename()); ++n) {
+            dir = fs::path("assets") / "models" / (src.stem().string() + " " + std::to_string(n));
+        }
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        for (const std::string& dep : model_dependencies(src)) {
+            const fs::path from = src.parent_path() / dep;
+            const fs::path to = dir / dep;
+            if (!fs::exists(from) || fs::path(dep).is_absolute() || dep.find("..") != std::string::npos) {
+                ++missing;
+                continue;
+            }
+            fs::create_directories(to.parent_path(), ec);
+            if (!fs::exists(to)) fs::copy_file(from, to, ec);
+        }
+        if (!fs::exists(dir / src.filename())) fs::copy_file(src, dir / src.filename(), ec);
+        if (ec) return {};
+        return (dir / src.filename()).generic_string();
+    };
+    // Anything dropped on the window or typed into Import.
+    auto import_path = [&](std::string raw) {
+        while (!raw.empty() && (raw.back() == ' ' || raw.back() == '\n' || raw.back() == '\r' || raw.back() == '"' || raw.back() == '\'')) raw.pop_back();
+        while (!raw.empty() && (raw.front() == ' ' || raw.front() == '"' || raw.front() == '\'')) raw.erase(0, 1);
+        if (raw.rfind("file://", 0) == 0) raw = uri_decode(raw.substr(7));
+        const fs::path src(raw);
+        std::error_code ec;
+        if (raw.empty() || !fs::is_regular_file(src, ec)) {
+            say("no file at " + raw);
+            return false;
+        }
+        const std::string name = lower(src.filename().string());
+        const std::string ext = lower(src.extension().string());
+        if (ext == ".vox") return import_vox(src.string());
+        if (ext == ".glb" || ext == ".gltf" || ext == ".obj") {
+            int missing = 0;
+            const std::string path = import_model(src, missing);
+            if (path.empty()) {
+                say("couldn't copy " + src.filename().string() + " into assets/models/");
+                return false;
+            }
+            rescan();
+            add_model(path);
+            say(missing == 0 ? "added " + path
+                             : "added " + path + ", but " + std::to_string(missing) + " file(s) it refers to weren't found or are outside its folder");
+            return true;
+        }
+        if (ext == ".png" || ext == ".jpg" || ext == ".jpeg") {
+            const fs::path dst = inside_assets(src) ? src : copy_in(src, fs::path("assets") / "textures");
+            rescan();
+            say(dst.empty() ? "couldn't copy " + src.filename().string() : "copied to " + project_relative(dst) + " (a block object can use it as its texture atlas)");
+            return !dst.empty();
+        }
+        if (name.size() > 11 && name.compare(name.size() - 11, 11, ".scene.json") == 0) {
+            const std::string path = inside_assets(src) ? project_relative(src) : src.string();
+            unless_unsaved("open " + src.filename().string(), [&, path] { open_file(path); });
+            return true;
+        }
+        say("can't import " + (ext.empty() ? src.filename().string() : ext) + " files (models: .glb .gltf .obj; blocks: .vox; images: .png .jpg)");
+        return false;
+    };
+
     auto delete_selection = [&] {
         if (selection.empty()) return;
         record();
-        std::vector<int> doomed = selection;
-        std::sort(doomed.begin(), doomed.end(), std::greater<int>());
-        for (int i : doomed) {
-            if (i < static_cast<int>(scene.entities.size())) scene.remove(i); // (a child may already be gone with its parent)
-        }
+        scene.remove(selection); // all at once: removing one shifts the indices after it
         selection.clear();
     };
     auto duplicate_selection = [&] {
@@ -485,6 +818,7 @@ int main(int argc, char** argv) {
         std::function<void(int, int)> copy = [&](int src, int parent) {
             SceneEntity e = scene.entities[static_cast<size_t>(src)];
             e.name = unique_name(e.name);
+            if (e.voxels) e.voxels = std::make_shared<VoxelWorld>(e.voxels->copy()); // its own blocks, not shared
             const int kept_parent = e.parent;
             e.parent = parent == -2 ? kept_parent : parent;
             const int dst = scene.add(e);
@@ -531,19 +865,21 @@ int main(int argc, char** argv) {
     std::string typed_id, typed_text;
     double last_click = 0.0;
     std::string last_click_id;
-    enum class Popup { None, Open, Add, AddModel, SaveAs, Context, ChangeModel, Confirm } popup = Popup::None;
-    vec2 popup_at{};
-    int context_entity = -1;
-    // New/Open with unsaved changes asks first: they clear the undo history,
-    // so there'd be no getting the changes back.
-    std::string confirm_text;
-    std::function<void()> confirm_action;
-    auto unless_unsaved = [&](const std::string& what, std::function<void()> action) {
-        if (!dirty) return action();
-        confirm_text = what;
-        confirm_action = std::move(action);
-        popup = Popup::Confirm;
-    };
+    // Block mode: tools, and the stroke in progress (what every block it
+    // changed was before, for its one undo step; the layer it stays in).
+    enum class BlockTool { Add, Erase, Paint } block_tool = BlockTool::Add;
+    bool block_box = false, brush_sphere = false;
+    int brush = 1;
+    BlockId current_block = 1;
+    bool stroking = false;
+    std::shared_ptr<VoxelWorld> stroke_world;
+    std::map<std::tuple<int, int, int>, BlockId> stroke_before;
+    int lock_axis = -1, lock_layer = 0;
+    ivec3 box_a{}, box_b{}, box_normal{0, 1, 0}, last_cell{};
+    bool have_last = false;
+    float palette_scroll = 0.0f;
+    bool type_edit_open = false; // a block type's edit already has its undo step
+    std::unordered_map<std::string, Texture> swatch_atlases; // for drawing textured types' tiles in the palette
     int outliner_drag = -1;
     vec2 outliner_press{};
     bool outliner_dragging = false;
@@ -563,6 +899,19 @@ int main(int argc, char** argv) {
         const bool ctrl = f.key_down(Key::LeftControl) || f.key_down(Key::RightControl) || f.key_down(Key::LeftSuper);
         const bool shift = f.key_down(Key::LeftShift) || f.key_down(Key::RightShift);
         const bool alt = f.key_down(Key::LeftAlt) || f.key_down(Key::RightAlt);
+        // Files dropped on the window: imported, side by side.
+        if (!f.dropped_files().empty()) {
+            float offset = 0.0f;
+            for (const std::string& path : f.dropped_files()) {
+                const size_t before = scene.entities.size();
+                if (import_path(path) && scene.entities.size() > before) {
+                    const int e = static_cast<int>(scene.entities.size()) - 1;
+                    scene.entities.back().transform.position.x += offset;
+                    const Bounds b = scene.local_bounds(e);
+                    offset += (b.valid() ? b.size().x * scene.entities.back().transform.scale.x : 1.0f) + 0.5f;
+                }
+            }
+        }
         const bool typing = !text_field.empty();
         const bool popup_open = popup != Popup::None;
         const bool over_view = view.contains(m) && !popup_open;
@@ -614,13 +963,25 @@ int main(int argc, char** argv) {
         camera.near_z = std::max(0.02f, distance * 0.005f);
         camera.far_z = std::max(500.0f, distance * 20.0f);
 
+        scene.place_voxels(); // raycasts below need them where the transforms (and gizmo drags) put them
+        sync_atlases();
+        SceneEntity* blocks_ent = nullptr; // the block object being edited, in block mode
+        if (block_mode) {
+            if (selection.size() == 1 && scene.entities[static_cast<size_t>(selection[0])].kind == SceneEntity::Kind::Voxels &&
+                scene.entities[static_cast<size_t>(selection[0])].voxels) {
+                blocks_ent = &scene.entities[static_cast<size_t>(selection[0])];
+            } else {
+                block_mode = false;
+            }
+        }
+
         // ------------------------------------------------------ gizmo geometry
         const std::vector<int> roots = selection_roots();
         vec3 pivot{};
         for (int i : roots) pivot = pivot + scene.world_transform(i).position;
         if (!roots.empty()) pivot = pivot / static_cast<float>(roots.size());
         vec2 pivot_s{};
-        const bool gizmo_visible = !roots.empty() && camera.world_to_screen(pivot, view, pivot_s);
+        const bool gizmo_visible = !block_mode && !roots.empty() && camera.world_to_screen(pivot, view, pivot_s);
         const float gizmo_len = length(camera.position - pivot) * 0.17f;
         // Move and rotate go along the world's axes; scale along the object's
         // own (a single selection's), since that's what scale means.
@@ -686,7 +1047,7 @@ int main(int argc, char** argv) {
 
         // ------------------------------------------------------ viewport clicks
         hot_handle = active_handle != None ? active_handle : (over_view && !flying && !alt ? handle_under(m) : None);
-        if (left_pressed && over_view && !flying && !alt && !typing) {
+        if (left_pressed && over_view && !flying && !alt && !typing && !block_mode) {
             if (hot_handle != None) {
                 // Start dragging a gizmo handle.
                 active_handle = hot_handle;
@@ -719,6 +1080,10 @@ int main(int argc, char** argv) {
                     float hit_d = length(t.matrix().transform_point(box_hit.point) - ray.origin);
                     if (scene.entities[i].kind == SceneEntity::Kind::Model) { // exact, once the box says maybe
                         const RaycastHit exact = raycast(ray, scene.model(e), t);
+                        if (!exact) continue;
+                        hit_d = exact.distance;
+                    } else if (scene.entities[i].kind == SceneEntity::Kind::Voxels && scene.entities[i].voxels) {
+                        const VoxelWorld::Hit exact = scene.entities[i].voxels->raycast(ray, 5000.0f);
                         if (!exact) continue;
                         hit_d = exact.distance;
                     }
@@ -792,26 +1157,181 @@ int main(int argc, char** argv) {
                             (active_handle == AxisX ? k.x : active_handle == AxisY ? k.y : k.z) = s;
                             t.scale = {start.scale.x * k.x, start.scale.y * k.y, start.scale.z * k.z};
                         }
+                        if (scene.entities[static_cast<size_t>(i)].kind == SceneEntity::Kind::Voxels) t.scale = start.scale; // sized by their block size
                     }
                     scene.set_world_transform(i, t);
                 }
             }
         }
 
+        // ------------------------------------------------------ block mode
+        // Where the tool would act: the block under the cursor (Erase,
+        // Paint) or the empty cell in front of its face (Add). Past the
+        // blocks, the object's floor counts as a surface, so an empty object
+        // can be started. A stroke stays in the layer it started in, so
+        // dragging draws a floor or a wall instead of stacking blocks toward
+        // the camera (or digging a pit, erasing).
+        bool op_ok = false, on_block = false;
+        ivec3 op_cell{}, op_normal{0, 1, 0};
+        BlockId under_id = 0;
+        if (blocks_ent && over_view && !flying && !alt) {
+            VoxelWorld& w = *blocks_ent->voxels;
+            const Ray ray = camera.screen_ray(m, view);
+            if (stroking && lock_axis >= 0) {
+                const quat inv = w.rotation.inverse();
+                const vec3 o = (inv * (ray.origin - w.origin)) / w.voxel_size;
+                const vec3 dir = inv * ray.direction;
+                const float oa = lock_axis == 0 ? o.x : lock_axis == 1 ? o.y : o.z;
+                const float da = lock_axis == 0 ? dir.x : lock_axis == 1 ? dir.y : dir.z;
+                if (std::fabs(da) > 1e-5f) {
+                    const float t = (lock_layer + 0.5f - oa) / da;
+                    if (t > 0.0f) {
+                        const vec3 hp = o + dir * t;
+                        op_cell = {static_cast<int>(std::floor(hp.x)), static_cast<int>(std::floor(hp.y)), static_cast<int>(std::floor(hp.z))};
+                        (lock_axis == 0 ? op_cell.x : lock_axis == 1 ? op_cell.y : op_cell.z) = lock_layer;
+                        op_ok = true;
+                        op_normal = box_normal;
+                    }
+                }
+            } else if (const VoxelWorld::Hit h = w.raycast(ray, 5000.0f)) {
+                on_block = true;
+                under_id = h.id;
+                op_normal = h.normal;
+                op_cell = block_tool == BlockTool::Add ? h.block + h.normal : h.block;
+                op_ok = true;
+            } else if (block_tool == BlockTool::Add) {
+                const vec3 up = w.rotation * vec3{0, 1, 0};
+                if (const RaycastHit ph = raycast_plane(ray, w.origin, up)) {
+                    const ivec3 c = w.to_block(ph.point + up * (w.voxel_size * 0.5f));
+                    op_cell = {c.x, 0, c.z};
+                    op_ok = true;
+                }
+            }
+        }
+        auto apply_cell = [&](VoxelWorld& w, ivec3 c) {
+            const BlockId now = w.get(c);
+            BlockId want = now;
+            if (block_tool == BlockTool::Add) want = now == 0 ? current_block : now;
+            else if (block_tool == BlockTool::Erase) want = 0;
+            else if (now != 0) want = current_block;
+            if (want == now) return;
+            stroke_before.emplace(std::make_tuple(c.x, c.y, c.z), now); // keeps the first "before"
+            w.set(c, want);
+        };
+        // The cells a brush of `brush` blocks covers around `center`.
+        auto brush_range = [&](ivec3 center, ivec3& lo, ivec3& hi) {
+            const int r0 = -(brush - 1) / 2, r1 = brush / 2;
+            lo = center + ivec3{r0, r0, r0};
+            hi = center + ivec3{r1, r1, r1};
+        };
+        auto apply_brush = [&](VoxelWorld& w, ivec3 center) {
+            ivec3 lo, hi;
+            brush_range(center, lo, hi);
+            const vec3 mid = vec3{lo.x + hi.x + 1.0f, lo.y + hi.y + 1.0f, lo.z + hi.z + 1.0f} * 0.5f;
+            const float r2 = brush * brush * 0.25f + 0.01f;
+            for (int z = lo.z; z <= hi.z; ++z)
+                for (int y = lo.y; y <= hi.y; ++y)
+                    for (int x = lo.x; x <= hi.x; ++x) {
+                        const vec3 dc = vec3{x + 0.5f, y + 0.5f, z + 0.5f} - mid;
+                        if (brush_sphere && dot(dc, dc) > r2) continue;
+                        apply_cell(w, {x, y, z});
+                    }
+        };
+        // The box tool's cells: the rectangle between the corners, `brush`
+        // blocks thick, outward from the surface when adding, into it otherwise.
+        auto box_range = [&](ivec3& lo, ivec3& hi) {
+            lo = {std::min(box_a.x, box_b.x), std::min(box_a.y, box_b.y), std::min(box_a.z, box_b.z)};
+            hi = {std::max(box_a.x, box_b.x), std::max(box_a.y, box_b.y), std::max(box_a.z, box_b.z)};
+            const ivec3 cap{255, 255, 255};
+            hi = {std::min(hi.x, lo.x + cap.x), std::min(hi.y, lo.y + cap.y), std::min(hi.z, lo.z + cap.z)};
+            const ivec3 n = block_tool == BlockTool::Add ? box_normal : ivec3{-box_normal.x, -box_normal.y, -box_normal.z};
+            const int extra = brush - 1;
+            if (n.x > 0) hi.x += extra; else if (n.x < 0) lo.x -= extra;
+            if (n.y > 0) hi.y += extra; else if (n.y < 0) lo.y -= extra;
+            if (n.z > 0) hi.z += extra; else if (n.z < 0) lo.z -= extra;
+        };
+        if (blocks_ent && left_pressed && over_view && !flying && !alt && !typing) {
+            if (shift) { // eyedropper
+                if (on_block && under_id != 0) {
+                    current_block = under_id;
+                    say("picked " + blocks_ent->voxels->block_type(under_id).name);
+                }
+            } else if (op_ok) {
+                stroking = true;
+                stroke_world = blocks_ent->voxels;
+                stroke_before.clear();
+                box_normal = op_normal;
+                lock_axis = op_normal.x != 0 ? 0 : op_normal.y != 0 ? 1 : 2;
+                lock_layer = lock_axis == 0 ? op_cell.x : lock_axis == 1 ? op_cell.y : op_cell.z;
+                box_a = box_b = last_cell = op_cell;
+                have_last = true;
+                if (!block_box) apply_brush(*stroke_world, op_cell);
+            }
+        }
+        if (stroking) {
+            if (op_ok && have_last && !(op_cell == last_cell)) {
+                if (block_box) {
+                    box_b = op_cell;
+                } else {
+                    // Fill in between, so a fast drag leaves a line, not dots.
+                    const ivec3 dlt = op_cell - last_cell;
+                    const int steps = std::max({std::abs(dlt.x), std::abs(dlt.y), std::abs(dlt.z)});
+                    for (int k = 1; k <= steps; ++k) {
+                        const float t = static_cast<float>(k) / steps;
+                        apply_brush(*stroke_world, {last_cell.x + static_cast<int>(std::lround(dlt.x * t)), last_cell.y + static_cast<int>(std::lround(dlt.y * t)),
+                                                    last_cell.z + static_cast<int>(std::lround(dlt.z * t))});
+                    }
+                }
+                last_cell = op_cell;
+            }
+            if (!left_down) {
+                if (block_box) {
+                    ivec3 lo, hi;
+                    box_range(lo, hi);
+                    for (int z = lo.z; z <= hi.z; ++z)
+                        for (int y = lo.y; y <= hi.y; ++y)
+                            for (int x = lo.x; x <= hi.x; ++x) apply_cell(*stroke_world, {x, y, z});
+                }
+                if (!stroke_before.empty()) {
+                    UndoStep step;
+                    step.world = stroke_world;
+                    for (const auto& [key, before] : stroke_before) step.blocks.push_back({{std::get<0>(key), std::get<1>(key), std::get<2>(key)}, before});
+                    push_undo(std::move(step));
+                }
+                stroking = false;
+                lock_axis = -1;
+                have_last = false;
+                stroke_world.reset();
+                stroke_before.clear();
+            }
+        }
+
         // ------------------------------------------------------ shortcuts
         if (!typing && !flying) {
+            if (block_mode && !ctrl && !alt) {
+                if (f.key_pressed(Key::Num1)) block_tool = BlockTool::Add;
+                if (f.key_pressed(Key::Num2)) block_tool = BlockTool::Erase;
+                if (f.key_pressed(Key::Num3)) block_tool = BlockTool::Paint;
+                if (f.key_pressed(Key::B)) block_box = !block_box;
+                if (f.key_pressed(Key::LeftBracket)) brush = std::max(1, brush - 1);
+                if (f.key_pressed(Key::RightBracket)) brush = std::min(16, brush + 1);
+            }
+            if (!ctrl && !alt && f.key_pressed(Key::Tab) && !popup_open) {
+                if (block_mode) block_mode = false;
+                else if (selection.size() == 1 && scene.entities[static_cast<size_t>(selection[0])].kind == SceneEntity::Kind::Voxels) block_mode = true;
+            }
             if (!ctrl && !alt) {
                 if (f.key_pressed(Key::W)) tool = Tool::Move;
                 if (f.key_pressed(Key::E)) tool = Tool::Rotate;
                 if (f.key_pressed(Key::R)) tool = Tool::Scale;
                 if (f.key_pressed(Key::F)) frame_selection();
-                if (f.key_pressed(Key::Delete) || f.key_pressed(Key::X) || f.key_pressed(Key::Backspace)) delete_selection();
+                if (!block_mode && (f.key_pressed(Key::Delete) || f.key_pressed(Key::X) || f.key_pressed(Key::Backspace))) delete_selection();
                 if (shift && f.key_pressed(Key::A)) { popup = Popup::Add; popup_at = m; }
             }
             if (ctrl) {
                 if (f.key_pressed(Key::Z)) { if (shift) redo(); else undo(); }
                 if (f.key_pressed(Key::Y)) redo();
-                if (f.key_pressed(Key::D)) duplicate_selection();
+                if (f.key_pressed(Key::D) && !block_mode) duplicate_selection();
                 if (f.key_pressed(Key::A)) {
                     selection.clear();
                     for (size_t i = 0; i < scene.entities.size(); ++i) selection.push_back(static_cast<int>(i));
@@ -825,6 +1345,7 @@ int main(int argc, char** argv) {
             }
             if (f.key_pressed(Key::Escape)) {
                 if (popup_open) popup = Popup::None;
+                else if (block_mode) block_mode = false;
                 else selection.clear();
             }
         }
@@ -872,6 +1393,27 @@ int main(int argc, char** argv) {
                 const Bounds lb = scene.local_bounds(static_cast<int>(i));
                 world.wire_box(Transform{t.apply(lb.center()), t.rotation, {lb.size().x * t.scale.x, lb.size().y * t.scale.y, lb.size().z * t.scale.z}},
                                theme::accent, true);
+            }
+        }
+        if (blocks_ent) {
+            const VoxelWorld& w = *blocks_ent->voxels;
+            auto cells_box = [&](ivec3 lo, ivec3 hi, rgba c) {
+                const vec3 a{static_cast<float>(lo.x), static_cast<float>(lo.y), static_cast<float>(lo.z)};
+                const vec3 b{hi.x + 1.0f, hi.y + 1.0f, hi.z + 1.0f};
+                world.wire_box(Transform{w.origin + w.rotation * ((a + b) * (0.5f * w.voxel_size)), w.rotation, (b - a) * w.voxel_size}, c, true);
+            };
+            const rgba tool_color = block_tool == BlockTool::Add ? rgba{1, 1, 1, 0.9f}
+                                    : block_tool == BlockTool::Erase ? rgba{1.0f, 0.3f, 0.3f, 0.9f}
+                                                                     : w.block_type(current_block).color;
+            if (stroking && block_box) {
+                ivec3 lo, hi;
+                box_range(lo, hi);
+                cells_box(lo, hi, tool_color);
+            } else if (op_ok) {
+                ivec3 lo, hi;
+                if (block_box) lo = hi = op_cell;
+                else brush_range(op_cell, lo, hi);
+                cells_box(lo, hi, tool_color);
             }
         }
         world.render(f, camera, view);
@@ -929,11 +1471,13 @@ int main(int argc, char** argv) {
         };
         auto label = [&](const std::string& t, vec2 p, rgba c = theme::dim, float size = 13.0f) { f.text(t, p, {.size = size, .color = c}); };
         // A number: drag left/right to change, double-click to type.
-        auto number = [&](const std::string& id, Rect r, float& v, float speed, int decimals = 2, rgba tint = theme::field) {
+        // undoable = false: the caller makes its own undo step (block types
+        // live in a shared VoxelWorld, which a scene snapshot doesn't copy).
+        auto number = [&](const std::string& id, Rect r, float& v, float speed, int decimals = 2, rgba tint = theme::field, bool undoable = true) {
             const bool hover = r.contains(m) && !popup_open;
             const bool is_text = text_field == id;
             if (typed_id == id) {
-                record();
+                if (undoable) record();
                 v = parse_float(typed_text, v);
                 typed_id.clear();
             }
@@ -946,7 +1490,7 @@ int main(int argc, char** argv) {
             if (left_pressed && hover && !typing) {
                 if (last_click_id == id && now_seconds() - last_click < 0.35) { // double-click: type a value
                     text_field = id;
-                    begin_text_input(fmt(v, decimals));
+                    begin_text_input(fmt(v, decimals), 64);
                     text_commit = [&, id](const std::string& s) {
                         typed_id = id;
                         typed_text = s;
@@ -957,18 +1501,18 @@ int main(int argc, char** argv) {
                 last_click_id = id;
                 last_click = now_seconds();
                 active_field = id;
-                begin_edit();
+                if (undoable) begin_edit();
             }
             if (active_field == id) {
                 if (!left_down) {
                     active_field.clear();
-                    end_edit();
+                    if (undoable) end_edit();
                 } else if (d.x != 0.0f) {
                     v += d.x * speed * (shift ? 0.1f : 1.0f);
                 }
             }
         };
-        auto text_box = [&](const std::string& id, Rect r, const std::string& value, std::function<void(const std::string&)> commit) {
+        auto text_box = [&](const std::string& id, Rect r, const std::string& value, std::function<void(const std::string&)> commit, bool undoable = true) {
             const bool is_text = text_field == id;
             const bool hover = r.contains(m) && !popup_open;
             if (is_text) text_rect = r;
@@ -980,29 +1524,29 @@ int main(int argc, char** argv) {
             f.text(shown, {r.pos.x + 6, r.pos.y + (r.size.y - size) * 0.5f - 1}, {.size = size, .color = theme::text});
             if (!is_text && left_pressed && hover && !typing) {
                 text_field = id;
-                begin_text_input(value);
-                text_commit = [&, commit](const std::string& s) {
-                    record();
+                begin_text_input(value, 256);
+                text_commit = [&, commit, undoable](const std::string& s) {
+                    if (undoable) record();
                     commit(s);
                 };
             }
         };
-        auto color_row = [&](const std::string& id, float x, float y, float w, rgba& c) {
+        auto color_row = [&](const std::string& id, float x, float y, float w, rgba& c, bool undoable = true) {
             f.rect({x, y}, {22, 22}, rgba{c.r, c.g, c.b, 1.0f});
             const float fw = (w - 30) / 3.0f;
-            number(id + ".r", Rect{{x + 28, y}, {fw - 3, 22}}, c.r, 0.004f, 2, rgb(0.30f, 0.20f, 0.20f));
-            number(id + ".g", Rect{{x + 28 + fw, y}, {fw - 3, 22}}, c.g, 0.004f, 2, rgb(0.20f, 0.28f, 0.20f));
-            number(id + ".b", Rect{{x + 28 + fw * 2, y}, {fw - 3, 22}}, c.b, 0.004f, 2, rgb(0.20f, 0.22f, 0.32f));
+            number(id + ".r", Rect{{x + 28, y}, {fw - 3, 22}}, c.r, 0.004f, 2, rgb(0.30f, 0.20f, 0.20f), undoable);
+            number(id + ".g", Rect{{x + 28 + fw, y}, {fw - 3, 22}}, c.g, 0.004f, 2, rgb(0.20f, 0.28f, 0.20f), undoable);
+            number(id + ".b", Rect{{x + 28 + fw * 2, y}, {fw - 3, 22}}, c.b, 0.004f, 2, rgb(0.20f, 0.22f, 0.32f), undoable);
             c.r = std::clamp(c.r, 0.0f, 1.0f);
             c.g = std::clamp(c.g, 0.0f, 1.0f);
             c.b = std::clamp(c.b, 0.0f, 1.0f);
         };
 
         // Text entry: Enter commits, Escape cancels, clicking outside the field
-        // commits (except Save as, which only saves on Enter). text_rect is
+        // commits (except Save as and Import, which only act on Enter). text_rect is
         // from last frame's drawing, which is where the user clicked.
         if (typing) {
-            const bool clicked_away = left_pressed && !text_rect.contains(m) && text_field != "#saveas";
+            const bool clicked_away = left_pressed && !text_rect.contains(m) && text_field != "#saveas" && text_field != "#import";
             if (f.key_pressed(Key::Enter) || f.key_pressed(Key::KeypadEnter) || clicked_away) {
                 const std::string v = text_input();
                 end_text_input();
@@ -1039,6 +1583,7 @@ int main(int argc, char** argv) {
         if (top_button("Scale (R)", 86, tool == Tool::Scale)) tool = Tool::Scale;
         x += 14;
         if (top_button("+ Add", 70)) { rescan(); popup = Popup::Add; popup_at = {x - 74, TOP}; }
+        if (top_button("Import", 70)) popup = Popup::Import;
         {
             const std::string name = (file_path.empty() ? std::string("untitled") : fs::path(file_path).filename().string()) + (dirty ? " *" : "");
             const vec2 tsz = f.measure_text(name, {.size = 15});
@@ -1168,7 +1713,171 @@ int main(int argc, char** argv) {
             number(id, Rect{{px + 110, y}, {pw - 110, 22}}, v, speed, decimals);
             y += 28;
         };
-        if (selection.size() == 1) {
+        if (blocks_ent) {
+            VoxelWorld& w = *blocks_ent->voxels;
+            const std::shared_ptr<VoxelWorld> wp = blocks_ent->voxels;
+            label("Blocks: " + blocks_ent->name, {px, y}, theme::accent, 14);
+            if (button("Done (Tab)", Rect{{px + pw - 90, y - 4}, {90, 24}}, false, 12)) block_mode = false;
+            y += 28;
+            const float bw = (pw - 8) / 3.0f;
+            if (button("Add (1)", Rect{{px, y}, {bw, 26}}, block_tool == BlockTool::Add, 12)) block_tool = BlockTool::Add;
+            if (button("Erase (2)", Rect{{px + bw + 4, y}, {bw, 26}}, block_tool == BlockTool::Erase, 12)) block_tool = BlockTool::Erase;
+            if (button("Paint (3)", Rect{{px + 2 * (bw + 4), y}, {bw, 26}}, block_tool == BlockTool::Paint, 12)) block_tool = BlockTool::Paint;
+            y += 32;
+            if (button(block_box ? "Box (B): on" : "Box (B): off", Rect{{px, y}, {bw, 24}}, block_box, 12)) block_box = !block_box;
+            label("Brush", {px + bw + 10, y + 5}, theme::dim, 12);
+            if (button("-", Rect{{px + bw + 52, y}, {24, 24}}, false, 14)) brush = std::max(1, brush - 1);
+            label(std::to_string(brush), {px + bw + 84, y + 4}, theme::text, 13);
+            if (button("+", Rect{{px + bw + 104, y}, {24, 24}}, false, 14)) brush = std::min(16, brush + 1);
+            if (button(brush_sphere ? "Round" : "Square", Rect{{px + pw - 62, y}, {62, 24}}, false, 12)) brush_sphere = !brush_sphere;
+            y += 30;
+            label(block_box ? "Drag from corner to corner; the brush size is its depth." : "Click or drag. Shift+click a block to pick its type.", {px, y}, theme::faint, 11);
+            y += 20;
+
+            heading("Block types");
+            const int count = w.block_type_count();
+            if (current_block < 1 || current_block > count) current_block = count > 0 ? 1 : 0;
+            const float sw = 27.0f;
+            const int per_row = static_cast<int>(pw / sw);
+            const int rows = (count + per_row - 1) / per_row;
+            const float area_h = std::min(rows * sw, sw * 5);
+            const Rect area{{px, y}, {pw, area_h}};
+            if (area.contains(m) && f.mouse_scroll() != 0.0f) palette_scroll -= f.mouse_scroll() * 20.0f;
+            palette_scroll = std::clamp(palette_scroll, 0.0f, std::max(0.0f, rows * sw - area_h));
+            std::string hover_name;
+            Texture atlas_tex;
+            if (!blocks_ent->atlas.empty()) {
+                auto it = swatch_atlases.find(blocks_ent->atlas);
+                if (it == swatch_atlases.end()) it = swatch_atlases.emplace(blocks_ent->atlas, load_texture(blocks_ent->atlas)).first;
+                atlas_tex = it->second;
+            }
+            const int tile_px = std::max(1, blocks_ent->atlas_tile);
+            const int tiles_across = atlas_tex.valid() ? std::max(1, atlas_tex.width / tile_px) : 1;
+            for (int id = 1; id <= count; ++id) {
+                const int k = id - 1;
+                const float sx = px + (k % per_row) * sw, sy = y + (k / per_row) * sw - palette_scroll;
+                if (sy < y - 1 || sy + sw - 3 > y + area_h + 1) continue;
+                const BlockType& bt = w.block_type(static_cast<BlockId>(id));
+                const Rect r{{sx, sy}, {sw - 3, sw - 3}};
+                if (id == current_block) f.rect(r.pos - vec2{2, 2}, r.size + vec2{4, 4}, theme::accent);
+                const int tile = bt.tile_side >= 0 ? bt.tile_side : bt.tile_top;
+                if (atlas_tex.valid() && tile >= 0) {
+                    SpriteOpts so;
+                    so.size = r.size;
+                    so.tint = rgba{bt.color.r, bt.color.g, bt.color.b, 1.0f};
+                    so.src = Rect{{static_cast<float>((tile % tiles_across) * tile_px), static_cast<float>((tile / tiles_across) * tile_px)},
+                                  {static_cast<float>(tile_px), static_cast<float>(tile_px)}};
+                    f.sprite(atlas_tex, r.pos, so);
+                } else {
+                    f.rect(r.pos, r.size, rgba{bt.color.r, bt.color.g, bt.color.b, 1.0f});
+                }
+                if (bt.alpha == AlphaMode::Blend) f.rect(r.pos + vec2{r.size.x * 0.5f, 0}, {r.size.x * 0.5f, r.size.y * 0.5f}, rgba{1, 1, 1, 0.35f});
+                if (r.contains(m) && !popup_open) {
+                    hover_name = bt.name;
+                    if (left_pressed && !typing) current_block = static_cast<BlockId>(id);
+                }
+            }
+            y += area_h + 6;
+            label(hover_name.empty() ? (current_block > 0 ? w.block_type(current_block).name : "") : hover_name, {px, y}, hover_name.empty() ? theme::text : theme::dim, 12);
+            if (button("+ type", Rect{{px + pw - 70, y - 4}, {70, 22}}, false, 12)) {
+                const float hue = std::fmod(count * 0.618f, 1.0f); // spread new colors around
+                const vec3 c = {0.5f + 0.4f * std::cos(6.2832f * hue), 0.5f + 0.4f * std::cos(6.2832f * (hue - 0.333f)), 0.5f + 0.4f * std::cos(6.2832f * (hue - 0.667f))};
+                current_block = w.add_block({.name = "block " + std::to_string(count + 1), .color = rgb(c.x, c.y, c.z)});
+                dirty = true;
+            }
+            y += 24;
+            if (current_block > 0) {
+                // The chosen type. Its edits go straight into the (shared)
+                // world, with one undo step per drag or click.
+                BlockType t = w.block_type(current_block);
+                const BlockType before = t;
+                const BlockId cb = current_block;
+                label("Name", {px, y + 4}, theme::dim, 12);
+                text_box("blockname", Rect{{px + 62, y}, {pw - 62, 22}}, t.name, [&, wp, cb](const std::string& v) {
+                    BlockType named = wp->block_type(cb);
+                    UndoStep step;
+                    step.world = wp;
+                    step.types = {{cb, named}};
+                    push_undo(std::move(step));
+                    named.name = v;
+                    wp->set_block_type(cb, named);
+                }, false);
+                y += 28;
+                label("Color", {px, y + 4}, theme::dim, 12);
+                color_row("blockcolor", px + 62, y, pw - 62, t.color, false);
+                y += 28;
+                const float tw = (pw - 8) / 3.0f;
+                const bool clear = t.alpha == AlphaMode::Blend, glows = t.emissive.r + t.emissive.g + t.emissive.b > 0.0f;
+                if (button("See-through", Rect{{px, y}, {tw, 22}}, clear, 11)) {
+                    t.alpha = clear ? AlphaMode::Opaque : AlphaMode::Blend;
+                    t.color.a = clear ? 1.0f : 0.45f;
+                }
+                if (button("Glows", Rect{{px + tw + 4, y}, {tw, 22}}, glows, 11)) t.emissive = glows ? black : rgba{t.color.r, t.color.g, t.color.b, 1.0f};
+                if (button("Solid", Rect{{px + 2 * (tw + 4), y}, {tw, 22}}, t.solid, 11)) t.solid = !t.solid;
+                y += 28;
+                if (!blocks_ent->atlas.empty()) {
+                    label("Tiles", {px, y + 4}, theme::dim, 12);
+                    float tt = static_cast<float>(t.tile_top), ts = static_cast<float>(t.tile_side), tb = static_cast<float>(t.tile_bottom);
+                    const float fw = (pw - 62) / 3.0f;
+                    number("tile.top", Rect{{px + 62, y}, {fw - 3, 22}}, tt, 0.05f, 0, theme::field, false);
+                    number("tile.side", Rect{{px + 62 + fw, y}, {fw - 3, 22}}, ts, 0.05f, 0, theme::field, false);
+                    number("tile.bottom", Rect{{px + 62 + fw * 2, y}, {fw - 3, 22}}, tb, 0.05f, 0, theme::field, false);
+                    t.tile_top = std::max(-1, static_cast<int>(std::lround(tt)));
+                    t.tile_side = std::max(-1, static_cast<int>(std::lround(ts)));
+                    t.tile_bottom = std::max(-1, static_cast<int>(std::lround(tb)));
+                    y += 18;
+                    label("top / side / bottom tile (-1: plain color)", {px + 62, y + 6}, theme::faint, 10);
+                    y += 22;
+                }
+                const bool changed = t.name != before.name || t.alpha != before.alpha || t.solid != before.solid || t.tile_top != before.tile_top ||
+                                     t.tile_side != before.tile_side || t.tile_bottom != before.tile_bottom ||
+                                     std::memcmp(&t.color, &before.color, sizeof(rgba)) != 0 || std::memcmp(&t.emissive, &before.emissive, sizeof(rgba)) != 0;
+                if (changed) {
+                    if (!type_edit_open) {
+                        UndoStep step;
+                        step.world = wp;
+                        step.types = {{cb, before}};
+                        push_undo(std::move(step));
+                        type_edit_open = true;
+                    }
+                    w.set_block_type(cb, t);
+                }
+            }
+            if (!left_down && !typing) type_edit_open = false;
+
+            heading("Object");
+            label("Block size", {px, y + 4}, theme::dim, 12);
+            {
+                const float sizes[] = {0.1f, 0.25f, 0.5f, 1.0f};
+                const float qw = (pw - 70 - 12) / 4.0f;
+                for (int k = 0; k < 4; ++k) {
+                    const bool on = std::fabs(w.voxel_size - sizes[k]) < 1e-4f;
+                    char txt[16];
+                    std::snprintf(txt, sizeof txt, "%g m", static_cast<double>(sizes[k]));
+                    if (button(txt, Rect{{px + 70 + k * (qw + 4), y}, {qw, 22}}, on, 11) && !on) {
+                        UndoStep step;
+                        step.world = wp;
+                        step.voxel_size = w.voxel_size;
+                        push_undo(std::move(step));
+                        w.voxel_size = sizes[k];
+                    }
+                }
+            }
+            y += 28;
+            label("Texture", {px, y + 4}, theme::dim, 12);
+            if (button(blocks_ent->atlas.empty() ? "(plain colors)" : fs::path(blocks_ent->atlas).filename().string(), Rect{{px + 70, y}, {pw - 70, 22}}, false, 11)) {
+                rescan();
+                popup = Popup::Atlas;
+                popup_at = {px - 140, y + 24};
+            }
+            y += 28;
+            if (!blocks_ent->atlas.empty()) {
+                float tile = static_cast<float>(blocks_ent->atlas_tile);
+                float_row("atlas.tile", "Tile size (px)", tile, 0.1f, 0);
+                blocks_ent->atlas_tile = std::clamp(static_cast<int>(std::lround(tile)), 1, 4096);
+            }
+            label(std::to_string(w.block_count()) + " blocks", {px, y + 2}, theme::faint, 12);
+        } else if (selection.size() == 1) {
             const int e = selection[0];
             SceneEntity& ent = scene.entities[static_cast<size_t>(e)];
             label(kind_label(ent.kind), {px, y}, theme::accent, 14);
@@ -1185,9 +1894,15 @@ int main(int argc, char** argv) {
             const vec3 before = deg;
             vec_row("rot", "Rotation", deg, 0.5f, 1);
             if (!(deg == before)) ent.transform.rotation = quat::euler(radians(deg.x), radians(deg.y), radians(deg.z));
-            vec_row("scl", "Scale", ent.transform.scale, 0.01f, 2);
+            if (ent.kind != SceneEntity::Kind::Voxels) vec_row("scl", "Scale", ent.transform.scale, 0.01f, 2);
             y += 6;
-            if (ent.kind != SceneEntity::Kind::Empty) {
+            if (ent.kind == SceneEntity::Kind::Voxels && ent.voxels) {
+                heading("Blocks");
+                label(std::to_string(ent.voxels->block_count()) + " blocks, " + fmt(ent.voxels->voxel_size, 2) + " m each", {px, y}, theme::dim, 12);
+                y += 22;
+                if (button("Edit blocks (Tab)", Rect{{px, y}, {pw, 28}}, false, 13)) block_mode = true;
+                y += 38;
+            } else if (ent.kind != SceneEntity::Kind::Empty) {
                 heading(ent.kind == SceneEntity::Kind::PointLight || ent.kind == SceneEntity::Kind::SpotLight ? "Light" : "Look");
                 label(ent.kind == SceneEntity::Kind::Model ? "Tint" : "Color", {px, y + 4}, theme::dim, 12);
                 color_row("color", px + 62, y, pw - 62, ent.color);
@@ -1306,8 +2021,10 @@ int main(int argc, char** argv) {
 
         // ------------------------------------------------------ status bar
         f.rect({0, H - BOTTOM}, {W, BOTTOM}, theme::chrome);
-        const std::string hints = "Middle-drag orbit  |  Shift+middle pan  |  Wheel zoom  |  Hold right: fly (WASD QE)  |  "
-                                  "F frame  |  W/E/R gizmo (Ctrl snaps)  |  Ctrl+Z/Ctrl+Shift+Z  |  Ctrl+D  |  Del";
+        const std::string hints = block_mode ? "BLOCKS  |  Click/drag: add, erase, paint  |  1/2/3 tool  |  B box  |  [ ] brush size  |  "
+                                               "Shift+click: pick type  |  Ctrl+Z undo  |  Tab done"
+                                             : "Middle-drag orbit  |  Shift+middle pan  |  Wheel zoom  |  Hold right: fly (WASD QE)  |  "
+                                               "F frame  |  W/E/R gizmo (Ctrl snaps)  |  Ctrl+Z/Ctrl+Shift+Z  |  Ctrl+D  |  Del  |  Tab: edit blocks";
         label(hints, {10, H - BOTTOM + 6}, theme::faint, 12);
         if (!status.empty() && now_seconds() - status_time < 5.0) {
             const vec2 ssz = f.measure_text(status, {.size = 13});
@@ -1327,7 +2044,16 @@ int main(int argc, char** argv) {
                 case Popup::Add:
                     title = "Add";
                     items = {"Box", "Sphere", "Cylinder", "Cone", "Plane", "Point light", "Spot light", "Trigger volume", "Spawn point", "Empty (group)",
-                             "Model..."};
+                             "Blocks (voxels)", "Model...", "Voxel model (.vox)..."};
+                    break;
+                case Popup::AddVox:
+                    title = vox_files.empty() ? "No .vox files in assets/" : "MagicaVoxel files in assets/";
+                    items = vox_files;
+                    break;
+                case Popup::Atlas:
+                    title = "Block texture atlas (images in assets/)";
+                    items = {"(plain colors)"};
+                    items.insert(items.end(), image_files.begin(), image_files.end());
                     break;
                 case Popup::AddModel:
                 case Popup::ChangeModel:
@@ -1348,7 +2074,7 @@ int main(int argc, char** argv) {
                 if (text_field != "#saveas") {
                     text_field = "#saveas";
                     const std::string current = fs::path(file_path).filename().string();
-                    begin_text_input(current.substr(0, current.find('.'))); // empty when untitled: the placeholder shows
+                    begin_text_input(current.substr(0, current.find('.')), 128); // empty when untitled: the placeholder shows
                     text_commit = [&](const std::string& s) {
                         std::string name = s.empty() ? "level" : s;
                         if (name.size() < 11 || name.compare(name.size() - 11, 11, ".scene.json") != 0) name += ".scene.json";
@@ -1360,6 +2086,27 @@ int main(int argc, char** argv) {
                 if (text_input().empty()) label("|level  .scene.json", box.pos + vec2{18, 41}, theme::faint, 14);
                 else label(text_input() + "|  .scene.json", box.pos + vec2{18, 41}, theme::text, 14);
                 label("Enter saves, Esc cancels", box.pos + vec2{12, 70}, theme::faint, 12);
+                if (!text_field.empty() && f.key_pressed(Key::Escape)) popup = Popup::None;
+            } else if (popup == Popup::Import) {
+                const Rect box{{W * 0.5f - 260, H * 0.3f}, {520, 118}};
+                f.rect(box.pos - vec2{1, 1}, box.size + vec2{2, 2}, theme::accent);
+                f.rect(box.pos, box.size, theme::chrome);
+                label("Import a file: type or paste its path", box.pos + vec2{12, 10}, theme::text, 14);
+                if (text_field != "#import") {
+                    text_field = "#import";
+                    begin_text_input("", 2048);
+                    text_commit = [&](const std::string& v) {
+                        popup = Popup::None;
+                        import_path(v);
+                    };
+                }
+                f.rect(box.pos + vec2{12, 36}, {496, 26}, theme::field_active);
+                std::string shown = text_input() + "|";
+                const vec2 tsz = f.measure_text(shown, {.size = 14});
+                if (tsz.x > 480) shown = "..." + shown.substr(shown.size() - static_cast<size_t>(shown.size() * 470 / tsz.x) + 3);
+                label(shown, box.pos + vec2{18, 41}, theme::text, 14);
+                label("Models (.glb .gltf .obj) are copied into assets/models/ with their textures.", box.pos + vec2{12, 70}, theme::faint, 12);
+                label(".vox becomes a block object.  Or drag files onto the window.  Enter imports, Esc cancels.", box.pos + vec2{12, 88}, theme::faint, 12);
                 if (!text_field.empty() && f.key_pressed(Key::Escape)) popup = Popup::None;
             } else if (popup == Popup::Confirm) {
                 const Rect box{{W * 0.5f - 190, H * 0.3f}, {380, 112}};
@@ -1413,9 +2160,17 @@ int main(int argc, char** argv) {
                                                            SceneEntity::Kind::SpotLight, SceneEntity::Kind::Trigger, SceneEntity::Kind::Spawn,
                                                            SceneEntity::Kind::Empty};
                         if (chosen < 10) add_kind(kinds[chosen]);
-                        else { popup = Popup::AddModel; popup_at = at; }
+                        else if (chosen == 10) new_block_object();
+                        else if (chosen == 11) { popup = Popup::AddModel; popup_at = at; }
+                        else { popup = Popup::AddVox; popup_at = at; }
                     } else if (was == Popup::AddModel) {
                         add_model(item);
+                    } else if (was == Popup::AddVox) {
+                        import_vox(item);
+                    } else if (was == Popup::Atlas && selection.size() == 1) {
+                        record();
+                        scene.entities[static_cast<size_t>(selection[0])].atlas = chosen == 0 ? std::string() : item;
+                        sync_atlases();
                     } else if (was == Popup::ChangeModel && selection.size() == 1) {
                         record();
                         scene.entities[static_cast<size_t>(selection[0])].model = item;
@@ -1423,7 +2178,7 @@ int main(int argc, char** argv) {
                         if (item == "Rename") {
                             selection = {context_entity};
                             text_field = "name";
-                            begin_text_input(scene.entities[static_cast<size_t>(context_entity)].name);
+                            begin_text_input(scene.entities[static_cast<size_t>(context_entity)].name, 256);
                             const int e = context_entity;
                             text_commit = [&, e](const std::string& s) {
                                 record();
@@ -1445,7 +2200,7 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        if (popup != Popup::SaveAs && text_field == "#saveas") { // cancelled
+        if ((popup != Popup::SaveAs && text_field == "#saveas") || (popup != Popup::Import && text_field == "#import")) { // cancelled
             end_text_input();
             text_field.clear();
         }
