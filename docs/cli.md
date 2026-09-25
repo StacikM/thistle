@@ -52,6 +52,8 @@ mygame/
   .gitignore
 ```
 
+`THISTLE_DIR` is written relative to the project, so the engine and the project can move together. When they're on different Windows drives (`C:` and `D:`) there's no relative path, and it's written absolute; this broke `new` and `init` there until CI's Windows runners (temporary folder on `C:`, checkout on `D:`) caught it. The CLI reads and writes its files as UTF-8, and its output is UTF-8 when it goes into a pipe (the Thistle Editor reads it that way), so a Windows locale such as Japanese doesn't change either.
+
 The starter `main.cpp` deliberately draws shapes, not text — text needs a `.ttf` loaded via `load_font()` first, there's no built-in font, and a starter that silently renders a blank black window because nobody dropped a font in `assets/` yet is a real bug that shipped once during this feature's own testing (screenshotted, confirmed blank, fixed). The version instead shows up in the window title bar (`"mygame v1.0.0"`), which needs no font at all.
 
 ## Commands

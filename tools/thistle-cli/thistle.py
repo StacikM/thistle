@@ -56,13 +56,13 @@ def find_project_root(start: Path, required: bool = True):
 
 def read_project(root: Path) -> dict:
     try:
-        return json.loads((root / "thistle.json").read_text())
+        return json.loads((root / "thistle.json").read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         die(f"thistle.json is not valid JSON: {e}")
 
 
 def write_project(root: Path, data: dict) -> None:
-    (root / "thistle.json").write_text(json.dumps(data, indent=2) + "\n")
+    (root / "thistle.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 MISSING_TOOL_HINTS = {
@@ -87,8 +87,19 @@ def run(cmd: list) -> None:
 
 # --- new ---------------------------------------------------------------
 
+def engine_dir_for(project: Path) -> str:
+    """Where the engine is, as the project's CMakeLists.txt should say it:
+    relative to the project, so the pair can move together, unless they're
+    on different Windows drives (C: and D:), where there's no relative path."""
+    try:
+        rel = os.path.relpath(ENGINE_ROOT, project).replace("\\", "/")
+        return "${CMAKE_CURRENT_SOURCE_DIR}/" + rel
+    except ValueError:
+        return ENGINE_ROOT.as_posix()
+
+
 def render(template_name: str, **subs: str) -> str:
-    text = (TEMPLATES / template_name).read_text()
+    text = (TEMPLATES / template_name).read_text(encoding="utf-8")
     for key, value in subs.items():
         text = text.replace("{{" + key + "}}", value)
     return text
@@ -119,18 +130,18 @@ def cmd_new(args) -> None:
     if dest.exists():
         die(f"{dest} already exists")
 
-    rel_engine = os.path.relpath(ENGINE_ROOT, dest).replace("\\", "/")
+    engine_dir = engine_dir_for(dest)
 
     dest.mkdir(parents=True)
     (dest / "src").mkdir()
     (dest / "assets").mkdir()
 
-    (dest / "CMakeLists.txt").write_text(render("CMakeLists.txt.in", name=name, engine_dir=rel_engine))
+    (dest / "CMakeLists.txt").write_text(render("CMakeLists.txt.in", name=name, engine_dir=engine_dir), encoding="utf-8")
     main_template = "main.cpp.in" if kind == "blank" else f"{kind}/main.cpp.in"
-    (dest / "src" / "main.cpp").write_text(render(main_template, name=name))
-    (dest / "src" / "version.hpp.in").write_text((TEMPLATES / "version.hpp.in").read_text())
+    (dest / "src" / "main.cpp").write_text(render(main_template, name=name), encoding="utf-8")
+    (dest / "src" / "version.hpp.in").write_text((TEMPLATES / "version.hpp.in").read_text(encoding="utf-8"), encoding="utf-8")
     about = "" if kind == "blank" else render(f"{kind}/about.md", name=name)
-    (dest / "README.md").write_text(render("README.md.in", name=name, about=about))
+    (dest / "README.md").write_text(render("README.md.in", name=name, about=about), encoding="utf-8")
     if kind != "blank":
         shutil.copytree(TEMPLATES / kind / "assets", dest / "assets", dirs_exist_ok=True)
         # The 3D templates draw a HUD, and text needs a font: the same one
@@ -140,7 +151,7 @@ def cmd_new(args) -> None:
         editor_assets = ENGINE_ROOT / "tools" / "thistle-editor" / "editor_assets"
         for f in ("inter-regular.ttf", "inter-OFL-LICENSE.txt"):
             shutil.copy2(editor_assets / f, fonts / f)
-    (dest / ".gitignore").write_text("build/\n.DS_Store\n")
+    (dest / ".gitignore").write_text("build/\n.DS_Store\n", encoding="utf-8")
     project = {"name": name, "version": "1.0.0", "template": kind}
     if args.modules:
         project["modules"] = {m: True for m in args.modules}
@@ -168,7 +179,7 @@ def cmd_init(args) -> None:
     if not VALID_NAME.match(name):
         die(f"'{name}' isn't a valid project name — use letters, numbers, - and _, starting with a letter")
 
-    rel_engine = os.path.relpath(ENGINE_ROOT, dest).replace("\\", "/")
+    engine_dir = engine_dir_for(dest)
     added, kept = [], []
 
     def add(rel: str, text: str) -> None:
@@ -177,12 +188,12 @@ def cmd_init(args) -> None:
             kept.append(rel)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
+        path.write_text(text, encoding="utf-8")
         added.append(rel)
 
-    add("CMakeLists.txt", render("CMakeLists.txt.in", name=name, engine_dir=rel_engine))
+    add("CMakeLists.txt", render("CMakeLists.txt.in", name=name, engine_dir=engine_dir))
     add("src/main.cpp", render("main.cpp.in", name=name))
-    add("src/version.hpp.in", (TEMPLATES / "version.hpp.in").read_text())
+    add("src/version.hpp.in", (TEMPLATES / "version.hpp.in").read_text(encoding="utf-8"))
     add("README.md", render("README.md.in", name=name, about=""))
     add(".gitignore", "build/\n.DS_Store\n")
     if not (dest / "assets").exists():
@@ -370,7 +381,7 @@ MODULES = {
 
 def _project_reads_module(root: Path, option: str) -> bool:
     try:
-        return option in (root / "CMakeLists.txt").read_text()
+        return option in (root / "CMakeLists.txt").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
 
@@ -417,6 +428,13 @@ def cmd_disable(args) -> None:
 # --- main --------------------------------------------------------------
 
 def main() -> None:
+    # Output into a pipe (the Thistle Editor reads it that way) is UTF-8 on
+    # every OS. Otherwise Windows uses the locale's code page, and some of
+    # those (Japanese, for one) can't encode the "—" in these messages.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure") and not stream.isatty():
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(prog="thistle", description="Thistle engine project tool")
     sub = parser.add_subparsers(dest="command", required=True)
 
