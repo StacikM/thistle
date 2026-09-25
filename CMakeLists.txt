@@ -13,6 +13,11 @@ set(CMAKE_C_STANDARD 11)
 # project with -DTHISTLE_DEBUG=ON to turn it on.
 option(THISTLE_DEBUG "Build with the in-app debug log overlay" OFF)
 
+# Builds only thistle_server, the engine a headless dedicated server links
+# (see below): no window, graphics or audio, so it configures and builds on a
+# machine without X11/OpenGL development files, like a VPS or a Docker image.
+option(THISTLE_SERVER_ONLY "Build only thistle_server, the engine for headless dedicated servers" OFF)
+
 # Gets an assets/ directory next to your executable, on every platform, so
 # relative paths like "assets/font.ttf" resolve the same way whether you're
 # on macOS, Windows, or Linux. Call once per executable target, after
@@ -28,10 +33,11 @@ function(thistle_bundle_assets TARGET ASSETS_DIR)
         return()
     endif()
 
-    if(APPLE)
+    get_target_property(_thistle_bundle ${TARGET} MACOSX_BUNDLE)
+    if(APPLE AND _thistle_bundle)
         # MACOSX_PACKAGE_LOCATION only takes effect on a bundle target
         # (add_executable(... MACOSX_BUNDLE ...) on macOS, or any iOS app
-        # target) — a plain non-bundle executable ignores it harmlessly.
+        # target). A plain program (a dedicated server) gets the copy below.
         # CONFIGURE_DEPENDS: a file added later (a level saved under a new
         # name, a model the editor imported) makes the next build re-run
         # this, instead of the bundle silently missing it until someone
@@ -45,7 +51,8 @@ function(thistle_bundle_assets TARGET ASSETS_DIR)
         endforeach()
         target_sources(${TARGET} PRIVATE ${_thistle_asset_files})
     else()
-        # Windows/Linux: copied next to the executable on every build. (A
+        # Windows/Linux, and plain programs on macOS: copied next to the
+        # executable on every build. (A
         # POST_BUILD step only runs when the program is relinked, so a level
         # saved in the editor or a changed texture never reached a game
         # whose code hadn't changed.) Only changed files are copied, on
@@ -116,7 +123,7 @@ FetchContent_Declare(
 # which sets "modules": {"physics3d": true} in thistle.json. Off, Physics3D still
 # compiles and links; it just logs that it's disabled and does nothing.
 option(THISTLE_PHYSICS3D "Build three::Physics3D on Jolt Physics" OFF)
-if(THISTLE_PHYSICS3D)
+if(THISTLE_PHYSICS3D AND NOT THISTLE_SERVER_ONLY)
     # Jolt's own defaults that would break or surprise a consumer build:
     # a static MSVC runtime (/MT) that won't link with ours (/MD), LTO,
     # AVX-512 (binaries that crash on many players' CPUs), and its tests/samples.
@@ -167,7 +174,7 @@ endif()
 # -DTHISTLE_DEBUG_UI=ON, or `thistle enable debug_ui` in a CLI project. The
 # pinned sokol's sokol_imgui.h needs ImGui 1.92+ (the texture API changed).
 option(THISTLE_DEBUG_UI "Build the Dear ImGui debug UI" OFF)
-if(THISTLE_DEBUG_UI)
+if(THISTLE_DEBUG_UI AND NOT THISTLE_SERVER_ONLY)
     FetchContent_Declare(
         imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -181,14 +188,87 @@ endif()
 # We only use miniaudio's header (our audio_impl.c holds the implementation), but
 # MakeAvailable is the non-deprecated path (FetchContent_Populate is a hard error
 # under newer CMake, e.g. via emcmake); its extra targets just build unused.
-FetchContent_MakeAvailable(sokol stb fontstash box2d miniaudio cgltf)
+if(THISTLE_SERVER_ONLY)
+    FetchContent_MakeAvailable(stb cgltf)
+else()
+    FetchContent_MakeAvailable(sokol stb fontstash box2d miniaudio cgltf)
+endif()
+
+# --- thistle_server: the engine for headless dedicated servers -----------------
+# Networking, saves and logs, and the data side of the 3D engine: VoxelWorld
+# and VoxelSync, CollisionWorld and CharacterController, Scene3D levels,
+# terrain, and models as geometry (their textures load as empty handles).
+# No window, graphics, audio, input or 2D physics: calling one of those from
+# a server program is a link error. Game code shared by a game and its server
+# can check #if THISTLE_SERVER. See docs/dedicated-servers.md.
+set(THISTLE_SERVER_SOURCES
+    src/log.cpp
+    src/collision3d.cpp
+    src/save.cpp
+    src/net.cpp
+    src/headless.cpp
+    src/dedicated_server.cpp
+    src/server_console.cpp
+    src/three_math.cpp
+    src/three_mesh.cpp
+    src/three_models.cpp
+    src/three_model.cpp
+    src/three_voxel.cpp
+    src/three_collision.cpp
+    src/three_noise.cpp
+    src/three_terrain.cpp
+    src/three_net.cpp
+    src/three_anim.cpp
+    src/three_scene.cpp
+    src/cgltf_impl.c
+    src/stb_impl.c
+)
+if(THISTLE_SERVER_ONLY)
+    add_library(thistle_server STATIC ${THISTLE_SERVER_SOURCES})
+else()
+    # Built only when something links it (a game's server program), so a game
+    # without one doesn't compile these files a second time.
+    add_library(thistle_server STATIC EXCLUDE_FROM_ALL ${THISTLE_SERVER_SOURCES})
+endif()
+target_include_directories(thistle_server
+    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    PRIVATE ${stb_SOURCE_DIR}
+            ${cgltf_SOURCE_DIR}
+)
+target_compile_definitions(thistle_server PUBLIC THISTLE_SERVER=1)
+find_package(Threads REQUIRED)
+target_link_libraries(thistle_server PUBLIC Threads::Threads)
+if(WIN32)
+    target_link_libraries(thistle_server PRIVATE ws2_32)
+endif()
+
+if(THISTLE_SERVER_ONLY)
+    # The headless tests that need nothing but the server library, run
+    # against it: proof the server engine works, not only that it builds.
+    if(THISTLE_BUILD_SMOKETEST)
+        enable_testing()
+        foreach(_thistle_test net collision mesh3d character terrain voxelnet animation server)
+            add_executable(thistle_${_thistle_test}_smoketest examples/${_thistle_test}_smoketest.cpp)
+            target_link_libraries(thistle_${_thistle_test}_smoketest PRIVATE thistle_server)
+            add_test(NAME ${_thistle_test}_smoketest COMMAND thistle_${_thistle_test}_smoketest)
+            set_tests_properties(${_thistle_test}_smoketest PROPERTIES TIMEOUT 60)
+        endforeach()
+    endif()
+    return()
+endif()
 
 add_library(thistle STATIC
     src/thistle.cpp
+    src/collision3d.cpp
+    src/log.cpp
+    src/save.cpp
+    src/net.cpp
     src/three_math.cpp
     src/three_camera.cpp
     src/three_mesh.cpp
     src/three_render.cpp
+    src/three_models.cpp
     src/three_model.cpp
     src/three_voxel.cpp
     src/three_collision.cpp
@@ -445,7 +525,7 @@ if(THISTLE_BUILD_SMOKETEST)
     set(_thistle_tpl_gen "${CMAKE_CURRENT_BINARY_DIR}/template_gen")
     set(THISTLE_PROJECT_VERSION "0.0.0")
     configure_file("${_thistle_tpl_dir}/version.hpp.in" "${_thistle_tpl_gen}/version.hpp" @ONLY)
-    foreach(_kind blank fps third-person voxel)
+    foreach(_kind blank fps third-person voxel multiplayer)
         if(_kind STREQUAL "blank")
             set(_src "${_thistle_tpl_dir}/main.cpp.in")
         else()
@@ -470,6 +550,26 @@ if(THISTLE_BUILD_SMOKETEST)
         set_target_properties(thistle_template_${_id} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/templates/${_id}")
         if(EXISTS "${_thistle_tpl_dir}/${_kind}/assets")
             thistle_bundle_assets(thistle_template_${_id} "${_thistle_tpl_dir}/${_kind}/assets")
+        endif()
+        # The multiplayer template's src/shared.hpp and its dedicated server
+        # (on thistle_server, like a project's <name>-server).
+        if(EXISTS "${_thistle_tpl_dir}/${_kind}/shared.hpp.in")
+            file(READ "${_thistle_tpl_dir}/${_kind}/shared.hpp.in" _text)
+            string(REPLACE "{{name}}" "template_${_id}" _text "${_text}")
+            file(CONFIGURE OUTPUT "${_thistle_tpl_gen}/${_id}/shared.hpp" CONTENT "${_text}" @ONLY)
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_thistle_tpl_dir}/${_kind}/shared.hpp.in")
+            target_include_directories(thistle_template_${_id} PRIVATE "${_thistle_tpl_gen}/${_id}")
+        endif()
+        if(EXISTS "${_thistle_tpl_dir}/${_kind}/server.cpp.in")
+            file(READ "${_thistle_tpl_dir}/${_kind}/server.cpp.in" _text)
+            string(REPLACE "{{name}}" "template_${_id}" _text "${_text}")
+            file(CONFIGURE OUTPUT "${_thistle_tpl_gen}/${_id}/server.cpp" CONTENT "${_text}" @ONLY)
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_thistle_tpl_dir}/${_kind}/server.cpp.in")
+            add_executable(thistle_template_${_id}_server "${_thistle_tpl_gen}/${_id}/server.cpp")
+            target_include_directories(thistle_template_${_id}_server PRIVATE "${_thistle_tpl_gen}" "${_thistle_tpl_gen}/${_id}")
+            target_link_libraries(thistle_template_${_id}_server PRIVATE thistle_server)
+            set_target_properties(thistle_template_${_id}_server PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/templates/${_id}_server")
+            thistle_bundle_assets(thistle_template_${_id}_server "${_thistle_tpl_dir}/${_kind}/assets")
         endif()
     endforeach()
 
@@ -554,6 +654,11 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_scene3d_smoketest examples/scene3d_smoketest.cpp)
     target_link_libraries(thistle_scene3d_smoketest PRIVATE thistle)
 
+    # DedicatedServer, against the headless library (which gets built for
+    # it: otherwise only a game's server program makes it build).
+    add_executable(thistle_server_smoketest examples/server_smoketest.cpp)
+    target_link_libraries(thistle_server_smoketest PRIVATE thistle_server)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -602,6 +707,8 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(animation_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME scene3d_smoketest COMMAND thistle_scene3d_smoketest)
     set_tests_properties(scene3d_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME server_smoketest COMMAND thistle_server_smoketest)
+    set_tests_properties(server_smoketest PROPERTIES TIMEOUT 60)
     # The `thistle` CLI's new/init, which the Thistle Editor's projects screen
     # runs. Python, like the CLI; skipped where there's no Python 3.
     find_package(Python3 COMPONENTS Interpreter QUIET)

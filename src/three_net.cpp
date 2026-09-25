@@ -8,7 +8,7 @@
 // changes, the changed chunks (found through the per-chunk revisions the
 // physics sync also uses) go to every client that said hello. Chunk data is
 // VoxelWorld::serialize_chunk()'s run-length bytes, base64'd into the JSON.
-#include "thistle_internal.h"
+#include "thistle_core.h"
 
 #include <algorithm>
 #include <array>

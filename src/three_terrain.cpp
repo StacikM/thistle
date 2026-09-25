@@ -1,4 +1,4 @@
-#include "thistle_internal.h"
+#include "thistle_core.h"
 
 #include <algorithm>
 #include <cmath>
@@ -184,6 +184,7 @@ void Terrain::rebuild() {
     t.built_flat = flat_shaded;
 }
 
+#if !defined(THISTLE_SERVER) // drawing: not in the server library
 void World::draw(Terrain& terrain) {
     const TerrainImpl& t = *terrain.impl_;
     if (t.dirty || t.built_origin != terrain.origin || t.built_flat != terrain.flat_shaded) terrain.rebuild();
@@ -192,6 +193,7 @@ void World::draw(Terrain& terrain) {
         draw(tile);
     }
 }
+#endif
 
 } // namespace thistle::three
 

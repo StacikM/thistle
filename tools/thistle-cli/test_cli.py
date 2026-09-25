@@ -57,9 +57,19 @@ with tempfile.TemporaryDirectory() as tmp:
     check((root / "mygame" / "assets" / "scenes" / "level.scene.json").exists(), "the fps template's level is there")
     check((root / "mygame" / "assets" / "fonts" / "inter-regular.ttf").exists(), "and its font")
 
+    r = thistle("new", "mp", "--at", str(root / "mp"), "--template", "multiplayer", cwd=root)
+    check(r.returncode == 0 and (root / "mp" / "src" / "server.cpp").exists() and (root / "mp" / "src" / "shared.hpp").exists()
+          and (root / "mp" / "assets" / "scenes" / "level.scene.json").exists(),
+          "new --template multiplayer makes the game, src/server.cpp, src/shared.hpp and the level")
+    check("thistle run --server" in r.stdout, "... and says to start the server first")
+
     r = thistle("new", "plain", "--at", str(root / "plain"), cwd=root)
     project = json.loads((root / "plain" / "thistle.json").read_text(encoding="utf-8"))
     check(r.returncode == 0 and project.get("template") == "blank" and "modules" not in project, "a plain new is blank, with no modules")
+    check("THISTLE_SERVER_ONLY" in (root / "plain" / "CMakeLists.txt").read_text(encoding="utf-8"),
+          "its CMakeLists.txt can build a dedicated server (src/server.cpp)")
+    r = thistle("build", "--server", cwd=root / "plain")
+    check(r.returncode != 0 and "has no dedicated server" in r.stderr, "build --server without src/server.cpp says what's missing")
 
     # new: what it refuses
     check(thistle("new", "mygame", "--at", str(root / "mygame"), cwd=root).returncode != 0, "new refuses a folder that exists")

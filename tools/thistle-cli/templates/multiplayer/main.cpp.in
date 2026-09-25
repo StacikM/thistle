@@ -1,0 +1,241 @@
+// {{name}} — a multiplayer starter made with Thistle: this game, and its
+// dedicated server in src/server.cpp. Start the server, then as many games
+// as you like, here or on other machines:
+//
+//     thistle run --server     (in one terminal; it keeps running)
+//     thistle run              (in another, once per player)
+//
+// Players run around an arena made in the Thistle Editor
+// (assets/scenes/level.scene.json) and see each other. Each game moves its
+// own player and tells the server where it is; the server checks the move
+// and passes it on. What's networked is the Player class in src/shared.hpp.
+//
+// Click to capture the mouse (Esc lets go, and shows Leave); the mouse turns
+// the camera, the wheel zooms. WASD to run (Shift to walk), Space to jump.
+#include <thistle.hpp>
+#include <version.hpp>
+#include "shared.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <map>
+#include <string>
+using namespace thistle;
+using namespace thistle::three;
+
+namespace {
+
+float wrap_angle(float a) {
+    while (a > pi) a -= 2.0f * pi;
+    while (a < -pi) a += 2.0f * pi;
+    return a;
+}
+
+// The character: boxes and a sphere, legs and arms swinging with the
+// stride. Swap in a model with load_model() + Animator (the engine's
+// docs/animation.md).
+void draw_figure(World& world, vec3 at, float facing, float stride, float speed, rgba shirt) {
+    const quat turn = quat::axis_angle({0, 1, 0}, facing);
+    const float swing = std::sin(stride) * std::min(1.0f, speed / 4.0f) * 0.7f;
+    auto limb = [&](vec3 pivot, vec3 size, float angle, rgba color) {
+        const quat bend = quat::axis_angle({1, 0, 0}, angle);
+        const vec3 center = pivot + bend * vec3{0, -size.y * 0.5f, 0};
+        world.box(Transform{at + turn * center, turn * bend, size}, color);
+    };
+    const rgba pants = rgb(0.2f, 0.2f, 0.28f), skin = rgb(0.95f, 0.78f, 0.62f);
+    limb({-0.13f, 0.8f, 0}, {0.18f, 0.8f, 0.2f}, swing, pants);
+    limb({0.13f, 0.8f, 0}, {0.18f, 0.8f, 0.2f}, -swing, pants);
+    world.box(Transform{at + turn * vec3{0, 1.12f, 0}, turn, {0.5f, 0.65f, 0.28f}}, shirt);
+    limb({-0.33f, 1.42f, 0}, {0.13f, 0.62f, 0.15f}, -swing, shirt);
+    limb({0.33f, 1.42f, 0}, {0.13f, 0.62f, 0.15f}, swing, shirt);
+    world.sphere(at + vec3{0, 1.68f, 0}, 0.36f, skin);
+    world.box(Transform{at + turn * vec3{0, 1.72f, -0.17f}, turn, {0.2f, 0.06f, 0.04f}}, rgb(0.15f, 0.15f, 0.2f));
+}
+
+// Someone else: their moves arrive 20 times a second, drawn smoothly a
+// little in the past.
+struct Other {
+    TransformInterpolator motion;
+    vec3 last;
+    vec3 drawn;
+    float stride = 0.0f;
+};
+
+} // namespace
+
+int main() {
+    App app{{.title = "{{name}} v" + std::string(GAME_VERSION), .width = 1280, .height = 720, .save_name = "{{name}}"}};
+    load_font("assets/fonts/inter-regular.ttf");
+    net_register_class("Player", [] { return std::make_unique<Player>(); });
+
+    Scene3D level;
+    CollisionWorld solid;
+    if (!level.load("assets/scenes/level.scene.json")) log_warn("couldn't load assets/scenes/level.scene.json");
+    level.add_colliders(solid);
+
+    NetClient client;
+    // The connect screen: three fields, remembered between runs (save::).
+    std::string fields[3] = {save::get("host", "127.0.0.1"), save::get("port", std::to_string(default_port)), ""};
+    const char* labels[3] = {"Server", "Port", "Password (if it has one)"};
+    int typing = 0;       // which field has the keyboard
+    bool connecting = false;
+    std::string status;   // why the last try failed, or why we left
+    begin_text_input(fields[typing], 64);
+
+    CharacterController me;
+    float facing = 0.0f, stride = 0.0f, send_timer = 0.0f;
+    std::map<uint32_t, Other> others;
+    OrbitCamera orbit;
+    orbit.capture_mouse = true;
+    orbit.allow_pan = false;
+    orbit.distance = 6.0f;
+    orbit.min_distance = 2.5f;
+    orbit.max_distance = 14.0f;
+    orbit.pitch = radians(20.0f);
+    World world;
+    Camera camera;
+
+    // The server sends us to a spawn point when we join, and back if it
+    // refuses a move.
+    Player::on_teleport = [&](vec3 p, float f) {
+        me = CharacterController{};
+        me.position = p;
+        facing = f;
+        orbit.yaw = f;
+    };
+    client.on_disconnect = [&] {
+        status = client.disconnect_reason(); // "Kicked: ...", "The server stopped", ...
+        others.clear();
+        lock_mouse(false);
+        begin_text_input(fields[typing], 64);
+    };
+
+    app.update([&](Frame f) {
+        const float cx = f.width * 0.5f, cy = f.height * 0.5f;
+
+        // --- the connect screen
+        if (!client.connected()) {
+            f.clear(rgb(0.1f, 0.12f, 0.16f));
+            if (connecting) { // (a frame later, so "Connecting..." shows while connect() waits)
+                connecting = false;
+                end_text_input();
+                save::set("host", fields[0]);
+                save::set("port", fields[1]);
+                const int port = std::atoi(fields[1].c_str());
+                if (client.connect(fields[0], port > 0 ? port : default_port, fields[2])) {
+                    status.clear();
+                    return;
+                }
+                status = client.disconnect_reason(); // "Wrong password", "The server is full", ...
+                begin_text_input(fields[typing], 64);
+            }
+            fields[typing] = text_input();
+            const char* title = "{{name}}";
+            const vec2 tsz = f.measure_text(title, {.size = 44});
+            f.text(title, {cx - tsz.x * 0.5f, cy - 210}, {.size = 44, .color = white});
+            for (int i = 0; i < 3; ++i) {
+                const Rect box{{cx - 200, cy - 110 + i * 78.0f}, {400, 40}};
+                f.text(labels[i], {box.pos.x, box.pos.y - 24}, {.size = 16, .color = rgba{1, 1, 1, 0.6f}});
+                f.rect(box.pos, box.size, i == typing ? rgb(0.24f, 0.28f, 0.36f) : rgb(0.17f, 0.19f, 0.24f));
+                std::string shown = i == 2 ? std::string(fields[i].size(), '*') : fields[i];
+                if (i == typing && std::fmod(f.time, 1.0) < 0.5) shown += "|";
+                f.text(shown, {box.pos.x + 12, box.pos.y + 10}, {.size = 18, .color = white});
+                if (f.mouse_pressed(Mouse::Left) && box.contains(f.mouse()) && i != typing) {
+                    typing = i;
+                    begin_text_input(fields[typing], 64);
+                }
+            }
+            if (f.key_pressed(Key::Tab)) {
+                typing = (typing + 1) % 3;
+                begin_text_input(fields[typing], 64);
+            }
+            if (f.button("Connect", {{cx - 200, cy + 130}, {400, 46}}) || f.key_pressed(Key::Enter)) connecting = true;
+            const std::string note = connecting ? "Connecting..." : status;
+            const vec2 nsz = f.measure_text(note, {.size = 18});
+            f.text(note, {cx - nsz.x * 0.5f, cy + 196}, {.size = 18, .color = connecting ? white : rgb(1.0f, 0.55f, 0.45f)});
+            const char* hint = "No server yet? Start one with: thistle run --server";
+            const vec2 hsz = f.measure_text(hint, {.size = 15});
+            f.text(hint, {cx - hsz.x * 0.5f, std::max(f.height - 40.0f, cy + 232.0f)}, {.size = 15, .color = rgba{1, 1, 1, 0.45f}});
+            return;
+        }
+
+        // --- playing: move ourselves, relative to where the camera looks
+        client.update();
+        if (!client.connected()) return; // (on_disconnect took us back)
+        orbit.update(camera, f);
+        const vec3 cam_fwd = normalize(vec3{camera.forward().x, 0.0f, camera.forward().z});
+        const vec3 cam_right = normalize(cross(cam_fwd, vec3{0, 1, 0}));
+        vec3 wish{};
+        if (f.key_down(Key::W) || f.key_down(Key::Up)) wish = wish + cam_fwd;
+        if (f.key_down(Key::S) || f.key_down(Key::Down)) wish = wish - cam_fwd;
+        if (f.key_down(Key::D) || f.key_down(Key::Right)) wish = wish + cam_right;
+        if (f.key_down(Key::A) || f.key_down(Key::Left)) wish = wish - cam_right;
+        if (length(wish) > 1.0f) wish = normalize(wish);
+        me.move_speed = f.key_down(Key::LeftShift) ? 2.5f : 6.0f;
+        me.update(solid, wish, f.key_pressed(Key::Space), f.dt);
+        const float speed = length(vec3{me.velocity.x, 0.0f, me.velocity.z});
+        if (length(wish) > 0.1f) facing += wrap_angle(std::atan2(-wish.x, -wish.z) - facing) * std::min(1.0f, f.dt * 12.0f);
+        stride += speed * f.dt * 2.2f;
+
+        // --- everyone: ours tells the server where we are; the others are drawn where the server says
+        Player* mine = nullptr;
+        int online = 0;
+        net_each_object([&](NetObject& o) {
+            auto* p = dynamic_cast<Player*>(&o);
+            if (!p) return;
+            ++online;
+            if (p->owner.get() == client.connection_id()) { mine = p; return; }
+            Other& other = others[p->net_id()];
+            if (other.motion.empty() || !(other.last == p->position.get())) {
+                other.last = p->position.get();
+                other.motion.add(Transform{other.last, quat::axis_angle({0, 1, 0}, p->facing.get())}, f.time);
+            }
+            const Transform t = other.motion.sample(f.time);
+            const float moved = length(vec3{t.position.x - other.drawn.x, 0.0f, t.position.z - other.drawn.z});
+            other.stride += moved * 2.2f;
+            other.drawn = t.position;
+            draw_figure(world, t.position, to_euler(t.rotation).y, other.stride, moved / std::max(f.dt, 1e-4f), p->color.get());
+        });
+        send_timer += f.dt;
+        if (mine && send_timer >= 1.0f / moves_per_second) {
+            send_timer = 0.0f;
+            mine->send_move(me.position, facing);
+        }
+
+        // --- the camera: behind us, pulled in when a wall's in the way
+        orbit.target = me.position + vec3{0, 1.5f, 0};
+        orbit.apply(camera);
+        const vec3 back = camera.position - orbit.target;
+        if (const RaycastHit h = solid.raycast(Ray{orbit.target, normalize(back)}, length(back))) {
+            camera.position = orbit.target + normalize(back) * std::max(0.3f, h.distance - 0.25f);
+        }
+
+        level.draw(world);
+        draw_figure(world, me.position, facing, stride, speed, mine ? mine->color.get() : white);
+        world.render(f, camera);
+
+        // --- names over heads, and the HUD
+        net_each_object([&](NetObject& o) {
+            auto* p = dynamic_cast<Player*>(&o);
+            if (!p || p == mine) return;
+            vec2 at;
+            if (camera.world_to_screen(others[p->net_id()].drawn + vec3{0, 2.3f, 0}, f, at)) {
+                const std::string name = "Player " + std::to_string(p->owner.get());
+                const vec2 sz = f.measure_text(name, {.size = 16});
+                f.rect({at.x - sz.x * 0.5f - 6, at.y - 3}, {sz.x + 12, 24}, rgba{0, 0, 0, 0.45f});
+                f.text(name, {at.x - sz.x * 0.5f, at.y}, {.size = 16, .color = white});
+            }
+        });
+        const std::string hud = "Player " + std::to_string(client.connection_id()) + "     " + std::to_string(online) +
+                                (online == 1 ? " player online" : " players online") + "     " + fields[0] + ":" + fields[1];
+        f.text(hud, {24, 20}, {.size = 20, .color = white});
+        if (!mouse_locked()) {
+            if (f.button("Leave", {{f.width - 144.0f, 16}, {120, 40}})) client.disconnect();
+            const char* hint = "Click to play  -  mouse turns the camera, WASD run, Shift walk, Space jump, Esc frees the mouse";
+            const vec2 sz = f.measure_text(hint, {.size = 18});
+            f.rect({cx - sz.x * 0.5f - 12, f.height - 64.0f}, {sz.x + 24, 34}, rgba{0, 0, 0, 0.5f});
+            f.text(hint, {cx - sz.x * 0.5f, f.height - 57.0f}, {.size = 18, .color = white});
+        }
+    });
+    return app.run();
+}

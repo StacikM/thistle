@@ -1,4 +1,5 @@
 #include "thistle_internal.h"
+#include "three_models.h"
 
 #include "sokol_gfx.h"
 #include "sokol_gl.h"
@@ -98,37 +99,6 @@ uint32_t pack_color(rgba c) {
     return b(c.r) | (b(c.g) << 8) | (b(c.b) << 16) | (b(c.a) << 24);
 }
 
-struct MeshRecord {
-    MeshData cpu; // dropped once uploaded
-    // Kept for the life of the mesh (unlike `cpu`): raycasts and collision
-    // need the triangles, not the normals/UVs/colors.
-    std::vector<vec3> positions;
-    std::vector<uint32_t> triangles;
-    sg_buffer vbuf = {};
-    sg_buffer ibuf = {};
-    int index_count = 0;
-    bool uploaded = false;
-    Bounds bounds;
-    // Skinned meshes: the vertices as modeled (with joints/weights), which
-    // an Animator's pose is applied to. vbuf holds the rest pose.
-    std::vector<Vertex> bind;
-};
-
-struct PartRecord {
-    int mesh = 0;
-    Material material;
-    mat4 local;
-};
-
-struct ModelRecord {
-    std::vector<MeshRecord> meshes;
-    std::vector<PartRecord> parts;
-    Bounds bounds;
-    Skeleton skeleton;
-    std::vector<AnimationClip> animations;
-    bool alive = true;
-};
-
 struct SkyboxRecord {
     std::vector<unsigned char> faces; // 6 tightly packed RGBA faces, dropped after upload
     int size = 0;
@@ -221,7 +191,6 @@ struct RenderState {
     sg_buffer line_buffer = {};
     size_t line_capacity = 0; // in vertices
 
-    std::vector<ModelRecord> models;
     std::vector<PassRecord> passes;
     int current_layer = 0;
     RenderStats stats_this_frame;
@@ -248,12 +217,6 @@ mat4 clip_fix(const mat4& proj_gl) {
     return fix * proj_gl;
 }
 
-ModelRecord* model_record(Model m) {
-    if (m.id < 0 || m.id >= static_cast<int>(g_three.models.size())) return nullptr;
-    ModelRecord& rec = g_three.models[m.id];
-    return rec.alive ? &rec : nullptr;
-}
-
 void upload_mesh(MeshRecord& mesh) {
     if (mesh.uploaded || !g_three.ready) return;
     mesh.uploaded = true;
@@ -267,16 +230,16 @@ void upload_mesh(MeshRecord& mesh) {
     sg_buffer_desc vd = {};
     vd.data = {verts.data(), verts.size() * sizeof(GpuVertex)};
     vd.label = "three-mesh-vertices";
-    mesh.vbuf = sg_make_buffer(&vd);
+    mesh.vbuf = sg_make_buffer(&vd).id;
 
     sg_buffer_desc id = {};
     id.usage.vertex_buffer = false;
     id.usage.index_buffer = true;
     id.data = {mesh.cpu.indices.data(), mesh.cpu.indices.size() * sizeof(uint32_t)};
     id.label = "three-mesh-indices";
-    mesh.ibuf = sg_make_buffer(&id);
+    mesh.ibuf = sg_make_buffer(&id).id;
     mesh.cpu = MeshData{};
-    if (sg_query_buffer_state(mesh.vbuf) != SG_RESOURCESTATE_VALID || sg_query_buffer_state(mesh.ibuf) != SG_RESOURCESTATE_VALID) {
+    if (sg_query_buffer_state(sg_buffer{mesh.vbuf}) != SG_RESOURCESTATE_VALID || sg_query_buffer_state(sg_buffer{mesh.ibuf}) != SG_RESOURCESTATE_VALID) {
         // Out of GPU buffer slots (or memory). Skip the mesh rather than
         // hand sokol an invalid handle, which is a hard error in debug builds.
         static bool warned = false;
@@ -287,10 +250,11 @@ void upload_mesh(MeshRecord& mesh) {
     mesh.index_count = static_cast<int>(id.data.size / sizeof(uint32_t));
 }
 
-void destroy_mesh(MeshRecord& mesh) {
-    if (mesh.vbuf.id != SG_INVALID_ID) sg_destroy_buffer(mesh.vbuf);
-    if (mesh.ibuf.id != SG_INVALID_ID) sg_destroy_buffer(mesh.ibuf);
-    mesh = MeshRecord{};
+void release_mesh(MeshRecord& mesh) {
+    if (mesh.vbuf != SG_INVALID_ID) sg_destroy_buffer(sg_buffer{mesh.vbuf});
+    if (mesh.ibuf != SG_INVALID_ID) sg_destroy_buffer(sg_buffer{mesh.ibuf});
+    mesh.vbuf = mesh.ibuf = SG_INVALID_ID;
+    mesh.index_count = 0;
 }
 
 Model unit_model(Model& slot, MeshData (*make)()) {
@@ -605,12 +569,12 @@ void render_shadow_map(PassRecord& pass, int index, int fb_w, int fb_h) {
             // (instanced casters are drawn after these, with their own pipeline)
             if (!light_frustum.intersects(skin_first >= 0 ? cmd.skin_bounds : mesh.bounds.transformed(world))) continue;
             sg_bindings bind = {};
-            bind.vertex_buffers[0] = mesh.vbuf;
+            bind.vertex_buffers[0] = sg_buffer{mesh.vbuf};
             if (skin_first >= 0) {
                 bind.vertex_buffers[0] = s.skin_buffer;
                 bind.vertex_buffer_offsets[0] = static_cast<int>((pass.skin_base + skin_first) * sizeof(WorldImpl::SkinVertex));
             }
-            bind.index_buffer = mesh.ibuf;
+            bind.index_buffer = sg_buffer{mesh.ibuf};
             const bool cutout = mat.alpha == AlphaMode::Cutout;
             sg_view tex = cutout && mat.texture.valid() ? detail::texture_view(mat.texture) : sg_view{};
             bind.views[VIEW_base_tex] = tex.id != SG_INVALID_ID ? tex : s.white_view;
@@ -639,10 +603,10 @@ void render_shadow_map(PassRecord& pass, int index, int fb_w, int fb_h) {
             if (mesh.index_count == 0) continue;
             if (!instanced_bound) { sg_apply_pipeline(s.shadow_instanced_pipeline); instanced_bound = true; }
             sg_bindings bind = {};
-            bind.vertex_buffers[0] = mesh.vbuf;
+            bind.vertex_buffers[0] = sg_buffer{mesh.vbuf};
             bind.vertex_buffers[1] = s.instance_buffer;
             bind.vertex_buffer_offsets[1] = static_cast<int>((pass.instance_base + cmd.first) * sizeof(WorldImpl::Instance));
-            bind.index_buffer = mesh.ibuf;
+            bind.index_buffer = sg_buffer{mesh.ibuf};
             const bool cutout = mat.alpha == AlphaMode::Cutout;
             sg_view tex = cutout && mat.texture.valid() ? detail::texture_view(mat.texture) : sg_view{};
             bind.views[VIEW_base_tex] = tex.id != SG_INVALID_ID ? tex : s.white_view;
@@ -831,7 +795,7 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
         }
         const Material& mat = *item.material;
         sg_bindings bind = {};
-        bind.vertex_buffers[0] = item.mesh->vbuf;
+        bind.vertex_buffers[0] = sg_buffer{item.mesh->vbuf};
         if (item.skin_first >= 0) {
             bind.vertex_buffers[0] = g_three.skin_buffer;
             bind.vertex_buffer_offsets[0] = static_cast<int>(item.skin_first * sizeof(WorldImpl::SkinVertex));
@@ -840,7 +804,7 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
             bind.vertex_buffers[1] = g_three.instance_buffer;
             bind.vertex_buffer_offsets[1] = static_cast<int>(item.inst_first * sizeof(WorldImpl::Instance));
         }
-        bind.index_buffer = item.mesh->ibuf;
+        bind.index_buffer = sg_buffer{item.mesh->ibuf};
         sg_view tex_view = mat.texture.valid() ? detail::texture_view(mat.texture) : sg_view{};
         bind.views[VIEW_base_tex] = tex_view.id != SG_INVALID_ID ? tex_view : g_three.white_view;
         const sg_view glow_view = mat.emissive_texture.valid() ? detail::texture_view(mat.emissive_texture) : sg_view{};
@@ -913,151 +877,6 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
 }
 
 } // namespace
-
-// --- models --------------------------------------------------------------------
-
-Model make_model(const MeshData& mesh, const Material& material) {
-    ModelRecord rec;
-    MeshRecord m;
-    m.cpu = mesh;
-    m.bounds = mesh.bounds();
-    m.positions.reserve(mesh.vertices.size());
-    for (const Vertex& v : mesh.vertices) m.positions.push_back(v.position);
-    m.triangles = mesh.indices;
-    rec.bounds = m.bounds;
-    rec.meshes.push_back(std::move(m));
-    rec.parts.push_back({0, material, mat4{}});
-    g_three.models.push_back(std::move(rec));
-    return Model{static_cast<int>(g_three.models.size()) - 1};
-}
-
-namespace {
-ModelRecord build_record(const ModelData& data);
-
-// Linear blend skinning: each vertex moved by the weighted sum of its
-// joints' skin matrices. Normals use the same matrix (fine for the
-// rotations and uniform scales skeletons use).
-void skin_vertices(const std::vector<Vertex>& bind, const std::vector<mat4>& skin, std::vector<Vertex>& out) {
-    out.resize(bind.size());
-    const int n = static_cast<int>(skin.size());
-    for (size_t i = 0; i < bind.size(); ++i) {
-        const Vertex& v = bind[i];
-        const float w[4] = {v.weights.x, v.weights.y, v.weights.z, v.weights.w};
-        const float j[4] = {v.joints.x, v.joints.y, v.joints.z, v.joints.w};
-        mat4 m;
-        float total = 0.0f;
-        for (float& e : m.m) e = 0.0f;
-        for (int k = 0; k < 4; ++k) {
-            const int joint = static_cast<int>(j[k]);
-            if (w[k] <= 0.0f || joint < 0 || joint >= n) continue;
-            for (int e = 0; e < 16; ++e) m.m[e] += skin[static_cast<size_t>(joint)].m[e] * w[k];
-            total += w[k];
-        }
-        Vertex& o = out[i];
-        o = v;
-        if (total <= 0.0f) continue;
-        if (std::fabs(total - 1.0f) > 1e-3f) {
-            for (float& e : m.m) e /= total;
-        }
-        o.position = m.transform_point(v.position);
-        o.normal = normalize(m.transform_direction(v.normal));
-    }
-}
-} // namespace
-
-Model make_model(const ModelData& data) {
-    if (data.parts.empty()) return Model{};
-    g_three.models.push_back(build_record(data));
-    return Model{static_cast<int>(g_three.models.size()) - 1};
-}
-
-namespace {
-ModelRecord build_record(const ModelData& data) {
-    ModelRecord rec;
-    rec.skeleton = data.skeleton;
-    rec.animations = data.animations;
-    std::vector<mat4> rest;
-    if (!data.skeleton.empty()) detail::rest_skin_matrices(data.skeleton, rest);
-    for (const ModelData::Part& part : data.parts) {
-        MeshRecord m;
-        m.cpu = part.mesh;
-        const bool skinned = !rest.empty() && std::any_of(part.mesh.vertices.begin(), part.mesh.vertices.end(), [](const Vertex& v) {
-            return v.weights.x + v.weights.y + v.weights.z + v.weights.w > 0.0f;
-        });
-        if (skinned) {
-            // Keep the modeled vertices for posing; draw (and collide with)
-            // the rest pose until an Animator says otherwise.
-            m.bind = part.mesh.vertices;
-            skin_vertices(m.bind, rest, m.cpu.vertices);
-        }
-        m.bounds = m.cpu.bounds();
-        m.positions.reserve(m.cpu.vertices.size());
-        for (const Vertex& v : m.cpu.vertices) m.positions.push_back(v.position);
-        m.triangles = part.mesh.indices;
-        const Bounds placed = m.bounds.transformed(part.transform);
-        if (placed.valid()) { rec.bounds.add(placed.min); rec.bounds.add(placed.max); }
-        rec.parts.push_back({static_cast<int>(rec.meshes.size()), part.material, part.transform});
-        rec.meshes.push_back(std::move(m));
-    }
-    return rec;
-}
-} // namespace
-
-void unload_model(Model& model) {
-    if (ModelRecord* rec = model_record(model)) {
-        for (MeshRecord& mesh : rec->meshes) destroy_mesh(mesh);
-        *rec = ModelRecord{};
-        rec->alive = false;
-    }
-    model = Model{};
-}
-
-Bounds model_bounds(Model model) {
-    const ModelRecord* rec = model_record(model);
-    return rec ? rec->bounds : Bounds{};
-}
-
-int model_part_count(Model model) {
-    const ModelRecord* rec = model_record(model);
-    return rec ? static_cast<int>(rec->parts.size()) : 0;
-}
-
-Material model_material(Model model, int part) {
-    const ModelRecord* rec = model_record(model);
-    if (!rec || part < 0 || part >= static_cast<int>(rec->parts.size())) return {};
-    return rec->parts[part].material;
-}
-
-void set_model_material(Model model, const Material& material, int part) {
-    ModelRecord* rec = model_record(model);
-    if (!rec) return;
-    for (int i = 0; i < static_cast<int>(rec->parts.size()); ++i) {
-        if (part < 0 || part == i) rec->parts[i].material = material;
-    }
-}
-
-RaycastHit raycast(const Ray& ray, Model model, const Transform& transform, float max_distance) {
-    RaycastHit best;
-    const ModelRecord* rec = model_record(model);
-    if (!rec) return best;
-    const mat4 model_matrix = transform.matrix();
-    for (const PartRecord& part : rec->parts) {
-        const MeshRecord& mesh = rec->meshes[part.mesh];
-        const mat4 world = model_matrix * part.local;
-        const float limit = best.hit ? best.distance : max_distance;
-        if (!detail::ray_reaches_box(ray, mesh.bounds.transformed(world), limit)) continue;
-        // Triangles are tested in world space, so hit distances stay in the
-        // caller's units even under non-uniform scale.
-        for (size_t i = 0; i + 2 < mesh.triangles.size(); i += 3) {
-            const vec3 a = world.transform_point(mesh.positions[mesh.triangles[i]]);
-            const vec3 b = world.transform_point(mesh.positions[mesh.triangles[i + 1]]);
-            const vec3 c = world.transform_point(mesh.positions[mesh.triangles[i + 2]]);
-            const RaycastHit h = raycast_triangle(ray, a, b, c, best.hit ? best.distance : max_distance);
-            if (h.hit) best = h;
-        }
-    }
-    return best;
-}
 
 // --- world ---------------------------------------------------------------------
 
@@ -1144,31 +963,6 @@ void World::draw(Model model, const Transform& transform, const Animator& pose, 
         }
     }
     impl.draws.push_back(std::move(cmd));
-}
-
-const Skeleton* model_skeleton(Model model) {
-    const ModelRecord* rec = model_record(model);
-    return rec && !rec->skeleton.empty() ? &rec->skeleton : nullptr;
-}
-
-int model_animation_count(Model model) {
-    const ModelRecord* rec = model_record(model);
-    return rec ? static_cast<int>(rec->animations.size()) : 0;
-}
-
-const AnimationClip* model_animation(Model model, int index) {
-    const ModelRecord* rec = model_record(model);
-    if (!rec || index < 0 || index >= static_cast<int>(rec->animations.size())) return nullptr;
-    return &rec->animations[static_cast<size_t>(index)];
-}
-
-int find_animation(Model model, const std::string& name) {
-    const ModelRecord* rec = model_record(model);
-    if (!rec) return -1;
-    for (size_t i = 0; i < rec->animations.size(); ++i) {
-        if (rec->animations[i].name == name) return static_cast<int>(i);
-    }
-    return -1;
 }
 
 void World::draw(Model model, const Transform& transform, const Material& material) {
@@ -1415,32 +1209,9 @@ namespace thistle::detail {
 
 using namespace thistle::three;
 
-void model_world_triangles(Model model, const mat4& transform, std::vector<vec3>& out) {
-    const ModelRecord* rec = model_record(model);
-    if (!rec) return;
-    for (const PartRecord& part : rec->parts) {
-        const MeshRecord& mesh = rec->meshes[part.mesh];
-        const mat4 m = transform * part.local;
-        for (uint32_t idx : mesh.triangles) out.push_back(m.transform_point(mesh.positions[idx]));
-    }
-}
-
-void replace_model(Model& model, const ModelData& data) {
-    ModelRecord* rec = model_record(model);
-    if (data.parts.empty()) {
-        if (rec) unload_model(model);
-        return;
-    }
-    if (!rec) {
-        model = make_model(data);
-        return;
-    }
-    for (MeshRecord& mesh : rec->meshes) destroy_mesh(mesh);
-    *rec = build_record(data);
-}
-
 void three_setup() {
     RenderState& s = g_three;
+    set_mesh_release(release_mesh);
     s.lit_shader = sg_make_shader(lit_shader_desc(sg_query_backend()));
     s.lit_instanced_shader = sg_make_shader(lit_instanced_shader_desc(sg_query_backend()));
     s.background_shader = sg_make_shader(background_shader_desc(sg_query_backend()));
@@ -1557,10 +1328,8 @@ void three_setup() {
 
 void three_shutdown() {
     RenderState& s = g_three;
-    for (ModelRecord& rec : s.models) {
-        for (MeshRecord& mesh : rec.meshes) destroy_mesh(mesh);
-    }
-    s.models.clear();
+    unload_all_models();
+    set_mesh_release(nullptr);
     s.passes.clear();
     for (SkyboxRecord& rec : s.skyboxes) {
         if (rec.view.id != SG_INVALID_ID) sg_destroy_view(rec.view);

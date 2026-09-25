@@ -1,0 +1,52 @@
+// What {{name}} and its server share: the networked player, and the numbers
+// both sides have to agree on. Included by src/main.cpp (the game) and
+// src/server.cpp (the dedicated server).
+#pragma once
+
+#include <thistle.hpp>
+
+#include <functional>
+
+constexpr int default_port = 47000;
+constexpr float moves_per_second = 20.0f; // how often each player tells the server where they are
+
+// One player, as everyone sees it. The server makes one per connection
+// (net_spawn) and every client gets a copy. Its owner moves it: their game
+// sends "move", the server checks the move and passes it on to the others.
+class Player : public thistle::NetObject {
+public:
+    thistle::NetVar<int> owner{0};                  // the connection id of whoever plays it
+    thistle::NetVar<thistle::vec3> position{{0, 0, 0}};
+    thistle::NetVar<float> facing{0.0f};            // yaw, radians (0 faces -Z)
+    thistle::NetVar<thistle::rgba> color{thistle::white};
+
+    // Set by the server: what to do with a player's move. (Commands run on
+    // the server only.)
+    static inline std::function<void(Player&, thistle::vec3, float)> on_move;
+    // Set by the game: the server put this player somewhere else (a spawn
+    // point, or back after a move it refused).
+    static inline std::function<void(thistle::vec3, float)> on_teleport;
+
+    Player() {
+        net_sync("owner", owner);
+        net_sync("position", position);
+        net_sync("facing", facing);
+        net_sync("color", color);
+        on_command("move", [this](const thistle::NetArgs& a) {
+            if (thistle::net::command_sender() != owner.get() || !on_move) return; // only its own player moves it
+            on_move(*this, a.at("p").get<thistle::vec3>(), a.at("f").get<float>());
+        });
+        on_client_rpc("teleport", [](const thistle::NetArgs& a) {
+            if (on_teleport) on_teleport(a.at("p").get<thistle::vec3>(), a.at("f").get<float>());
+        });
+    }
+
+    // Game side: where we are now.
+    void send_move(thistle::vec3 p, float f) { call_command("move", {{"p", p}, {"f", f}}); }
+    // Server side: moves the player, and tells their game to go there too.
+    void teleport(thistle::vec3 p, float f) {
+        position = p;
+        facing = f;
+        call_target_rpc(owner.get(), "teleport", {{"p", p}, {"f", f}});
+    }
+};

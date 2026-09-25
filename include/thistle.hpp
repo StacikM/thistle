@@ -842,6 +842,13 @@ NetObject* net_find(uint32_t id);
 // client tiebreak as net_find() if both are active in one process.
 void net_each_object(const std::function<void(NetObject&)>& fn);
 
+// A player connected to a NetServer, as NetServer::connections() lists them.
+struct NetConnection {
+    int id = 0;            // what on_connect got and net::command_sender() returns
+    std::string address;   // "203.0.113.7:51544"
+    double seconds = 0.0;  // how long they've been connected
+};
+
 class NetServer {
 public:
     NetServer();
@@ -851,10 +858,24 @@ public:
 
     bool listen(int port);   // starts accepting connections; false on bind/listen failure
     void update();            // call every tick: accept, read+dispatch Commands, flush dirty NetVars
+    // Tells every player the server stopped, then closes everything.
     void stop();
 
+    // Disconnects a player. Their client's disconnect_reason() becomes
+    // "Kicked: <reason>" ("Kicked by the server" without one), for the game
+    // to show. on_disconnect runs for them. False if there's no such player.
+    bool kick(int conn_id, const std::string& reason = "");
+
     int connection_count() const;
+    std::vector<NetConnection> connections() const;
     NetObject* find(uint32_t id) const;   // unambiguous even if a NetClient is also active in this process
+
+    // Set before listen(). 0: no limit. A player past it is turned away
+    // with "The server is full".
+    int max_players = 0;
+    // "": anyone may join. Otherwise a client must connect() with the same
+    // password, or it's turned away with "Wrong password".
+    std::string password;
 
     std::function<void(int conn_id)> on_connect;
     std::function<void(int conn_id)> on_disconnect;
@@ -874,16 +895,24 @@ public:
     NetClient(const NetClient&) = delete;
     NetClient& operator=(const NetClient&) = delete;
 
-    bool connect(const std::string& host, int port);   // resolves + connects; blocks briefly
+    // Connects and waits for the server to let us in (blocks briefly; at
+    // most a few seconds if the server never answers). False if it couldn't,
+    // and disconnect_reason() says why: "Wrong password", "The server is
+    // full", "Couldn't reach <host>:<port>", ...
+    bool connect(const std::string& host, int port, const std::string& password = "");
     void update();                                       // call every tick: read+dispatch incoming messages
     void disconnect();
     bool connected() const;
     NetObject* find(uint32_t id) const;   // unambiguous even if a NetServer is also active in this process
     // This client's connection id as the server knows it (what
     // net::command_sender() returns there for our commands), e.g. to find
-    // which player object is ours. 0 until the server's welcome arrives
-    // (on the first update() after connecting).
+    // which player object is ours. Set once connect() has succeeded.
     int connection_id() const;
+    // Why the last connection ended or connect() failed, for the player:
+    // "Kicked: <reason>", "The server stopped", "Lost the connection to the
+    // server", or connect()'s reasons above. Already set when on_disconnect
+    // runs. "" after disconnect() (the game chose to leave).
+    const std::string& disconnect_reason() const;
 
     std::function<void()> on_connect;
     std::function<void()> on_disconnect;
@@ -892,7 +921,86 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     friend struct NetObjectAccess;
+    void end(const std::string& reason);
 };
+
+// --- dedicated servers -------------------------------------------------------
+// Only in a program that links thistle_server, the headless engine (which
+// defines THISTLE_SERVER): see docs/dedicated-servers.md.
+#if defined(THISTLE_SERVER)
+
+// Settings a server starts with. Code defaults, then server.json (made with
+// these values the first time the server runs), then command-line flags:
+// --port, --tick, --max-players, --password, --name, --config <file>.
+struct ServerConfig {
+    int port = 47000;
+    int tick_rate = 30;          // updates a second
+    int max_players = 0;         // 0: no limit
+    std::string password;        // "": anyone may join
+    std::string name = "Thistle server";
+};
+
+// A line typed into the server console: "kick 3 being rude".
+struct ServerCommand {
+    std::string name;               // "kick" (a leading / is dropped)
+    std::vector<std::string> args;  // {"3", "being", "rude"}; "quoted words" stay one argument
+    std::string line;               // the whole line as typed
+
+    const std::string& arg(size_t i) const;        // "" past the end
+    int integer(size_t i, int fallback = 0) const; // fallback if missing or not a number
+    std::string rest(size_t from) const;           // args from `from` on, joined by spaces: "being rude"
+    // Prints on the server console (and into the log file).
+    void reply(const std::string& text) const;
+};
+
+class DedicatedServer {
+public:
+    // argc/argv: main()'s, for the flags above. Other arguments are left
+    // for the game to read.
+    explicit DedicatedServer(ServerConfig defaults = {}, int argc = 0, char** argv = nullptr);
+    ~DedicatedServer();
+    DedicatedServer(const DedicatedServer&) = delete;
+    DedicatedServer& operator=(const DedicatedServer&) = delete;
+
+    DedicatedServer& start(std::function<void()> fn);           // once listening, before the first tick
+    DedicatedServer& update(std::function<void(float dt)> fn);  // every tick; dt = 1 / tick_rate
+    // When the server stops: `stop` typed in, Ctrl+C, or the system asking
+    // (SIGTERM from Docker/systemd, closing the console window). Save here.
+    DedicatedServer& stop(std::function<void()> fn);
+    // A player joined or left (after the server logged it). Use these, not
+    // net().on_connect/on_disconnect, which the server uses itself.
+    DedicatedServer& on_join(std::function<void(int conn_id)> fn);
+    DedicatedServer& on_leave(std::function<void(int conn_id)> fn);
+
+    // Adds a console command, or replaces the one with that name, built-ins
+    // included (help, list, kick, stop, status). `help` is its line in the
+    // help list: "kick <id> [reason]: disconnects a player".
+    DedicatedServer& command(const std::string& name, const std::string& help, std::function<void(const ServerCommand&)> fn);
+    void remove_command(const std::string& name);
+    // Runs a line as if typed into the console.
+    void run_command(const std::string& line);
+
+    // A setting of your own, from server.json. Missing, it's added there with
+    // `fallback`, so whoever runs the server can see and change it.
+    template <typename T>
+    T setting(const std::string& key, const T& fallback) { return setting_json(key, fallback).template get<T>(); }
+
+    NetServer& net();                    // the NetServer it runs: kick(), connections(), ...
+    const ServerConfig& config() const;
+    double uptime() const;               // seconds since run() started
+    void quit();                         // stops after this tick, like typing `stop`
+
+    // Listens and ticks until stopped. Returns the exit code for main():
+    // 0, or 1 if the port couldn't be opened.
+    int run();
+
+private:
+    nlohmann::json setting_json(const std::string& key, const nlohmann::json& fallback);
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+#endif // THISTLE_SERVER
 
 // --- in-app purchases -----------------------------------------------------
 // Poll-based, same shape as Http: kick a request off, poll for the result

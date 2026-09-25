@@ -90,7 +90,7 @@ std::string time_ago(long long when) {
 
 // The level a template comes with, opened when its project is.
 std::string template_scene(const std::string& kind) {
-    if (kind == "fps" || kind == "third-person") return "assets/scenes/level.scene.json";
+    if (kind == "fps" || kind == "third-person" || kind == "multiplayer") return "assets/scenes/level.scene.json";
     if (kind == "voxel") return "assets/scenes/spawn.scene.json";
     return "";
 }
@@ -104,6 +104,7 @@ const Choice kTemplates[] = {
     {"fps", "First person", "Walk a level made in this editor, shoot the targets, reach the exit."},
     {"third-person", "Third person", "A character behind an orbiting camera: coins, a jump pad, a flag."},
     {"voxel", "Block world", "An endless Minecraft-style world: break, place, build, saved between runs."},
+    {"multiplayer", "Multiplayer", "Players in an arena, and a dedicated server you type commands into."},
     {"blank", "Blank (2D)", "A window and two shapes: the smallest start. No 3D level."},
 };
 const Choice kModules[] = {
@@ -610,13 +611,13 @@ struct Hub::Impl {
         label("Makes " + pretty_path(new_name.empty() ? location / "<name>" : folder), o + vec2{24, 208}, theme::faint, 12);
 
         label("Start from", o + vec2{24, 238}, theme::dim, 13);
-        for (int i = 0; i < 4; ++i) {
-            const Rect card{o + vec2{24.0f + (i % 2) * 310.0f, 258.0f + (i / 2) * 78.0f}, {302, 70}};
+        for (int i = 0; i < static_cast<int>(std::size(kTemplates)); ++i) {
+            const Rect card{o + vec2{24.0f + (i % 3) * 207.0f, 258.0f + (i / 3) * 80.0f}, {198, 74}};
             const bool on = new_template == i;
             f->rect(card.pos - vec2{1, 1}, card.size + vec2{2, 2}, on ? theme::accent : theme::chrome);
             f->rect(card.pos, card.size, on ? theme::field_active : hovering(card) ? theme::field_hover : theme::field);
             label(kTemplates[i].title, card.pos + vec2{12, 8}, theme::text, 15);
-            float ly = card.pos.y + 30;
+            float ly = card.pos.y + 28;
             for (const std::string& line : wrap(*f, kTemplates[i].about, card.size.x - 24, 12)) {
                 label(line, {card.pos.x + 12, ly}, theme::dim, 12);
                 ly += 15;

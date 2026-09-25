@@ -1,6 +1,6 @@
 // three::Collider's builders. Plain data, so they're built either way:
 // games that make colliders compile and run the same with Physics3D off.
-#include "thistle_internal.h"
+#include "thistle_core.h"
 
 namespace thistle::three {
 

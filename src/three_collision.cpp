@@ -1,4 +1,4 @@
-#include "thistle_internal.h"
+#include "thistle_core.h"
 
 #include <algorithm>
 #include <cmath>

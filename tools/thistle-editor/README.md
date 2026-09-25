@@ -30,7 +30,7 @@ Recent projects on the right, and what to do on the left:
 
 - **New project** is `thistle new` with a form. You pick:
   - a name and where to make it
-  - what to start from: first person, third person, block world, or blank 2D
+  - what to start from: first person, third person, block world, multiplayer (a game and its dedicated server: Build & run starts the game, and its server runs with `thistle run --server`, see [docs/dedicated-servers.md](../../docs/dedicated-servers.md)), or blank 2D
   - optional engine modules: 3D physics (Jolt), and the debug UI (Dear ImGui)
   - whether to open it in the editor straight away, and then build and run it
 
