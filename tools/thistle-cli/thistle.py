@@ -10,8 +10,9 @@ Commands:
     thistle new <name> [--at PATH] [--template KIND] [--with MODULE]...
                                      create a new project
     thistle init [--name NAME]       make the current folder a project (overwrites nothing)
-    thistle build [--release]        configure + build the project in cwd
-    thistle run [--release]          build, then run the result
+    thistle build [--release] [--server]   configure + build the project in cwd
+    thistle run [--release] [--server] [-- ARGS]
+                                     build, then run the game (or its server)
     thistle version show             print the current version
     thistle version set X.Y.Z        set an exact version
     thistle version bump PART        bump major/minor/patch by one
@@ -172,7 +173,7 @@ def cmd_new(args) -> None:
         editor_assets = ENGINE_ROOT / "tools" / "thistle-editor" / "editor_assets"
         for f in ("inter-regular.ttf", "inter-OFL-LICENSE.txt"):
             shutil.copy2(editor_assets / f, fonts / f)
-    (dest / ".gitignore").write_text("build/\n.DS_Store\n", encoding="utf-8")
+    (dest / ".gitignore").write_text("build/\nbuild-server/\n.DS_Store\n", encoding="utf-8")
     project = {"name": name, "version": "1.0.0", "template": kind}
     if args.modules:
         project["modules"] = {m: True for m in args.modules}
@@ -216,7 +217,7 @@ def cmd_init(args) -> None:
     add("src/main.cpp", render("main.cpp.in", name=name))
     add("src/version.hpp.in", (TEMPLATES / "version.hpp.in").read_text(encoding="utf-8"))
     add("README.md", render("README.md.in", name=name, about=""))
-    add(".gitignore", "build/\n.DS_Store\n")
+    add(".gitignore", "build/\nbuild-server/\n.DS_Store\n")
     if not (dest / "assets").exists():
         (dest / "assets").mkdir()
         added.append("assets/")
@@ -238,10 +239,44 @@ def _config_name(args) -> str:
     return "Release" if args.release else "Debug"
 
 
+# The lines a project made by an older `thistle new` needs for a server
+# program (the current template has them).
+SERVER_CMAKE_LINES = """if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/server.cpp")
+    add_executable(NAME-server src/server.cpp)
+    target_link_libraries(NAME-server PRIVATE thistle_server)
+    target_include_directories(NAME-server PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    thistle_bundle_assets(NAME-server "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+endif()
+if(THISTLE_SERVER_ONLY)
+    return()
+endif()"""
+
+
+def _check_server(root: Path, name: str) -> None:
+    if not (root / "src" / "server.cpp").exists():
+        die("this project has no dedicated server: that's src/server.cpp (see docs/dedicated-servers.md "
+            "in the engine, or start from `thistle new mygame --template multiplayer`)")
+    if "THISTLE_SERVER_ONLY" not in (root / "CMakeLists.txt").read_text(encoding="utf-8", errors="replace"):
+        die("this project's CMakeLists.txt is from an older `thistle new` and doesn't build a server yet. "
+            "Add these lines before its add_executable():\n\n" + SERVER_CMAKE_LINES.replace("NAME", name))
+
+
 def cmd_build(args) -> None:
     root = find_project_root(Path.cwd())
-    build_dir = root / "build"
     config = _config_name(args)
+    if getattr(args, "server", False):
+        # Only the server, in a build of its own: the engine without window,
+        # graphics or audio, so this works where no graphics libraries are
+        # installed (a VPS, a Docker image).
+        name = read_project(root)["name"]
+        _check_server(root, name)
+        build_dir = root / "build-server"
+        if not (build_dir / "CMakeCache.txt").exists():
+            run(["cmake", "-S", str(root), "-B", str(build_dir), f"-DCMAKE_BUILD_TYPE={config}", "-DTHISTLE_SERVER_ONLY=ON"])
+        run(["cmake", "--build", str(build_dir), "--config", config, "--parallel", str(os.cpu_count() or 2),
+             "--target", f"{name}-server"])
+        return
+    build_dir = root / "build"
     if not (build_dir / "CMakeCache.txt").exists():
         run(["cmake", "-S", str(root), "-B", str(build_dir), f"-DCMAKE_BUILD_TYPE={config}"])
     # All cores: without it Make builds one file at a time, and the first
@@ -267,16 +302,26 @@ def cmd_run(args) -> None:
     cmd_build(args)
     root = find_project_root(Path.cwd())
     proj = read_project(root)
+    rest = args.args[1:] if args.args[:1] == ["--"] else args.args
+    if args.server:
+        exe = _find_executable(root / "build-server", proj["name"] + "-server", _config_name(args))
+        if not exe:
+            die("built, but couldn't find the server's executable — check the build output above")
+        print("$ " + " ".join([str(exe)] + rest))
+        # Its own folder, like the game: its assets/ are there, and so are
+        # server.json, logs/ and its save data.
+        os.chdir(exe.parent)
+        hand_over([str(exe)] + rest)
     exe = _find_executable(root / "build", proj["name"], _config_name(args))
     if not exe:
         die("built, but couldn't find the executable to run — check the build output above")
-    print("$ " + str(exe))
+    print("$ " + " ".join([str(exe)] + rest))
     # Run it from its own folder, where the build put its assets/ (as a
     # player's copy runs), not from wherever this was typed: from src/ the
     # game would find no assets at all. (On macOS the engine moves into the
     # app bundle's Resources itself.)
     os.chdir(exe.parent)
-    hand_over([str(exe)])
+    hand_over([str(exe)] + rest)
 
 
 # --- editor --------------------------------------------------------------
@@ -476,10 +521,15 @@ def main() -> None:
 
     p_build = sub.add_parser("build", help="configure + build the project in the current directory")
     p_build.add_argument("--release", action="store_true")
+    p_build.add_argument("--server", action="store_true",
+                         help="only the dedicated server (src/server.cpp), in build-server/, with no graphics")
     p_build.set_defaults(func=cmd_build)
 
     p_run = sub.add_parser("run", help="build (if needed), then run the result")
     p_run.add_argument("--release", action="store_true")
+    p_run.add_argument("--server", action="store_true",
+                       help="build and run the dedicated server instead; what follows -- goes to it (--port 47001)")
+    p_run.add_argument("args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     p_run.set_defaults(func=cmd_run)
 
     p_version = sub.add_parser("version", help="show or change the project's version")

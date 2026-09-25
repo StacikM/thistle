@@ -33,10 +33,11 @@ function(thistle_bundle_assets TARGET ASSETS_DIR)
         return()
     endif()
 
-    if(APPLE)
+    get_target_property(_thistle_bundle ${TARGET} MACOSX_BUNDLE)
+    if(APPLE AND _thistle_bundle)
         # MACOSX_PACKAGE_LOCATION only takes effect on a bundle target
         # (add_executable(... MACOSX_BUNDLE ...) on macOS, or any iOS app
-        # target) — a plain non-bundle executable ignores it harmlessly.
+        # target). A plain program (a dedicated server) gets the copy below.
         # CONFIGURE_DEPENDS: a file added later (a level saved under a new
         # name, a model the editor imported) makes the next build re-run
         # this, instead of the bundle silently missing it until someone
@@ -50,7 +51,8 @@ function(thistle_bundle_assets TARGET ASSETS_DIR)
         endforeach()
         target_sources(${TARGET} PRIVATE ${_thistle_asset_files})
     else()
-        # Windows/Linux: copied next to the executable on every build. (A
+        # Windows/Linux, and plain programs on macOS: copied next to the
+        # executable on every build. (A
         # POST_BUILD step only runs when the program is relinked, so a level
         # saved in the editor or a changed texture never reached a game
         # whose code hadn't changed.) Only changed files are copied, on

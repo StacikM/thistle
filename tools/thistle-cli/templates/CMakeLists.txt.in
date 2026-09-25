@@ -41,6 +41,23 @@ configure_file(
     @ONLY
 )
 
+# A dedicated server, when the project has one (src/server.cpp): a program
+# with no window, graphics or audio, on the headless engine (thistle_server).
+# `thistle build --server` builds only it, with THISTLE_SERVER_ONLY, which
+# works on a machine without graphics libraries (a VPS, a Docker image).
+# See docs/dedicated-servers.md in the engine. (src/ changing makes CMake
+# look again, so adding server.cpp later is noticed on the next build.)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/server.cpp")
+    add_executable({{name}}-server src/server.cpp)
+    target_link_libraries({{name}}-server PRIVATE thistle_server)
+    target_include_directories({{name}}-server PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    thistle_bundle_assets({{name}}-server "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+endif()
+if(THISTLE_SERVER_ONLY)
+    return()
+endif()
+
 if(APPLE)
     add_executable({{name}} MACOSX_BUNDLE src/main.cpp)
 else()
