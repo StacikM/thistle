@@ -32,7 +32,17 @@ if (f.key_pressed(Key::Enter)) { current_name = typed; end_text_input(); }
 
 Real keystroke capture, not a fake — `begin_text_input()` starts accumulating printable ASCII characters (Backspace edits the buffer) into an internal string you read back with `text_input()` every frame, and `end_text_input()` stops it (hides the soft keyboard on mobile too). There's no visual text-box widget anywhere in the engine — no cursor, no selection, no click-to-position — you draw whatever box/highlight you want around the live `text_input()` value yourself with `f.rect()`/`f.text()`, the same "you compute your own positions" philosophy as everything else in `docs/ui-and-scenes.md`. `tools/thistle-editor`'s `text_box` and `number` widgets are a real example: click (or double-click a number) to `begin_text_input()`, draw `text_input() + "|"` as a stand-in cursor while active, Enter or a click elsewhere commits, Escape cancels.
 
+The buffer holds up to `max_length` characters: `begin_text_input(initial, max_length)`, 40 when you don't say. (It was always 40, undocumented, until the editor's file-path field ran into it.) **Pasting** works: Ctrl+V (Cmd+V on a Mac) appends the clipboard's printable text. Characters typed with Ctrl or Cmd held aren't added, so Ctrl+V doesn't also type a "v". Ctrl+Alt still types, because on Windows that's AltGr, which is how many keyboards type @ and {. Paste has been tested on X11. On macOS and Windows it's sokol's clipboard support, which the engine already had switched on.
+
 While capturing, your own keyboard shortcuts still fire from the same physical keys — `begin_text_input()` doesn't suppress `key_pressed()`/`key_down()` for you. If a shortcut and typing share a key (WASD movement and someone typing the letter "s" into a name, say), gate your shortcut handling behind whatever "am I currently capturing text" flag your own code is tracking; the engine has no such flag itself, since it doesn't know which of your fields (if any) is "focused."
+
+### Dropped files
+
+```cpp
+for (const std::string& path : f.dropped_files()) open_level(path);
+```
+
+Files dragged from the desktop or a file manager and let go over the window arrive as full paths, in `dropped_files()`, for the one frame they were dropped (up to 32 at once). Desktop only: on phones and the web the list is always empty. On the web, a drop gives file names, not paths anything can open. The Thistle Editor imports models this way. Tested on Linux/X11 with a real XDND drop. On macOS and Windows it's sokol's own drop support, now switched on, and not yet tried there.
 
 ### Touch
 

@@ -14,11 +14,11 @@
 #include <array>
 #include <unordered_map>
 
-namespace thistle::three {
+namespace thistle::detail {
 
 namespace {
-
 const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+} // namespace
 
 std::string b64_encode(const std::vector<uint8_t>& in) {
     std::string out;
@@ -57,6 +57,16 @@ std::vector<uint8_t> b64_decode(const std::string& in) {
     }
     return out;
 }
+
+} // namespace thistle::detail
+
+namespace thistle::three {
+
+using detail::b64_decode;
+using detail::b64_encode;
+
+namespace {
+
 
 uint64_t pack(ivec3 c) {
     constexpr int64_t bias = 1 << 20;

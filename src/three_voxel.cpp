@@ -67,6 +67,8 @@ struct VoxelWorldImpl {
     ivec3 focus{0, 0, 0}; // block the last stream_around() centered on; re-meshing goes nearest-first
     bool has_focus = false;
     uint64_t revision = 0; // bumped by every change to any chunk
+    Bounds grid_box;       // grid_bounds() in block units, as of grid_box_revision
+    uint64_t grid_box_revision = ~uint64_t{0};
 
     // Consecutive set()/get() calls almost always hit the same chunk (a
     // generator filling one, a fill() box), so remember the last one.
@@ -126,6 +128,12 @@ BlockId VoxelWorld::add_block(const BlockType& type) {
 }
 
 const BlockType& VoxelWorld::block_type(BlockId id) const { return impl_->type(id); }
+
+void VoxelWorld::set_block_type(BlockId id, const BlockType& type) {
+    if (id == 0 || id >= impl_->types.size()) return;
+    impl_->types[id] = type;
+    for (auto& [key, chunk] : impl_->chunks) chunk.dirty = true;
+}
 
 BlockId VoxelWorld::find_block(const std::string& name) const {
     for (size_t i = 1; i < impl_->types.size(); ++i) {
@@ -225,19 +233,30 @@ Bounds VoxelWorld::block_bounds(ivec3 b) const {
     return local.transformed(Transform{origin, rotation}.matrix());
 }
 
-Bounds VoxelWorld::bounds() const {
-    Bounds out;
-    for (const auto& [key, chunk] : impl_->chunks) {
-        if (chunk.non_air == 0) continue;
-        const ivec3 c = key_chunk(key);
-        for (int i = 0; i < CS3; ++i) {
-            if (chunk.blocks[i] == 0) continue;
-            const ivec3 b{c.x * CS + i % CS, c.y * CS + (i / CS) % CS, c.z * CS + i / (CS * CS)};
-            out.add(vec3{static_cast<float>(b.x), static_cast<float>(b.y), static_cast<float>(b.z)} * voxel_size);
-            out.add(vec3{b.x + 1.0f, b.y + 1.0f, b.z + 1.0f} * voxel_size);
+Bounds VoxelWorld::grid_bounds() const {
+    VoxelWorldImpl& w = *impl_;
+    if (w.grid_box_revision != w.revision) {
+        Bounds box;
+        for (const auto& [key, chunk] : w.chunks) {
+            if (chunk.non_air == 0) continue;
+            const ivec3 c = key_chunk(key);
+            for (int i = 0; i < CS3; ++i) {
+                if (chunk.blocks[i] == 0) continue;
+                const ivec3 b{c.x * CS + i % CS, c.y * CS + (i / CS) % CS, c.z * CS + i / (CS * CS)};
+                box.add(vec3{static_cast<float>(b.x), static_cast<float>(b.y), static_cast<float>(b.z)});
+                box.add(vec3{b.x + 1.0f, b.y + 1.0f, b.z + 1.0f});
+            }
         }
+        w.grid_box = box;
+        w.grid_box_revision = w.revision;
     }
-    return out.transformed(Transform{origin, rotation}.matrix());
+    if (!w.grid_box.valid()) return {};
+    return {w.grid_box.min * voxel_size, w.grid_box.max * voxel_size};
+}
+
+Bounds VoxelWorld::bounds() const {
+    const Bounds local = grid_bounds();
+    return local.valid() ? local.transformed(Transform{origin, rotation}.matrix()) : Bounds{};
 }
 
 int VoxelWorld::chunk_count() const { return static_cast<int>(impl_->chunks.size()); }
@@ -265,6 +284,19 @@ void VoxelWorld::copy_block_types(const VoxelWorld& from) {
     impl_->tile_size = from.impl_->tile_size;
     impl_->atlas_filter = from.impl_->atlas_filter;
     for (auto& [key, chunk] : impl_->chunks) chunk.dirty = true;
+}
+
+VoxelWorld VoxelWorld::copy() const {
+    VoxelWorld out;
+    const std::vector<uint8_t> bytes = serialize();
+    out.deserialize(bytes.data(), bytes.size());
+    out.copy_block_types(*this); // the atlas (serialize() has the types, not the texture)
+    out.voxel_size = voxel_size;
+    out.origin = origin;
+    out.rotation = rotation;
+    out.ambient_occlusion = ambient_occlusion;
+    out.max_remesh_per_frame = max_remesh_per_frame;
+    return out;
 }
 
 namespace {

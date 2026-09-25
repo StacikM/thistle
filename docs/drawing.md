@@ -35,6 +35,8 @@ f.sprite(spritesheet, pos, { .src = run.frame_at(f.time) });
 
 If your sheet isn't a uniform grid, don't fight `Anim` — build the `Rect` yourself and pass it as `.src`. `Anim` is a convenience for the 90% case, not a general spritesheet format.
 
+Sprites and text mix freely in one frame. That wasn't always true: a sprite drawn after any `f.text()` in the same frame used to come out as a solid white box, because sokol's text renderer switches texturing off when it's done and `sprite()` didn't switch it back on. Found while building the Thistle Editor's block palette, reproduced in a minimal program (text, then a sprite: white), and fixed. The same program now draws the sprite textured. Checked on Linux/GL under Xvfb. The cause is in sokol-gl's shared state, the same on every backend, and so is the fix.
+
 Textures own GPU memory. `unload_texture()` when a level goes away, or you leak GPU images for the life of the process. `reload_texture()` re-reads from disk — useful for live-editing art during development, useless in a shipped build, don't call it in a hot path.
 
 ## Text

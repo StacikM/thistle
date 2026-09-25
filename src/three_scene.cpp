@@ -28,12 +28,13 @@ const char* kind_name(SceneEntity::Kind k) {
         case SceneEntity::Kind::SpotLight: return "spot_light";
         case SceneEntity::Kind::Trigger: return "trigger";
         case SceneEntity::Kind::Spawn: return "spawn";
+        case SceneEntity::Kind::Voxels: return "voxels";
     }
     return "empty";
 }
 
 SceneEntity::Kind kind_from(const std::string& s) {
-    for (int k = 0; k <= static_cast<int>(SceneEntity::Kind::Spawn); ++k) {
+    for (int k = 0; k <= static_cast<int>(SceneEntity::Kind::Voxels); ++k) {
         if (s == kind_name(static_cast<SceneEntity::Kind>(k))) return static_cast<SceneEntity::Kind>(k);
     }
     return SceneEntity::Kind::Empty;
@@ -45,6 +46,14 @@ Model cached_model(const std::string& path) {
     static std::unordered_map<std::string, Model> cache;
     auto it = cache.find(path);
     if (it == cache.end()) it = cache.emplace(path, load_model(path)).first;
+    return it->second;
+}
+
+// Block atlases likewise: several block objects usually share one.
+Texture cached_texture(const std::string& path) {
+    static std::unordered_map<std::string, Texture> cache;
+    auto it = cache.find(path);
+    if (it == cache.end()) it = cache.emplace(path, load_texture(path)).first;
     return it->second;
 }
 
@@ -75,7 +84,7 @@ void SceneEntity::set_property(const std::string& key, const std::string& value)
     properties.emplace_back(key, value);
 }
 
-std::string Scene3D::to_json() const {
+std::string Scene3D::to_json(bool voxel_blocks) const {
     nlohmann::json j;
     j["thistle_scene"] = kFormat;
     j["environment"] = {
@@ -95,6 +104,13 @@ std::string Scene3D::to_json() const {
             je["range"] = e.range;
         }
         if (e.kind == SceneEntity::Kind::SpotLight) je["spot_angle"] = e.spot_angle;
+        if (e.kind == SceneEntity::Kind::Voxels) {
+            if (voxel_blocks) je["blocks"] = e.voxels ? detail::b64_encode(e.voxels->serialize()) : std::string();
+            if (!e.atlas.empty()) {
+                je["atlas"] = e.atlas;
+                je["atlas_tile"] = e.atlas_tile;
+            }
+        }
         if (!e.properties.empty()) {
             nlohmann::json props = nlohmann::json::array();
             for (const auto& [k, v] : e.properties) props.push_back({k, v}); // an array keeps their order
@@ -155,6 +171,16 @@ bool Scene3D::from_json(const std::string& text) {
         e.intensity = get_or(je, "intensity", e.intensity);
         e.range = get_or(je, "range", e.range);
         e.spot_angle = get_or(je, "spot_angle", e.spot_angle);
+        if (e.kind == SceneEntity::Kind::Voxels) {
+            e.voxels = std::make_shared<VoxelWorld>();
+            const std::vector<uint8_t> bytes = detail::b64_decode(get_or<std::string>(je, "blocks", ""));
+            if (!bytes.empty() && !e.voxels->deserialize(bytes.data(), bytes.size())) {
+                log_warn("Scene3D: the blocks of '" + e.name + "' didn't load (damaged data); it's empty");
+            }
+            e.atlas = get_or<std::string>(je, "atlas", "");
+            e.atlas_tile = std::max(1, get_or(je, "atlas_tile", 16));
+            if (!e.atlas.empty()) e.voxels->set_atlas(cached_texture(e.atlas), e.atlas_tile);
+        }
         if (auto p = je.find("properties"); p != je.end() && p->is_array()) {
             for (const auto& kv : *p) {
                 if (kv.is_array() && kv.size() == 2 && kv[0].is_string() && kv[1].is_string()) {
@@ -176,6 +202,7 @@ bool Scene3D::from_json(const std::string& text) {
             if (walk >= n) break;
         }
     }
+    place_voxels();
     return true;
 }
 
@@ -202,11 +229,18 @@ int Scene3D::add(const SceneEntity& entity) {
     return static_cast<int>(entities.size()) - 1;
 }
 
-void Scene3D::remove(int index) {
+void Scene3D::remove(int index) { remove(std::vector<int>{index}); }
+
+void Scene3D::remove(const std::vector<int>& indices) {
     const int n = static_cast<int>(entities.size());
-    if (index < 0 || index >= n) return;
     std::vector<uint8_t> gone(static_cast<size_t>(n), 0);
-    gone[static_cast<size_t>(index)] = 1;
+    bool any = false;
+    for (int index : indices) {
+        if (index < 0 || index >= n) continue;
+        gone[static_cast<size_t>(index)] = 1;
+        any = true;
+    }
+    if (!any) return;
     // Descendants: repeat until nothing new is marked (parents can come after children).
     for (bool changed = true; changed;) {
         changed = false;
@@ -300,6 +334,10 @@ Bounds Scene3D::local_bounds(int index) const {
         case SceneEntity::Kind::Trigger: return {{-0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, 0.5f}};
         case SceneEntity::Kind::Plane: return {{-0.5f, -0.01f, -0.5f}, {0.5f, 0.01f, 0.5f}};
         case SceneEntity::Kind::Spawn: return {{-0.25f, 0.0f, -0.25f}, {0.25f, 1.8f, 0.25f}}; // a person standing there
+        case SceneEntity::Kind::Voxels: {
+            const Bounds b = e.voxels ? e.voxels->grid_bounds() : Bounds{};
+            return b.valid() ? b : Bounds{{0, 0, 0}, {0.5f, 0.5f, 0.5f}};
+        }
         default: return {{-0.2f, -0.2f, -0.2f}, {0.2f, 0.2f, 0.2f}};
     }
 }
@@ -326,6 +364,16 @@ Model Scene3D::model(int index) const {
     return cached_model(e.model);
 }
 
+void Scene3D::place_voxels() {
+    for (size_t i = 0; i < entities.size(); ++i) {
+        SceneEntity& e = entities[i];
+        if (e.kind != SceneEntity::Kind::Voxels || !e.voxels) continue;
+        const Transform t = world_transform(static_cast<int>(i));
+        e.voxels->origin = t.position;
+        e.voxels->rotation = t.rotation;
+    }
+}
+
 void Scene3D::draw(World& world, bool environment) const {
     if (environment) {
         const Skybox keep = world.sky.skybox; // not part of the file: leave whatever the game set
@@ -345,6 +393,13 @@ void Scene3D::draw(World& world, bool environment) const {
             case SceneEntity::Kind::Cylinder: world.cylinder(t, e.color); break;
             case SceneEntity::Kind::Cone: world.cone(t, e.color); break;
             case SceneEntity::Kind::Plane: world.plane(t, e.color); break;
+            case SceneEntity::Kind::Voxels:
+                if (e.voxels) {
+                    e.voxels->origin = t.position; // as place_voxels(), which isn't const
+                    e.voxels->rotation = t.rotation;
+                    world.draw(*e.voxels);
+                }
+                break;
             case SceneEntity::Kind::PointLight: world.light(PointLight{t.position, e.color, e.range, e.intensity}); break;
             case SceneEntity::Kind::SpotLight: {
                 SpotLight l;

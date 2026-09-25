@@ -485,6 +485,9 @@ public:
     // device, so treat it as "some scroll happened this frame," not a
     // guaranteed direction, the same caveat any cross-platform scroll API has).
     float mouse_scroll() const;
+    // Files dragged onto the window and let go this frame, as full paths.
+    // Desktop only (macOS, Windows, Linux): always empty on phones and the web.
+    const std::vector<std::string>& dropped_files() const;
 
     // Touch. On phones a tap is also delivered as a left-mouse click, so mouse_*
     // code works as-is; these are just clearer names for the primary finger.
@@ -657,10 +660,11 @@ void set_crash_popup(bool enabled);
 void set_crash_context(const std::string& key, const std::string& value);
 
 // On-screen text input. begin_text_input() shows the soft keyboard on mobile and
-// starts capturing typed characters (printable ASCII; Backspace edits); read the
-// buffer with text_input() each frame; end_text_input() hides it. Use for naming
-// a level, a login field, etc.
-void begin_text_input(const std::string& initial = "");
+// starts capturing typed characters (printable ASCII; Backspace edits; pasting
+// with Ctrl+V / Cmd+V adds the clipboard's text) up to max_length characters;
+// read the buffer with text_input() each frame; end_text_input() hides it. Use
+// for naming a level, a login field, a file path, etc.
+void begin_text_input(const std::string& initial = "", size_t max_length = 40);
 void end_text_input();
 const std::string& text_input();
 
@@ -2165,6 +2169,8 @@ public:
     // Block types. Ids are handed out in order starting at 1.
     BlockId add_block(const BlockType& type);
     const BlockType& block_type(BlockId id) const; // id 0 or unknown: an "air" type
+    // Changes what an existing type looks like (its blocks re-mesh). Unknown ids and 0 are ignored.
+    void set_block_type(BlockId id, const BlockType& type);
     BlockId find_block(const std::string& name) const; // 0 if there's none by that name
     int block_type_count() const;
     // One texture holding every block texture in a grid of tile_size-pixel
@@ -2182,7 +2188,11 @@ public:
     ivec3 to_block(vec3 world_point) const;    // which block a world point is inside
     vec3 block_center(ivec3 block) const;      // world position of a block's center
     Bounds block_bounds(ivec3 block) const;    // world-space box of one block
-    Bounds bounds() const;                     // world-space box around every non-air block (slow-ish: scans)
+    Bounds bounds() const;                     // world-space box around every non-air block
+    // The same box in the grid's own space: block coordinates times
+    // voxel_size, before origin and rotation. Both scan the blocks only after
+    // a change; otherwise they're remembered.
+    Bounds grid_bounds() const;
 
     int chunk_count() const;
     int block_count() const; // blocks that aren't air
@@ -2191,6 +2201,9 @@ public:
     // Takes another world's block types and atlas (replacing this one's), so
     // ids mean the same in both: for pieces broken off it, copies, previews.
     void copy_block_types(const VoxelWorld& from);
+    // A separate world with the same blocks, types, atlas and placement
+    // (not the generator). Worlds can't be copied with `=`: they own GPU meshes.
+    VoxelWorld copy() const;
     // The mesh the renderer draws for one chunk (chunk coordinates, i.e.
     // block / 32), in the chunk's own block units — useful for exporting,
     // or for tests. Parts are split by material (flat vs textured, alpha).
@@ -2751,8 +2764,9 @@ private:
 
 // --- scenes (what the Thistle Editor saves) ------------------------------------------------------
 // A level: named things, each with a transform relative to its parent, that
-// are a model, a built-in shape, a light, a trigger volume, a spawn point,
-// or an empty used as a group. Plus the environment (sun, sky, fog). The
+// are a model, a built-in shape, a block object (voxels), a light, a trigger
+// volume, a spawn point, or an empty used as a group. Plus the environment
+// (sun, sky, fog). The
 // Thistle Editor saves these as .scene.json; a game loads one and either
 // draws it as is, or reads it to place its own things: that's what spawn
 // points, triggers and each entity's free-form properties are for.
@@ -2764,7 +2778,7 @@ private:
 //   // every frame:
 //   level.draw(world);
 struct SceneEntity {
-    enum class Kind { Empty, Model, Box, Sphere, Cylinder, Cone, Plane, PointLight, SpotLight, Trigger, Spawn };
+    enum class Kind { Empty, Model, Box, Sphere, Cylinder, Cone, Plane, PointLight, SpotLight, Trigger, Spawn, Voxels };
     std::string name;
     Kind kind = Kind::Empty;
     int parent = -1;       // index into Scene3D::entities, -1 = at the top
@@ -2776,6 +2790,15 @@ struct SceneEntity {
     float spot_angle = radians(30.0f); // spot lights: half the cone's opening
     // Anything the game needs to know: {"health", "100"}, {"door", "exit"}.
     std::vector<std::pair<std::string, std::string>> properties;
+    // Kind::Voxels: its blocks. The grid's origin (block 0,0,0's corner) is
+    // the entity's position and it turns with its rotation; scale doesn't
+    // apply (the block size is voxels->voxel_size). Copies of the entity
+    // share this world: copy() it for a separate one. Hand it to Physics3D,
+    // VoxelDestruction or VoxelSync like any other VoxelWorld.
+    std::shared_ptr<VoxelWorld> voxels;
+    // Kind::Voxels with textured blocks: the atlas image, and its tile size in pixels.
+    std::string atlas;
+    int atlas_tile = 16;
 
     std::string property(const std::string& key, const std::string& fallback = {}) const;
     void set_property(const std::string& key, const std::string& value);
@@ -2790,13 +2813,18 @@ public:
     float ambient = 0.55f;
 
     // The file's text, and back. Paths inside stay as they were written.
+    // Voxel entities' blocks go in the file too (compressed, base64).
     bool save(const std::string& path) const;
     bool load(const std::string& path); // false (and an empty scene) if it can't be read
-    std::string to_json() const;
+    // voxel_blocks = false leaves the blocks out: quick, for telling whether
+    // anything else changed (the editor's undo). Such text doesn't load back
+    // with its blocks.
+    std::string to_json(bool voxel_blocks = true) const;
     bool from_json(const std::string& text);
 
     int add(const SceneEntity& entity);  // returns its index
     void remove(int index);              // and everything under it; later indices shift down
+    void remove(const std::vector<int>& indices); // several at once (removing them one by one would shift the later ones)
     // Moves `child` under `parent` (-1: the top), keeping where it is in the
     // world. Refused (false) if that would put it under itself.
     bool set_parent(int child, int parent);
@@ -2805,17 +2833,21 @@ public:
 
     Transform world_transform(int index) const;
     void set_world_transform(int index, const Transform& world);
-    // Its own box, before its transform: the model's, a unit shape's, or a
-    // small one for lights, spawns and empties.
+    // Its own box, before its transform: the model's, a unit shape's, the
+    // blocks' (voxels), or a small one for lights, spawns and empties.
     Bounds local_bounds(int index) const;
     // Whether a point in the world is inside its box (local_bounds() placed by
     // world_transform(), rotation included): "is the player in this trigger".
     bool inside(int index, vec3 point) const;
     Model model(int index) const; // the loaded model of a Kind::Model entity (loaded once per file, shared)
+    // Puts every voxel entity's world where its transform says (origin and
+    // rotation, through its parents). load() and draw() do this; call it
+    // yourself after moving one, before raycasting it or adding it to physics.
+    void place_voxels();
 
-    // Draws every model and shape and adds every light to `world`; with
-    // `environment`, also sets its sun, sky, fog and ambient. Triggers,
-    // spawns and empties don't draw (they're for the game to read).
+    // Draws every model, shape and block object and adds every light to
+    // `world`; with `environment`, also sets its sun, sky, fog and ambient.
+    // Triggers, spawns and empties don't draw (they're for the game to read).
     void draw(World& world, bool environment = true) const;
 };
 
