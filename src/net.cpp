@@ -368,7 +368,15 @@ bool NetServer::listen(int port) {
     impl_->listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (impl_->listen_fd == kInvalidSocket) return false;
     int yes = 1;
+#if defined(_WIN32)
+    // Not SO_REUSEADDR: on Windows that lets a second program bind a port
+    // that's already listening, so two servers would quietly share one.
+    setsockopt(impl_->listen_fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&yes), sizeof(yes));
+#else
+    // Restarting a server right away: the old one's connections linger in
+    // TIME_WAIT, and without this the port stays taken for a minute or two.
     setsockopt(impl_->listen_fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes), sizeof(yes));
+#endif
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;

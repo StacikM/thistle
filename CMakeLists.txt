@@ -246,7 +246,7 @@ if(THISTLE_SERVER_ONLY)
     # against it: proof the server engine works, not only that it builds.
     if(THISTLE_BUILD_SMOKETEST)
         enable_testing()
-        foreach(_thistle_test net collision mesh3d character terrain voxelnet animation)
+        foreach(_thistle_test net collision mesh3d character terrain voxelnet animation server)
             add_executable(thistle_${_thistle_test}_smoketest examples/${_thistle_test}_smoketest.cpp)
             target_link_libraries(thistle_${_thistle_test}_smoketest PRIVATE thistle_server)
             add_test(NAME ${_thistle_test}_smoketest COMMAND thistle_${_thistle_test}_smoketest)
@@ -632,6 +632,11 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_scene3d_smoketest examples/scene3d_smoketest.cpp)
     target_link_libraries(thistle_scene3d_smoketest PRIVATE thistle)
 
+    # DedicatedServer, against the headless library (which gets built for
+    # it: otherwise only a game's server program makes it build).
+    add_executable(thistle_server_smoketest examples/server_smoketest.cpp)
+    target_link_libraries(thistle_server_smoketest PRIVATE thistle_server)
+
     if(ANDROID)
         # NativeActivity only ever loads a shared library, never runs a plain
         # executable's main() (there isn't one) — see THISTLE_MAIN in
@@ -680,6 +685,8 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(animation_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME scene3d_smoketest COMMAND thistle_scene3d_smoketest)
     set_tests_properties(scene3d_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME server_smoketest COMMAND thistle_server_smoketest)
+    set_tests_properties(server_smoketest PROPERTIES TIMEOUT 60)
     # The `thistle` CLI's new/init, which the Thistle Editor's projects screen
     # runs. Python, like the CLI; skipped where there's no Python 3.
     find_package(Python3 COMPONENTS Interpreter QUIET)

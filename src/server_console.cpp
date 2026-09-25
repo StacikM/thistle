@@ -13,7 +13,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
-#include <iostream>
 #include <mutex>
 #include <thread>
 
@@ -36,8 +35,6 @@ namespace thistle::detail {
 
 namespace {
 
-// Shared with the reading thread. The plain-lines reader is detached (a
-// blocking read can't be woken at exit), so this can outlive the console.
 struct TypedLines {
     std::mutex mutex;
     std::deque<std::string> lines;
@@ -93,7 +90,55 @@ struct ServerConsole::Impl {
     bool open = false;
     bool interactive = false;
     std::atomic<bool> stopping{false};
-    std::thread reader; // interactive only; the plain reader is detached
+    std::thread reader;
+    std::string partial; // plain mode: a line not finished yet
+
+    // Plain mode: lines from stdin. Raw reads, not std::getline: a thread
+    // blocked in getline holds the C library's lock on stdin, and exit()
+    // waits for that lock to flush the streams, so a server whose stdin
+    // stayed open without input (docker run -i, no -t) hung instead of
+    // exiting after its save.
+    void take(const char* data, size_t n) {
+        partial.append(data, n);
+        size_t nl;
+        while ((nl = partial.find('\n')) != std::string::npos) {
+            std::string line = partial.substr(0, nl);
+            partial.erase(0, nl + 1);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            std::lock_guard<std::mutex> lock(typed->mutex);
+            typed->lines.push_back(std::move(line));
+        }
+    }
+#if defined(_WIN32)
+    void read_lines() {
+        const HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+        const DWORD type = GetFileType(h);
+        char buf[512];
+        while (!stopping) {
+            DWORD n = 0;
+            if (type == FILE_TYPE_PIPE) { // pipes can't be waited on: ask how much is there
+                DWORD avail = 0;
+                if (!PeekNamedPipe(h, nullptr, 0, nullptr, &avail, nullptr)) return; // closed
+                if (avail == 0) { Sleep(50); continue; }
+            } else if (type == FILE_TYPE_CHAR) {
+                if (WaitForSingleObject(h, 100) != WAIT_OBJECT_0) continue;
+            }
+            if (!ReadFile(h, buf, sizeof(buf), &n, nullptr) || n == 0) return;
+            take(buf, n);
+        }
+    }
+#else
+    void read_lines() {
+        char buf[512];
+        while (!stopping) {
+            pollfd p{STDIN_FILENO, POLLIN, 0};
+            if (::poll(&p, 1, 100) <= 0) continue;
+            const ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
+            if (n <= 0) return; // end of input
+            take(buf, static_cast<size_t>(n));
+        }
+    }
+#endif
 
     std::vector<std::string> words; // for Tab
     std::string line;               // being typed (UTF-8)
@@ -379,23 +424,17 @@ void ServerConsole::open(std::vector<std::string> words) {
         im.redraw();
         return;
     }
-    std::thread([typed = im.typed] {
-        std::string line;
-        while (std::getline(std::cin, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            std::lock_guard<std::mutex> lock(typed->mutex);
-            typed->lines.push_back(line);
-        }
-    }).detach();
+    im.stopping = false;
+    im.reader = std::thread([&im] { im.read_lines(); });
 }
 
 void ServerConsole::close() {
     Impl& im = *impl_;
     if (!im.open) return;
     im.open = false;
-    if (!im.interactive) return;
     im.stopping = true;
     if (im.reader.joinable()) im.reader.join();
+    if (!im.interactive) return;
     {
         std::lock_guard<std::mutex> lock(im.mutex);
         im.write_out("\r\x1b[2K");

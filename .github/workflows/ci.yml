@@ -70,3 +70,47 @@ jobs:
         run: |
           cmake -S tools/thistle-editor -B build-editor -DCMAKE_BUILD_TYPE=Release
           cmake --build build-editor --config Release
+
+  # A dedicated server's build: only thistle_server (-DTHISTLE_SERVER_ONLY=ON),
+  # then the headless tests against it, server_smoketest included. On Linux
+  # it runs in a bare Ubuntu with nothing but a compiler, CMake and git, like
+  # a fresh VPS or a Docker image: proof it needs no X11/OpenGL/audio
+  # packages, and a last check that nothing of the sort got linked anyway.
+  server-linux:
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    name: ubuntu:24.04 container (server only)
+    steps:
+      - name: Install a compiler, CMake and git (nothing else)
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++ cmake make git ca-certificates
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-server -DTHISTLE_SERVER_ONLY=ON -DTHISTLE_BUILD_SMOKETEST=ON -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build-server --parallel
+      - name: Test
+        run: ctest --test-dir build-server --output-on-failure
+      - name: No graphics or audio libraries linked
+        run: |
+          ldd build-server/thistle_server_smoketest
+          if ldd build-server/thistle_server_smoketest | grep -E 'libX|libGL|libEGL|asound|pulse'; then
+            echo "the server build links a graphics or audio library"; exit 1
+          fi
+
+  server:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.os }} (server only)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-server -DTHISTLE_SERVER_ONLY=ON -DTHISTLE_BUILD_SMOKETEST=ON -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build-server --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build-server -C Release --output-on-failure
