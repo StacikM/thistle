@@ -61,4 +61,4 @@ The data types are plain structs, so skeletons and clips can come from code as w
   - The code-built robot crowd walks at about 50 fps on that software renderer.
 
   The sample models aren't in the repo; pass any animated `.glb` on the command line.
-- Windows: cross-compiled with MinGW, not run. Metal/D3D11: skinned models use the existing shaders, which is the point of skinning on the CPU, but no animated model has been seen on those backends yet.
+- Windows (Windows 11 with an NVIDIA RTX 4070 Super (D3D11)): the owner ran `animation_demo` and reported it working. Metal: not seen yet. Skinned models use the same shaders as everything else, which is the point of skinning on the CPU.
