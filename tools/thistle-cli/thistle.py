@@ -168,6 +168,11 @@ def cmd_run(args) -> None:
     if not exe:
         die("built, but couldn't find the executable to run — check the build output above")
     print("$ " + str(exe))
+    # Run it from its own folder, where the build put its assets/ (as a
+    # player's copy runs), not from wherever this was typed: from src/ the
+    # game would find no assets at all. (On macOS the engine moves into the
+    # app bundle's Resources itself.)
+    os.chdir(exe.parent)
     os.execv(str(exe), [str(exe)])
 
 

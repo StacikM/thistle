@@ -148,4 +148,4 @@ JSON, written with sorted keys and two-space indents so it diffs well in git:
   - **third-person:** coins collected, the jump pad's throw landing on its marker, the goal, falling into the sea.
   - **voxel:** a new world with the house stamped in, then an edit surviving a quit and relaunch.
 - The editor was used to make, save and reopen scenes under Xvfb. The saved files were checked value by value (see the editor's README for exactly what was clicked).
-- No game has loaded an editor-made level yet. The templates coming next are the first real users.
+- Editor to game, end to end (Xvfb): the three template levels open in the editor with their hierarchy, settings and the voxel template's house as a block object. In the fps template's level a target was deleted in the editor and saved (the file compared equal to the original apart from that entity), then `thistle run`, typed in the game's `src/` folder, rebuilt and started the game, whose HUD counted 7 targets instead of 8. That test is what found the asset copy not reaching an unchanged game on Windows/Linux (see [cli.md](cli.md)). Nobody has yet built a level from nothing in the editor and played it.

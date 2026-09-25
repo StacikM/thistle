@@ -180,6 +180,8 @@ Run under Xvfb + llvmpipe (software OpenGL) on Linux and driven with `xdotool`, 
   - Text input had no paste. It does now.
   - Ctrl+V typed a "v" after the pasted text.
   - Sprites drawn after any text in the same frame came out white. That's why the palette swatches were blank. It affected every Thistle game.
+- The three `thistle new` template levels, opened from the Open menu. Each one came up framed (the whole level in view), after a fix: opening used to keep the previous camera, and the voxel template's scene opened looking at a wall from inside its house. Home frames the whole scene again after F zoomed to one crate.
+- Editor to game: a target deleted from the fps template's level and saved, then `thistle run` showed 7 targets instead of 8 (see [docs/scene3d.md](../../docs/scene3d.md#whats-been-verified)).
 - Importing a hand-written old-editor layout. The positions were checked against hand-computed ones, including a child under a rotated, stretched parent. A malformed old file is refused, not a crash. It was a crash on the first try, since `load_scene()` throws.
 
 `scene3d_smoketest` (ctest) covers the file format and the transform math the editor relies on.
