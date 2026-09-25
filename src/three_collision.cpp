@@ -296,6 +296,17 @@ namespace {
 
 constexpr float kSkin = 1e-3f; // stop this far short of surfaces so float error never leaves us touching
 
+// Shortens a move (`allowed`, signed, along `dir`) to stop at `limit`: how
+// far it can go before it's kSkin from a surface. A limit pointing backwards
+// means it's already within kSkin (or inside): it doesn't move closer, and
+// it isn't pushed out either. (That case used to be clamped only when the
+// move was bigger than the limit, so at a high frame rate a character's
+// tiny steps sank through the floor it was standing on.)
+void clamp_to(float& allowed, float limit, float dir) {
+    if (limit * dir <= 0.0f) allowed = 0.0f;
+    else if (std::fabs(limit) < std::fabs(allowed)) allowed = limit;
+}
+
 // How far a box can move along one axis (up to `want`, signed) before
 // something solid blocks it.
 float sweep_axis(const CollisionWorldImpl& w, const Bounds& box, int axis, float want) {
@@ -311,7 +322,9 @@ float sweep_axis(const CollisionWorldImpl& w, const Bounds& box, int axis, float
         const float lead = dir > 0.0f ? comp(hi, axis) : comp(lo, axis); // the face moving forward
         const float reach = lead + allowed / s;
         const int start = dir > 0.0f ? ifloor(lead + 1e-4f) : ifloor(lead - 1e-4f);
-        const int end = dir > 0.0f ? ifloor(reach - 1e-4f) : ifloor(reach + 1e-4f);
+        // Up to kSkin past where the move ends: a move that would end
+        // within kSkin of a face is stopped at kSkin, like any other.
+        const int end = dir > 0.0f ? ifloor(reach + kSkin / s) : ifloor(reach - kSkin / s);
         const int a1 = (axis + 1) % 3, a2 = (axis + 2) % 3;
         for (int c = start; dir > 0.0f ? c <= end : c >= end; c += static_cast<int>(dir)) {
             bool blocked = false;
@@ -327,8 +340,7 @@ float sweep_axis(const CollisionWorldImpl& w, const Bounds& box, int axis, float
             }
             if (blocked) {
                 const float face = dir > 0.0f ? static_cast<float>(c) : static_cast<float>(c + 1);
-                const float limit = (face - lead) * s - dir * kSkin;
-                if (std::fabs(limit) < std::fabs(allowed)) allowed = (limit * dir > 0.0f) ? limit : 0.0f;
+                clamp_to(allowed, (face - lead) * s - dir * kSkin, dir);
                 break;
             }
         }
@@ -341,8 +353,7 @@ float sweep_axis(const CollisionWorldImpl& w, const Bounds& box, int axis, float
         if (!side_overlap) continue;
         const float gap = dir > 0.0f ? comp(o.min, axis) - comp(box.max, axis) : comp(o.max, axis) - comp(box.min, axis);
         if (gap * dir < -kSkin) continue; // it's behind us
-        const float limit = gap - dir * kSkin;
-        if (std::fabs(limit) < std::fabs(allowed)) allowed = (limit * dir > 0.0f) ? limit : 0.0f;
+        clamp_to(allowed, gap - dir * kSkin, dir);
     }
 
     // Meshes: no exact sweep for boxes against arbitrary triangles, so binary
@@ -367,14 +378,19 @@ float sweep_axis(const CollisionWorldImpl& w, const Bounds& box, int axis, float
         // something) are ignored so it can move out of them — but only
         // those: everything else still blocks.
         const std::vector<uint64_t> stuck_in = w.overlapping_triangles(moved(0.0f));
-        if (w.mesh_overlaps(moved(allowed), &stuck_in)) {
+        // The move plus kSkin: one that would end within kSkin of a
+        // triangle is stopped at kSkin too. (Tested without it, a fast frame
+        // rate's tiny steps crept up to the surface and never registered
+        // as landing.)
+        const float probe = allowed + dir * kSkin;
+        if (w.mesh_overlaps(moved(probe), &stuck_in)) {
             float lo = 0.0f, hi = 1.0f;
             for (int i = 0; i < 12; ++i) {
                 const float mid = (lo + hi) * 0.5f;
-                if (w.mesh_overlaps(moved(allowed * mid), &stuck_in)) hi = mid; else lo = mid;
+                if (w.mesh_overlaps(moved(probe * mid), &stuck_in)) hi = mid; else lo = mid;
             }
-            allowed *= lo;
-            allowed = std::fabs(allowed) > kSkin ? allowed - dir * kSkin : 0.0f; // stop just short
+            const float free = probe * lo; // how far until contact
+            allowed = free * dir > kSkin ? free - dir * kSkin : 0.0f; // stop just short
         }
     }
     return allowed;
@@ -424,13 +440,16 @@ void CharacterController::update(const CollisionWorld& world, vec3 wish, bool ju
     // Vertical.
     const float dy = sweep_axis(*world.impl_, bounds(), 1, delta.y);
     position.y += dy;
-    if (delta.y < 0.0f && dy > delta.y + 1e-6f) {
+    // Any shortening counts: sweep_axis returns the move untouched when
+    // nothing's in the way. (A fixed threshold here failed at high frame
+    // rates, where a whole frame's fall is smaller than it.)
+    if (delta.y < 0.0f && dy > delta.y) {
         grounded_ = true;
         since_ground_ = 0.0f;
         velocity.y = 0.0f;
     } else {
         grounded_ = false;
-        if (delta.y > 0.0f && dy < delta.y - 1e-6f) velocity.y = 0.0f; // head hit a ceiling
+        if (delta.y > 0.0f && dy < delta.y) velocity.y = 0.0f; // head hit a ceiling
     }
 
     // Horizontal, trying a step-up if a wall stops us while walking.

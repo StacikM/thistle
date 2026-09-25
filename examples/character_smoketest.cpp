@@ -166,6 +166,59 @@ int main() {
         check(up.position.y > 4.5f, "a 30-degree mesh ramp can be walked up");
     }
 
+    // --- high frame rates ---
+    // Standing still at 144-3000 fps, with uneven frame times. Found on a
+    // real GPU (Windows, RTX 4070 Super): a whole frame's fall there is less
+    // than the 1 mm the controller keeps from surfaces, and those tiny steps
+    // sank a character through a block floor (falling out of the world at
+    // 240 fps) and made on_ground() flicker. Everything above runs at 60 Hz,
+    // where a frame's fall is ~7 mm, and never saw it.
+    {
+        VoxelWorld hv;
+        hv.fill({-10, -1, -10}, {10, -1, 10}, hv.add_block({.name = "stone"})); // top at y = 0
+        CollisionWorld vw;
+        vw.add(hv);
+        CollisionWorld bw;
+        bw.add_box(Bounds{{-10, -1, -10}, {10, 0, 10}});
+        CollisionWorld mw;
+        const Model floor_model = make_model(plane_mesh(20, 20));
+        mw.add(floor_model, Transform{0.0f, 0.0f, 0.0f});
+        Terrain land(32, 32, 1.0f);
+        land.origin = {-16, 0, -16};
+        land.generate([](float x, float z) { return 3.0f + 0.2f * x + 0.1f * z; }); // a gentle slope
+        CollisionWorld tw;
+        tw.add(land);
+        struct Floor { const char* name; const CollisionWorld* w; float surface; };
+        const Floor floors[] = {{"block", &vw, 0.0f}, {"box", &bw, 0.0f}, {"mesh", &mw, 0.0f}, {"terrain", &tw, land.height_at(0.5f, 0.5f)}};
+        for (const Floor& fl : floors) {
+            for (float fps : {144.0f, 240.0f, 1000.0f, 3000.0f}) {
+                CharacterController c;
+                c.position = {0.5f, fl.surface + 2.0f, 0.5f};
+                simulate(c, *fl.w, {}, 2.0f); // land at 60 Hz
+                const float rest = c.position.y;
+                uint32_t seed = 7;
+                int grounded = 0, frames = 0;
+                for (float t = 0.0f; t < 5.0f; ++frames) {
+                    seed = seed * 1664525u + 1013904223u;
+                    const float dt = (0.5f + static_cast<float>(seed >> 8) / 16777216.0f) / fps; // 0.5x..1.5x
+                    c.update(*fl.w, {}, false, dt);
+                    grounded += c.on_ground();
+                    t += dt;
+                }
+                char what[96];
+                std::snprintf(what, sizeof what, "%s floor, %.0f fps: standing still for 5 s", fl.name, fps);
+                check(std::fabs(c.position.y - rest) < 1e-4f, std::string(what) + " doesn't sink (moved " + std::to_string(c.position.y - rest) + " m)");
+                check(grounded == frames, std::string(what) + " is on the ground every frame (" + std::to_string(grounded) + "/" + std::to_string(frames) + ")");
+                // And a jump still happens and lands where it started.
+                c.update(*fl.w, {}, true, 1.0f / fps);
+                const float launched = c.position.y;
+                for (int i = 0; i < static_cast<int>(fps * 1.5f); ++i) c.update(*fl.w, {}, false, 1.0f / fps);
+                check(launched > rest && std::fabs(c.position.y - rest) < 2e-3f && c.on_ground(),
+                      std::string(what) + ", then a jump lands back on it");
+            }
+        }
+    }
+
     if (g_failures) { std::printf("%d check(s) failed\n", g_failures); return 1; }
     std::printf("all character checks passed\n");
     return 0;
