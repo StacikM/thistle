@@ -27,9 +27,10 @@ if(_thistle_no_debug_ui)
 endif()
 
 # Path to the Thistle engine, set by `thistle new` when this project was
-# created. Override with -DTHISTLE_DIR=... if you move this project
-# somewhere else relative to the engine.
-set(THISTLE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/{{engine_dir}}" CACHE PATH "Path to the Thistle engine source")
+# created: relative to this folder, or absolute when the two are on
+# different Windows drives. Override with -DTHISTLE_DIR=... if you move
+# this project somewhere else relative to the engine.
+set(THISTLE_DIR "{{engine_dir}}" CACHE PATH "Path to the Thistle engine source")
 add_subdirectory(${THISTLE_DIR} ${CMAKE_BINARY_DIR}/thistle)
 
 # Bakes the version from thistle.json into a header your code can #include —
