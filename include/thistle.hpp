@@ -842,6 +842,13 @@ NetObject* net_find(uint32_t id);
 // client tiebreak as net_find() if both are active in one process.
 void net_each_object(const std::function<void(NetObject&)>& fn);
 
+// A player connected to a NetServer, as NetServer::connections() lists them.
+struct NetConnection {
+    int id = 0;            // what on_connect got and net::command_sender() returns
+    std::string address;   // "203.0.113.7:51544"
+    double seconds = 0.0;  // how long they've been connected
+};
+
 class NetServer {
 public:
     NetServer();
@@ -851,10 +858,24 @@ public:
 
     bool listen(int port);   // starts accepting connections; false on bind/listen failure
     void update();            // call every tick: accept, read+dispatch Commands, flush dirty NetVars
+    // Tells every player the server stopped, then closes everything.
     void stop();
 
+    // Disconnects a player. Their client's disconnect_reason() becomes
+    // "Kicked: <reason>" ("Kicked by the server" without one), for the game
+    // to show. on_disconnect runs for them. False if there's no such player.
+    bool kick(int conn_id, const std::string& reason = "");
+
     int connection_count() const;
+    std::vector<NetConnection> connections() const;
     NetObject* find(uint32_t id) const;   // unambiguous even if a NetClient is also active in this process
+
+    // Set before listen(). 0: no limit. A player past it is turned away
+    // with "The server is full".
+    int max_players = 0;
+    // "": anyone may join. Otherwise a client must connect() with the same
+    // password, or it's turned away with "Wrong password".
+    std::string password;
 
     std::function<void(int conn_id)> on_connect;
     std::function<void(int conn_id)> on_disconnect;
@@ -874,16 +895,24 @@ public:
     NetClient(const NetClient&) = delete;
     NetClient& operator=(const NetClient&) = delete;
 
-    bool connect(const std::string& host, int port);   // resolves + connects; blocks briefly
+    // Connects and waits for the server to let us in (blocks briefly; at
+    // most a few seconds if the server never answers). False if it couldn't,
+    // and disconnect_reason() says why: "Wrong password", "The server is
+    // full", "Couldn't reach <host>:<port>", ...
+    bool connect(const std::string& host, int port, const std::string& password = "");
     void update();                                       // call every tick: read+dispatch incoming messages
     void disconnect();
     bool connected() const;
     NetObject* find(uint32_t id) const;   // unambiguous even if a NetServer is also active in this process
     // This client's connection id as the server knows it (what
     // net::command_sender() returns there for our commands), e.g. to find
-    // which player object is ours. 0 until the server's welcome arrives
-    // (on the first update() after connecting).
+    // which player object is ours. Set once connect() has succeeded.
     int connection_id() const;
+    // Why the last connection ended or connect() failed, for the player:
+    // "Kicked: <reason>", "The server stopped", "Lost the connection to the
+    // server", or connect()'s reasons above. Already set when on_disconnect
+    // runs. "" after disconnect() (the game chose to leave).
+    const std::string& disconnect_reason() const;
 
     std::function<void()> on_connect;
     std::function<void()> on_disconnect;
@@ -892,6 +921,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     friend struct NetObjectAccess;
+    void end(const std::string& reason);
 };
 
 // --- in-app purchases -----------------------------------------------------
