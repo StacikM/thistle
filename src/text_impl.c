@@ -7,6 +7,8 @@
 
 #if defined(__APPLE__)
     #define SOKOL_METAL
+#elif defined(__ANDROID__)
+    #define SOKOL_GLES3
 #elif defined(__EMSCRIPTEN__)
     #define SOKOL_GLES3
 #elif defined(_WIN32)
