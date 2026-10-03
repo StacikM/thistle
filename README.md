@@ -33,6 +33,12 @@ On Windows, download [`install.bat`](install.bat) and run it locally (same defau
 
 Installs the engine and the `thistle` CLI (see [docs/cli.md](docs/cli.md)) — no dependencies to fight, standard library only.
 
+## Recommended OS for development
+
+**macOS is the recommended OS to develop on.** The core engine was written on a Mac, so that's where the 2D engine, the Metal backend, StoreKit purchases, and the `thistle` CLI have had the most real use, and it's the only OS that can build for iOS. Windows and Linux are supported and CI builds and tests on all three, but they came later.
+
+The one exception is 3D: `thistle::three` hasn't been run on a Mac yet. It has been run on Windows with a real GPU (D3D11) and on Linux's software renderer, so if 3D is what you're making, use Windows for now. See [docs/3d.md](docs/3d.md) and [docs/building.md](docs/building.md) for what's been verified where.
+
 ## Building the engine directly
 
 ```
