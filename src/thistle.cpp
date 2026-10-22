@@ -14,6 +14,8 @@
 #include "thistle_gamepad.h"
 #include "thistle_internal.h"
 
+extern "C" void thistle_sfons_keep_alpha(FONScontext* ctx); // src/text_impl.c
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -249,6 +251,14 @@ struct TextureRecord {
     sg_view view = {};
     bool uploaded = false;
     std::string path; // original file, for reload_texture
+
+    // Render targets (make_render_target): `img` is what gets sampled; the
+    // GPU objects are made on first use, like a loaded texture's upload.
+    bool target = false;
+    bool nearest = false;       // sampled without smoothing (pixel art)
+    sg_image msaa_img = {};     // drawn into instead of img when the swapchain is multisampled
+    sg_image depth_img = {};
+    sg_view color_att = {}, resolve_att = {}, depth_att = {};
 };
 
 // A single loaded-mesh vertex — position, normal (for the fixed key light),
@@ -285,9 +295,16 @@ struct EngineState {
     std::vector<TextureRecord> textures;
     std::vector<MeshRecord> meshes;
     sg_sampler sampler = {};
+    sg_sampler sampler_nearest = {}; // render targets made with pixelated = true
     sgl_pipeline pip = {};          // alpha-blended pipeline for 2D
     sgl_pipeline pip_additive = {}; // additive-blend pipeline (Blend::Additive)
     sgl_pipeline pip_3d = {};       // depth-tested pipeline for camera3d()/cube()/etc.
+    // Drawing a render target: what's in one is already multiplied by its
+    // own alpha (that's what blending onto a transparent clear leaves), so
+    // the usual alpha blend would darken every soft edge a second time.
+    sgl_pipeline pip_premultiplied = {};
+    int screen_w = 0, screen_h = 0;  // the window's size while a Frame is pointed at a render target
+    bool warned_open_target = false;
     sg_image white_img = {};        // 1x1 white texel so rects and sprites share one path
     sg_view white_view = {};
 
@@ -388,7 +405,71 @@ std::vector<std::vector<unsigned char>> build_mips(const unsigned char* px, int 
     return levels;
 }
 
+// Same formats and sample count as the window, so every pipeline the 2D
+// and 3D renderers already have can draw into it unchanged.
+void create_render_target(TextureRecord& rec) {
+    const sg_environment env = sglue_environment();
+    const int samples = env.defaults.sample_count;
+    sg_image_desc cd = {};
+    cd.usage.color_attachment = true;
+    cd.width = rec.w;
+    cd.height = rec.h;
+    cd.pixel_format = env.defaults.color_format;
+    cd.sample_count = samples;
+    cd.label = "thistle-render-target";
+    sg_image color = sg_make_image(&cd);
+    sg_view_desc cv = {};
+    cv.color_attachment.image = color;
+    rec.color_att = sg_make_view(&cv);
+    if (samples > 1) {
+        rec.msaa_img = color;
+        sg_image_desc rd = {};
+        rd.usage.resolve_attachment = true;
+        rd.width = rec.w;
+        rd.height = rec.h;
+        rd.pixel_format = env.defaults.color_format;
+        rd.label = "thistle-render-target-resolve";
+        rec.img = sg_make_image(&rd);
+        sg_view_desc rv = {};
+        rv.resolve_attachment.image = rec.img;
+        rec.resolve_att = sg_make_view(&rv);
+    } else {
+        rec.img = color;
+    }
+    sg_image_desc dd = {};
+    dd.usage.depth_stencil_attachment = true;
+    dd.width = rec.w;
+    dd.height = rec.h;
+    dd.pixel_format = env.defaults.depth_format;
+    dd.sample_count = samples;
+    dd.label = "thistle-render-target-depth";
+    rec.depth_img = sg_make_image(&dd);
+    sg_view_desc dv = {};
+    dv.depth_stencil_attachment.image = rec.depth_img;
+    rec.depth_att = sg_make_view(&dv);
+    sg_view_desc tv = {};
+    tv.texture.image = rec.img;
+    rec.view = sg_make_view(&tv);
+    rec.uploaded = true;
+}
+
+void destroy_texture_gpu(TextureRecord& rec) {
+    for (sg_view* v : {&rec.view, &rec.color_att, &rec.resolve_att, &rec.depth_att}) {
+        if (v->id != SG_INVALID_ID) sg_destroy_view(*v);
+        *v = {};
+    }
+    for (sg_image* i : {&rec.img, &rec.msaa_img, &rec.depth_img}) {
+        if (i->id != SG_INVALID_ID) sg_destroy_image(*i);
+        *i = {};
+    }
+    rec.uploaded = false;
+}
+
 void ensure_uploaded(TextureRecord& rec) {
+    if (rec.target) {
+        if (!rec.uploaded && sg_isvalid()) create_render_target(rec);
+        return;
+    }
     if (rec.uploaded || rec.pixels == nullptr) return;
     const std::vector<std::vector<unsigned char>> mips = build_mips(rec.pixels, rec.w, rec.h);
     sg_image_desc desc = {};
@@ -442,16 +523,26 @@ void init_cb() {
     smp.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
     smp.max_lod = 0.0f;
     g_state->sampler = sg_make_sampler(&smp);
+    smp.min_filter = SG_FILTER_NEAREST;
+    smp.mag_filter = SG_FILTER_NEAREST;
+    g_state->sampler_nearest = sg_make_sampler(&smp);
 
+    // sokol_gl leaves alpha out of the write mask unless told otherwise. On
+    // the window nobody sees alpha, but a render target cleared transparent
+    // would stay transparent under everything drawn into it.
     sg_pipeline_desc pip = {};
+    pip.colors[0].write_mask = SG_COLORMASK_RGBA;
     pip.colors[0].blend.enabled = true;
     pip.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_SRC_ALPHA;
     pip.colors[0].blend.dst_factor_rgb = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
     pip.colors[0].blend.src_factor_alpha = SG_BLENDFACTOR_ONE;
     pip.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
     g_state->pip = sgl_make_pipeline(&pip);
+    pip.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_ONE;
+    g_state->pip_premultiplied = sgl_make_pipeline(&pip);
 
     sg_pipeline_desc apip = {};
+    apip.colors[0].write_mask = SG_COLORMASK_RGBA;
     apip.colors[0].blend.enabled = true;
     apip.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_SRC_ALPHA;
     apip.colors[0].blend.dst_factor_rgb = SG_BLENDFACTOR_ONE; // additive
@@ -463,6 +554,7 @@ void init_cb() {
     // plane3d/line3d). Uses the swapchain's own depth buffer, which sokol_app
     // provisions by default — no offscreen pass needed.
     sg_pipeline_desc pip3 = {};
+    pip3.colors[0].write_mask = SG_COLORMASK_RGBA;
     pip3.colors[0].blend.enabled = true;
     pip3.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_SRC_ALPHA;
     pip3.colors[0].blend.dst_factor_rgb = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
@@ -519,6 +611,7 @@ void init_cb() {
     fdesc.width = 1024;
     fdesc.height = 1024;
     g_state->fons = sfons_create(&fdesc);
+    thistle_sfons_keep_alpha(g_state->fons);
     // Self-heal when the glyph atlas fills up (e.g., a game that draws text at
     // many different pixel sizes). Without a handler fontstash silently drops
     // every new glyph *forever*; resetting the atlas re-caches on demand so text
@@ -876,6 +969,14 @@ void frame_cb() {
     } else if (g_state->current_scene.empty() && g_state->on_update) {
         g_state->on_update(f);
     }
+    if (detail::three_in_target()) {
+        if (!g_state->warned_open_target) {
+            log_warn("begin_target() without a matching end_target() this frame; ended it for you");
+            g_state->warned_open_target = true;
+        }
+        detail::three_end_target();
+        f.camera({0.0f, 0.0f});
+    }
 
 #ifdef THISTLE_DEBUG
     draw_debug(f); // draws on top of whatever the scene rendered
@@ -889,6 +990,7 @@ void frame_cb() {
 
     if (g_state->fons) sfons_flush(g_state->fons); // upload any newly rasterized glyphs
     detail::three_before_passes();
+    detail::three_draw_targets();
 
     if (use_post) {
         // Pass 1: render the scene into the offscreen texture.
@@ -959,8 +1061,7 @@ void cleanup_cb() {
     if (g_state->on_stop) g_state->on_stop();
     for (TextureRecord& rec : g_state->textures) {
         if (rec.pixels) stbi_image_free(rec.pixels);
-        if (rec.view.id != SG_INVALID_ID) sg_destroy_view(rec.view);
-        if (rec.img.id != SG_INVALID_ID) sg_destroy_image(rec.img);
+        destroy_texture_gpu(rec);
     }
     if (g_state->white_view.id != SG_INVALID_ID) sg_destroy_view(g_state->white_view);
     if (g_state->white_img.id != SG_INVALID_ID) sg_destroy_image(g_state->white_img);
@@ -1166,7 +1267,8 @@ TextLayout layout_text(FONScontext* fons, int fid, const std::string& str, const
 } // namespace
 
 void Frame::clear(rgba color) {
-    g_state->clear_color = color;
+    if (detail::three_in_target()) detail::three_set_target_clear(color);
+    else g_state->clear_color = color;
 }
 
 void Frame::rect(vec2 pos, vec2 size, rgba color) {
@@ -1271,6 +1373,26 @@ void Frame::circle_outline(vec2 center, float radius, rgba color, float thicknes
     }
 }
 
+namespace {
+// Binds a texture for a 2D textured draw with `tint`. A render target needs
+// its own sampler (pixelated ones) and the premultiplied blend, with the
+// tint premultiplied to match; end_textured() puts the pipeline back.
+void begin_textured(const TextureRecord& rec, rgba tint) {
+    sgl_texture(rec.view, rec.nearest ? g_state->sampler_nearest : g_state->sampler);
+    if (rec.target) {
+        sgl_push_pipeline();
+        sgl_load_pipeline(g_state->pip_premultiplied);
+        sgl_c4f(tint.r * tint.a, tint.g * tint.a, tint.b * tint.a, tint.a);
+    } else {
+        sgl_c4f(tint.r, tint.g, tint.b, tint.a);
+    }
+}
+
+void end_textured(const TextureRecord& rec) {
+    if (rec.target) sgl_pop_pipeline();
+}
+} // namespace
+
 void Frame::sprite(Texture tex, vec2 pos, SpriteOpts opts) {
     if (!tex.valid()) return;
     TextureRecord& rec = g_state->textures[tex.id];
@@ -1314,14 +1436,14 @@ void Frame::sprite(Texture tex, vec2 pos, SpriteOpts opts) {
     // and a quad drawn with it off samples white. Sprites after text came out
     // as white boxes before this.
     sgl_enable_texture();
-    sgl_texture(rec.view, g_state->sampler);
-    sgl_c4f(opts.tint.r, opts.tint.g, opts.tint.b, opts.tint.a);
+    begin_textured(rec, opts.tint);
     sgl_begin_quads();
     sgl_v2f_t2f(p0.x, p0.y, u0, v0);
     sgl_v2f_t2f(p1.x, p1.y, u1, v0);
     sgl_v2f_t2f(p2.x, p2.y, u1, v1);
     sgl_v2f_t2f(p3.x, p3.y, u0, v1);
     sgl_end();
+    end_textured(rec);
 }
 
 void Frame::sprite(Texture tex, vec2 pos) {
@@ -1350,8 +1472,7 @@ void Frame::sprite9(Texture tex, vec2 pos, vec2 size, float border, rgba tint) {
     const float v[4] = {0.0f, bv, 1.0f - bv, 1.0f};
 
     sgl_enable_texture(); // see sprite()
-    sgl_texture(rec.view, g_state->sampler);
-    sgl_c4f(tint.r, tint.g, tint.b, tint.a);
+    begin_textured(rec, tint);
     sgl_begin_quads();
     for (int row = 0; row < 3; ++row) {
         for (int col = 0; col < 3; ++col) {
@@ -1362,6 +1483,7 @@ void Frame::sprite9(Texture tex, vec2 pos, vec2 size, float border, rgba tint) {
         }
     }
     sgl_end();
+    end_textured(rec);
 }
 
 bool Frame::key_down(Key k) const {
@@ -2860,12 +2982,21 @@ vec2 Frame::measure_text(const std::string& str, TextOpts opts) const {
     return vec2{L.width, static_cast<float>(L.lines.size()) * L.line_h};
 }
 
+namespace {
+// The projection matrix, reset. Inside a render target on OpenGL it starts
+// out flipped vertically; three_render.cpp's three_begin_target says why.
+void reset_projection() {
+    sgl_matrix_mode_projection();
+    sgl_load_identity();
+    if (detail::three_in_target() && detail::three_targets_flip_y()) sgl_scale(1.0f, -1.0f, 1.0f);
+}
+} // namespace
+
 void Frame::camera(vec2 offset) {
     // Also resets to 2D/orthographic mode in case camera3d() ran earlier this
     // frame — projection and pipeline are part of "the camera" here too.
     sgl_load_pipeline(g_state->pip);
-    sgl_matrix_mode_projection();
-    sgl_load_identity();
+    reset_projection();
     sgl_ortho(0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, -1.0f, 1.0f);
     sgl_matrix_mode_modelview();
     sgl_load_identity();
@@ -2873,10 +3004,38 @@ void Frame::camera(vec2 offset) {
     sgl_enable_texture();
 }
 
+void Frame::begin_target(RenderTarget target) {
+    if (detail::three_in_target()) end_target();
+    if (!target.valid() || target.texture.id >= static_cast<int>(g_state->textures.size())) return;
+    TextureRecord& rec = g_state->textures[target.texture.id];
+    if (!rec.target) return;
+    ensure_uploaded(rec);
+    if (!rec.uploaded) return;
+    detail::RenderTargetPass pass;
+    pass.color = rec.color_att;
+    pass.resolve = rec.resolve_att;
+    pass.depth = rec.depth_att;
+    pass.width = rec.w;
+    pass.height = rec.h;
+    detail::three_begin_target(pass);
+    g_state->screen_w = width;
+    g_state->screen_h = height;
+    width = rec.w;
+    height = rec.h;
+    camera({0.0f, 0.0f});
+}
+
+void Frame::end_target() {
+    if (!detail::three_in_target()) return;
+    detail::three_end_target();
+    width = g_state->screen_w;
+    height = g_state->screen_h;
+    camera({0.0f, 0.0f});
+}
+
 void Frame::camera3d(const Camera3D& cam) {
     sgl_load_pipeline(g_state->pip_3d);
-    sgl_matrix_mode_projection();
-    sgl_load_identity();
+    reset_projection();
     const float aspect = height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
     sgl_perspective(sgl_rad(cam.fov_deg), aspect, cam.near_z, cam.far_z);
     sgl_matrix_mode_modelview();
@@ -3284,6 +3443,27 @@ Texture make_texture(int width, int height, const unsigned char* rgba) {
     return register_texture(pixels, width, height, "");
 }
 
+RenderTarget make_render_target(int width, int height, bool pixelated) {
+    if (width <= 0 || height <= 0) return RenderTarget{};
+    if (!g_state) {
+        log_warn("render targets can't be created before an App exists — construct your App first");
+        return RenderTarget{};
+    }
+    TextureRecord rec;
+    rec.w = width;
+    rec.h = height;
+    rec.target = true;
+    rec.nearest = pixelated;
+    const int id = static_cast<int>(g_state->textures.size());
+    g_state->textures.push_back(rec);
+    return RenderTarget{Texture{id, width, height}};
+}
+
+void unload_render_target(RenderTarget& target) {
+    unload_texture(target.texture);
+    target = RenderTarget{};
+}
+
 Texture load_texture(const std::string& path) {
     int w = 0, h = 0, channels = 0;
     unsigned char* pixels = thistle_stbi_load(path, &w, &h, &channels, 4);
@@ -3472,9 +3652,8 @@ void unload_texture(Texture& tex) {
     if (tex.id >= 0 && tex.id < static_cast<int>(g_state->textures.size())) {
         TextureRecord& rec = g_state->textures[tex.id];
         if (rec.pixels) { stbi_image_free(rec.pixels); rec.pixels = nullptr; }
-        if (rec.view.id != SG_INVALID_ID) { sg_destroy_view(rec.view); rec.view = {}; }
-        if (rec.img.id != SG_INVALID_ID) { sg_destroy_image(rec.img); rec.img = {}; }
-        rec.uploaded = false;
+        destroy_texture_gpu(rec);
+        rec.target = false;
         rec.w = rec.h = 0;
     }
     tex = Texture{};
@@ -3483,7 +3662,7 @@ void unload_texture(Texture& tex) {
 void reload_texture(Texture tex) {
     if (tex.id < 0 || tex.id >= static_cast<int>(g_state->textures.size())) return;
     TextureRecord& rec = g_state->textures[tex.id];
-    if (rec.path.empty()) return;
+    if (rec.path.empty() || rec.target) return;
     int w = 0, h = 0, channels = 0;
     unsigned char* px = thistle_stbi_load(rec.path, &w, &h, &channels, 4);
     if (!px) { log_warn("reload_texture: could not read " + rec.path); return; }

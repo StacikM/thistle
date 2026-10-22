@@ -41,7 +41,20 @@ void three_audio_camera(vec3 position, three::quat rotation); // World::render()
 void three_setup();
 void three_shutdown();
 void three_before_passes(); // offscreen passes (shadows) — before the main pass begins
-void three_draw_layers();   // replaces sgl_draw() inside the main pass
+void three_draw_targets();  // a pass per begin_target..end_target block, before the main pass
+void three_draw_layers();   // replaces sgl_draw() inside the main pass: what wasn't in a target
 void three_end_frame();
+
+// Render targets. three_render.cpp owns the sokol_gl layers (World::render
+// starts a new one too), so it also keeps which layers go to which target.
+struct RenderTargetPass {
+    sg_view color, resolve, depth; // resolve: only when the window is multisampled
+    int width = 0, height = 0;
+};
+void three_begin_target(const RenderTargetPass& target); // 2D and World::render go there until three_end_target()
+void three_end_target();
+bool three_in_target();
+void three_set_target_clear(rgba color); // Frame::clear() between the two
+bool three_targets_flip_y();             // OpenGL: targets are drawn upside down, see three_begin_target()
 
 } // namespace thistle::detail

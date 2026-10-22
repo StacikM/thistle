@@ -137,6 +137,8 @@ struct PassRecord {
     std::vector<WorldImpl::LineVertex> lines_on_top;
     int line_first = 0; // vertex offsets into this frame's shared line buffer
     int on_top_first = 0;
+    int fb_w = 0, fb_h = 0; // what it's drawn into: a render target's size, or 0 for the window
+    bool flip_y = false;    // into a render target on OpenGL
 };
 
 enum PipelineKind { PipOpaque, PipOpaqueDouble, PipBlend, PipBlendDouble, PipCount };
@@ -148,6 +150,10 @@ struct RenderState {
     sg_shader background_shader = {};
     sg_pipeline pipelines[PipCount] = {};
     sg_pipeline instanced_pipelines[PipCount] = {};
+    // The same, with clockwise front faces: a render target on OpenGL is
+    // drawn upside down, which turns every triangle's winding around.
+    sg_pipeline pipelines_cw[PipCount] = {};
+    sg_pipeline instanced_pipelines_cw[PipCount] = {};
     sg_buffer instance_buffer = {};
     size_t instance_capacity = 0; // in instances
     sg_buffer skin_buffer = {};   // posed vertices of animated models, this frame
@@ -192,7 +198,19 @@ struct RenderState {
     size_t line_capacity = 0; // in vertices
 
     std::vector<PassRecord> passes;
+    // One per sokol_gl layer this frame, in order. A new layer starts at
+    // every World::render() (so later 2D lands on top of that 3D) and at
+    // every begin_target()/end_target() (so 2D goes to the right place).
+    struct Layer {
+        int pass = -1;              // the World::render() drawn after this layer's 2D, if any
+        bool in_target = false;
+        bool starts_target = false; // the first layer of a begin_target..end_target block
+        detail::RenderTargetPass target;
+        rgba clear{0.0f, 0.0f, 0.0f, 0.0f};
+    };
+    std::vector<Layer> layers{Layer{}};
     int current_layer = 0;
+    int current_block = -1;         // the layer that started the open target block, or -1
     RenderStats stats_this_frame;
     RenderStats stats_last_frame;
 
@@ -274,7 +292,7 @@ void add_instance_layout(sg_pipeline_desc& pd, int first_attr) {
     }
 }
 
-sg_pipeline make_lit_pipeline(bool blend, bool double_sided, bool instanced) {
+sg_pipeline make_lit_pipeline(bool blend, bool double_sided, bool instanced, bool clockwise) {
     sg_pipeline_desc pd = {};
     pd.shader = instanced ? g_three.lit_instanced_shader : g_three.lit_shader;
     pd.layout.buffers[0].stride = sizeof(GpuVertex);
@@ -284,7 +302,7 @@ sg_pipeline make_lit_pipeline(bool blend, bool double_sided, bool instanced) {
     pd.layout.attrs[ATTR_lit_color0] = {0, offsetof(GpuVertex, color), SG_VERTEXFORMAT_UBYTE4N};
     if (instanced) add_instance_layout(pd, ATTR_lit_instanced_inst_m0);
     pd.index_type = SG_INDEXTYPE_UINT32;
-    pd.face_winding = SG_FACEWINDING_CCW;
+    pd.face_winding = clockwise ? SG_FACEWINDING_CW : SG_FACEWINDING_CCW;
     pd.cull_mode = double_sided ? SG_CULLMODE_NONE : SG_CULLMODE_BACK;
     pd.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
     pd.depth.write_enabled = !blend;
@@ -648,11 +666,15 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
     const int vw = full ? fb_w : static_cast<int>(pass.viewport.size.x);
     const int vh = full ? fb_h : static_cast<int>(pass.viewport.size.y);
     if (vw <= 0 || vh <= 0) return;
-    sg_apply_viewport(vx, vy, vw, vh, true);
-    sg_apply_scissor_rect(vx, vy, vw, vh, true);
+    // Flipped, the image's top row is the framebuffer's first row, so a
+    // top-left viewport needs no conversion to OpenGL's bottom-left origin.
+    const bool top_left = !pass.flip_y;
+    sg_apply_viewport(vx, vy, vw, vh, top_left);
+    sg_apply_scissor_rect(vx, vy, vw, vh, top_left);
 
     const mat4 view = pass.camera.view();
-    const mat4 proj_gl = pass.camera.projection(static_cast<float>(vw) / static_cast<float>(vh));
+    mat4 proj_gl = pass.camera.projection(static_cast<float>(vw) / static_cast<float>(vh));
+    if (pass.flip_y) proj_gl = mat4::scale({1.0f, -1.0f, 1.0f}) * proj_gl;
     const mat4 view_proj_gl = proj_gl * view;
     const mat4 view_proj = clip_fix(proj_gl) * view;
     RenderStats& stats = g_three.stats_this_frame;
@@ -789,7 +811,9 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
         const bool instanced = item.inst_count > 0;
         const int want_pipeline = item.pipeline + (instanced ? PipCount : 0);
         if (want_pipeline != bound_pipeline) {
-            sg_apply_pipeline(instanced ? g_three.instanced_pipelines[item.pipeline] : g_three.pipelines[item.pipeline]);
+            const sg_pipeline* set = pass.flip_y ? (instanced ? g_three.instanced_pipelines_cw : g_three.pipelines_cw)
+                                                 : (instanced ? g_three.instanced_pipelines : g_three.pipelines);
+            sg_apply_pipeline(set[item.pipeline]);
             sg_apply_uniforms(UB_lit_scene_params, SG_RANGE(scene));
             bound_pipeline = want_pipeline;
         }
@@ -1126,6 +1150,14 @@ void World::grid(vec3 center, float size, float spacing, rgba color) {
     }
 }
 
+namespace {
+void start_layer(const RenderState::Layer& layer) {
+    g_three.layers.push_back(layer);
+    g_three.current_layer = static_cast<int>(g_three.layers.size()) - 1;
+    sgl_layer(g_three.current_layer);
+}
+} // namespace
+
 void World::render(const Frame& f, const Camera& camera) {
     render(f, camera, Rect{{0.0f, 0.0f}, {static_cast<float>(f.width), static_cast<float>(f.height)}});
 }
@@ -1148,10 +1180,20 @@ void World::render(const Frame&, const Camera& camera, Rect viewport) {
     pass.skinned = impl.skinned;
     pass.lines = impl.lines;
     pass.lines_on_top = impl.lines_on_top;
+    RenderState::Layer& layer = g_three.layers[g_three.current_layer];
+    if (layer.in_target) {
+        pass.fb_w = layer.target.width;
+        pass.fb_h = layer.target.height;
+        pass.flip_y = detail::three_targets_flip_y();
+    }
+    layer.pass = static_cast<int>(g_three.passes.size());
     g_three.passes.push_back(std::move(pass));
     // Everything 2D drawn after this call lands in the next sokol_gl layer,
-    // which three_draw_layers() draws after this pass — i.e. on top of it.
-    sgl_layer(++g_three.current_layer);
+    // which is drawn after this pass — i.e. on top of it.
+    RenderState::Layer next;
+    next.in_target = layer.in_target;
+    next.target = layer.target;
+    start_layer(next);
 }
 
 RenderStats render_stats() { return g_three.stats_last_frame; }
@@ -1216,12 +1258,15 @@ void three_setup() {
     s.lit_instanced_shader = sg_make_shader(lit_instanced_shader_desc(sg_query_backend()));
     s.background_shader = sg_make_shader(background_shader_desc(sg_query_backend()));
     s.ready = true;
-    for (int instanced = 0; instanced < 2; ++instanced) {
-        sg_pipeline* p = instanced ? s.instanced_pipelines : s.pipelines;
-        p[PipOpaque] = make_lit_pipeline(false, false, instanced);
-        p[PipOpaqueDouble] = make_lit_pipeline(false, true, instanced);
-        p[PipBlend] = make_lit_pipeline(true, false, instanced);
-        p[PipBlendDouble] = make_lit_pipeline(true, true, instanced);
+    for (int cw = 0; cw < (clip_space_is_gl() ? 2 : 1); ++cw) {
+        for (int instanced = 0; instanced < 2; ++instanced) {
+            sg_pipeline* p = cw ? (instanced ? s.instanced_pipelines_cw : s.pipelines_cw)
+                                : (instanced ? s.instanced_pipelines : s.pipelines);
+            p[PipOpaque] = make_lit_pipeline(false, false, instanced, cw);
+            p[PipOpaqueDouble] = make_lit_pipeline(false, true, instanced, cw);
+            p[PipBlend] = make_lit_pipeline(true, false, instanced, cw);
+            p[PipBlendDouble] = make_lit_pipeline(true, true, instanced, cw);
+        }
     }
     s.sky_pipeline = make_background_pipeline(true);
     s.depth_reset_pipeline = make_background_pipeline(false);
@@ -1345,6 +1390,8 @@ void three_shutdown() {
     sg_destroy_sampler(s.sky_sampler);
     for (sg_pipeline p : s.pipelines) sg_destroy_pipeline(p);
     for (sg_pipeline p : s.instanced_pipelines) sg_destroy_pipeline(p);
+    for (sg_pipeline p : s.pipelines_cw) if (p.id != SG_INVALID_ID) sg_destroy_pipeline(p);
+    for (sg_pipeline p : s.instanced_pipelines_cw) if (p.id != SG_INVALID_ID) sg_destroy_pipeline(p);
     sg_destroy_shader(s.lit_instanced_shader);
     sg_destroy_pipeline(s.billboard_pipeline);
     sg_destroy_pipeline(s.billboard_additive_pipeline);
@@ -1453,24 +1500,79 @@ void three_before_passes() {
     int shadow_index = 0;
     for (PassRecord& pass : s.passes) {
         if (pass.sun.shadows && pass.sun.intensity > 0.0f && (!pass.draws.empty() || !pass.many.empty())) {
-            render_shadow_map(pass, shadow_index++, frame_width(), frame_height());
+            render_shadow_map(pass, shadow_index++, pass.fb_w > 0 ? pass.fb_w : frame_width(),
+                              pass.fb_h > 0 ? pass.fb_h : frame_height());
         }
     }
 }
 
+// OpenGL puts a framebuffer's first row at the bottom of the image and a
+// texture's first row at the top, so a target drawn the normal way comes
+// out upside down when it's then drawn as a texture. D3D11 and Metal put
+// both at the top. Drawing into a target upside down on OpenGL (a flipped
+// projection, 2D and 3D alike) stores it the way every other texture is
+// stored, so a sprite, a material or a billboard can use it unchanged.
+bool three_targets_flip_y() { return clip_space_is_gl(); }
+
+bool three_in_target() { return g_three.current_block >= 0; }
+
+void three_begin_target(const RenderTargetPass& target) {
+    RenderState::Layer layer;
+    layer.in_target = true;
+    layer.starts_target = true;
+    layer.target = target;
+    start_layer(layer);
+    g_three.current_block = g_three.current_layer;
+}
+
+void three_end_target() {
+    if (g_three.current_block < 0) return;
+    g_three.current_block = -1;
+    start_layer(RenderState::Layer{});
+}
+
+void three_set_target_clear(rgba color) {
+    if (g_three.current_block >= 0) g_three.layers[g_three.current_block].clear = color;
+}
+
+void three_draw_targets() {
+    const auto& layers = g_three.layers;
+    for (size_t first = 0; first < layers.size(); ++first) {
+        if (!layers[first].starts_target) continue;
+        const RenderTargetPass& t = layers[first].target;
+        const rgba c = layers[first].clear;
+        sg_pass p = {};
+        p.action.colors[0].load_action = SG_LOADACTION_CLEAR;
+        p.action.colors[0].clear_value = {c.r, c.g, c.b, c.a};
+        p.action.depth.load_action = SG_LOADACTION_CLEAR;
+        p.action.depth.clear_value = 1.0f;
+        p.attachments.colors[0] = t.color;
+        p.attachments.resolves[0] = t.resolve;
+        p.attachments.depth_stencil = t.depth;
+        sg_begin_pass(&p);
+        for (size_t i = first; i < layers.size() && layers[i].in_target && (i == first || !layers[i].starts_target); ++i) {
+            sgl_draw_layer(static_cast<int>(i));
+            if (layers[i].pass >= 0) render_pass(g_three.passes[layers[i].pass], t.width, t.height);
+        }
+        sg_end_pass();
+    }
+}
+
 void three_draw_layers() {
-    const int pass_count = static_cast<int>(g_three.passes.size());
     const int fb_w = frame_width(), fb_h = frame_height();
-    for (int layer = 0; layer <= pass_count; ++layer) {
-        sgl_draw_layer(layer);
-        if (layer < pass_count) render_pass(g_three.passes[layer], fb_w, fb_h);
+    for (size_t i = 0; i < g_three.layers.size(); ++i) {
+        if (g_three.layers[i].in_target) continue;
+        sgl_draw_layer(static_cast<int>(i));
+        if (g_three.layers[i].pass >= 0) render_pass(g_three.passes[g_three.layers[i].pass], fb_w, fb_h);
     }
 }
 
 void three_end_frame() {
     three_audio_update();
     g_three.passes.clear();
+    g_three.layers.assign(1, RenderState::Layer{});
     g_three.current_layer = 0;
+    g_three.current_block = -1;
     g_three.stats_last_frame = g_three.stats_this_frame;
     g_three.stats_this_frame = RenderStats{};
 }

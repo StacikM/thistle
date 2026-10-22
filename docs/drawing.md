@@ -101,6 +101,46 @@ Verification differs by backend: Metal is unchanged from the version that's been
 
 GLCore has now actually been run, and that immediately found a real bug the compile checks couldn't: the GLSL version had copied the Metal/HLSL V-flip, so every post effect drew the **whole frame upside down** on Linux (and, same shader, Android/Web). Fixed — the vignette in `examples/smoketest.cpp` now renders upright. "Run" here means Mesa's llvmpipe software renderer under Xvfb, screenshotted, not a real GPU driver: it proves the shader and the texture orientation are right, not that every desktop driver agrees. D3D11 and GLES3 still haven't been confirmed by a rendered frame; `examples/smoketest.cpp` turns the vignette on (full strength) specifically so the first person to run it on Windows/Android sees immediately whether it's right.
 
+## Render targets — drawing into a texture
+
+```cpp
+RenderTarget minimap = make_render_target(256, 256);
+RenderTarget game = make_render_target(320, 180, true);   // pixelated: stays crisp scaled up
+
+app.update([&](Frame f) {
+    f.begin_target(minimap);
+    f.clear(rgba{0, 0, 0, 0.6f});           // what this target is cleared to; transparent if you don't
+    draw_map_dots(f);                        // ordinary 2D drawing, in the target's own pixels
+    world.render(f, top_down_camera);        // 3D goes in too
+    f.end_target();
+
+    f.sprite(minimap.texture, {f.width - 276.0f, 20});   // then it's just a texture
+});
+```
+
+Everything between `begin_target` and `end_target` goes into the target instead of the window: shapes, sprites, text, `Menu`, and `World::render`. Then `target.texture` is an ordinary `Texture`: a sprite, a 9-slice, a 3D `Material::texture` (a TV screen, a security monitor), a billboard.
+
+The three things this is for:
+
+- **A low-resolution game scaled up crisply.** Draw the whole game into `make_render_target(320, 180, true)`, then `f.sprite(game.texture, {0, 0}, {.size = {(float)f.width, (float)f.height}})`. `pixelated` keeps the pixels sharp-edged when it's drawn bigger instead of smoothing them. Without it, a target is smoothed like any texture.
+- **3D inside 2D:** a spinning character portrait in an inventory screen, a minimap rendered from above.
+- **Drawing something once and reusing it:** a complicated panel drawn into a target when it changes, and only the texture drawn every frame.
+
+How it behaves:
+
+- **Inside a target, `f.width`/`f.height` are the target's size**, so `World::render(f, camera)` fills it and layout code written against `f.width` works as is. `end_target()` puts them back.
+- **It's cleared every `begin_target`**, to transparent unless you `f.clear(color)` between the two. Draw into the same target twice in a frame and the second time starts from clear again; there's no "keep what was there" mode yet.
+- **The camera starts at `{0, 0}`** inside, and is back at `{0, 0}` after `end_target()`. Set `f.camera(...)` again afterwards if you'd moved it.
+- **Order:** every target is drawn before the window, whatever order you call things in. The window always shows this frame's contents, even if you draw the sprite before you fill the target.
+- **Transparency is right:** soft edges and see-through shapes in a transparent target come out over whatever it's drawn on, without the dark fringes you'd get from blending twice. (What's in a target is stored premultiplied by its own alpha, and `sprite`/`sprite9` draw it with a matching blend. That ignores `f.blend(Blend::Additive)` for that draw.) As a 3D material, clear it to an opaque color: materials treat a texture's alpha as their own.
+- **Don't draw a target into itself** (its own texture between its own `begin_target`/`end_target`). The GPU can't read and write one image in one pass.
+- **Forgot `end_target()`?** The engine ends it after your update and logs a warning once.
+- Free one with `unload_render_target(target)`, like `unload_texture`. `reload_texture` does nothing on one.
+
+**What fixing this up required:** on OpenGL (Linux, Android, the web) a framebuffer's first row is the bottom of the image, but a texture's first row is the top, so a target drawn the obvious way comes out upside down when it's then used as a texture. D3D11 and Metal don't have this problem. On OpenGL the engine draws into targets upside down, 2D and 3D both, so they end up stored like any other texture and everything that samples them just works. Separately, sokol_gl leaves alpha out of its pipelines' write mask by default, which nobody notices on the window but left targets fully transparent under everything drawn into them. Both are fixed, and `examples/render_target_test.cpp` exists to catch either coming back.
+
+**Verified:** `examples/render_target_test.cpp` (`thistle_render_target_test`) puts a texture made from pixels next to render targets drawn with the same four-color pattern, as sprites and as materials on two cubes, so anything upside down or off-color shows as a difference. It also has a lit, shadowed 3D scene in a target and a transparent target over a checkerboard. On Linux (OpenGL on Mesa's llvmpipe under Xvfb, screenshotted): every copy matches the reference the right way up, the colors match to within one unit out of 255, and the transparent target shows no fringes and no boxes around its text. The Windows build (D3D11) run under **Wine** looked the same. Wine turns D3D11 into OpenGL, so that's evidence, not proof: it hasn't been run on Windows itself or on a Mac (Metal). Run `thistle_render_target_test` there before relying on it; the top-left four squares and the two cubes should all match. Multisampled windows have their own code path (a resolve image), but the engine doesn't turn multisampling on, so that path hasn't run at all.
+
 ## Minor 3D — read this before you get excited
 
 > **For a 3D game, use `thistle::three` instead ([3d.md](3d.md)):** a real lit renderer with models, shadows, lights, block worlds and a level editor. The calls below are the older, simpler mode. They still work, and they're fine for a spinning cube on a title screen.

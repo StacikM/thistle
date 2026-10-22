@@ -169,6 +169,21 @@ Texture make_texture(int width, int height, const unsigned char* rgba);
 // Call when unloading a level so textures don't leak.
 void unload_texture(Texture& tex);
 
+// A texture you draw into: a minimap, a 3D character in a 2D menu, a game
+// drawn small and scaled up crisply. Between f.begin_target(t) and
+// f.end_target(), 2D drawing and World::render() go into it instead of the
+// window; after that, draw t.texture like any texture (f.sprite, a 3D
+// material, a billboard). See docs/drawing.md.
+struct RenderTarget {
+    Texture texture;
+    bool valid() const { return texture.valid(); }
+};
+
+// `pixelated`: drawn bigger, it stays sharp-edged instead of smoothed —
+// for a low-resolution game scaled up to the window.
+RenderTarget make_render_target(int width, int height, bool pixelated = false);
+void unload_render_target(RenderTarget& target);
+
 // Re-reads a texture from its original file and re-uploads it (hot reload).
 void reload_texture(Texture tex);
 
@@ -416,6 +431,16 @@ public:
 
     // Pixel width/height the string would occupy with the given options.
     vec2 measure_text(const std::string& str, TextOpts opts = {}) const;
+
+    // Draw into a render target instead of the window until end_target():
+    // 2D drawing, text and World::render() all go there. Inside, width and
+    // height are the target's, clear() sets what it's cleared to (it starts
+    // transparent every time), and the camera starts at {0, 0}. end_target()
+    // goes back to the window, with the camera at {0, 0} again. Every target
+    // is drawn before the window, so the window shows this frame's contents
+    // wherever you draw them. Don't draw a target's texture into itself.
+    void begin_target(RenderTarget target);
+    void end_target();
 
     // Shift all subsequent draws this frame by offset (a simple 2D camera).
     // Pass {0, 0} to reset — e.g. before drawing a fixed HUD. Also switches

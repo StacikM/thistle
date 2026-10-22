@@ -444,6 +444,18 @@ if(THISTLE_BUILD_SMOKETEST)
         endif()
     endif()
 
+    # Render targets, checked by eye: see the comment at the top of the file.
+    add_executable(thistle_render_target_test examples/render_target_test.cpp)
+    target_link_libraries(thistle_render_target_test PRIVATE thistle)
+    target_compile_definitions(thistle_render_target_test PRIVATE
+        THISTLE_TOUCH_TEST_FONT="${CMAKE_CURRENT_SOURCE_DIR}/tools/thistle-editor/editor_assets/inter-regular.ttf")
+    if(WIN32)
+        set_target_properties(thistle_render_target_test PROPERTIES WIN32_EXECUTABLE ON)
+        if(MSVC)
+            target_link_options(thistle_render_target_test PRIVATE "/ENTRY:mainCRTStartup")
+        endif()
+    endif()
+
     add_executable(thistle_lights_smoketest examples/lights_smoketest.cpp)
     target_link_libraries(thistle_lights_smoketest PRIVATE thistle)
     if(WIN32)
