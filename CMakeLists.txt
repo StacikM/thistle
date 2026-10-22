@@ -432,6 +432,18 @@ if(THISTLE_BUILD_SMOKETEST)
     endif()
 
     # Point/spot lights, fog, sun disc, skybox orientation (see its header).
+    # Draws Frame::touches(), for checking multi-touch by hand on a device.
+    add_executable(thistle_touch_test examples/touch_test.cpp)
+    target_link_libraries(thistle_touch_test PRIVATE thistle)
+    target_compile_definitions(thistle_touch_test PRIVATE
+        THISTLE_TOUCH_TEST_FONT="${CMAKE_CURRENT_SOURCE_DIR}/tools/thistle-editor/editor_assets/inter-regular.ttf")
+    if(WIN32)
+        set_target_properties(thistle_touch_test PROPERTIES WIN32_EXECUTABLE ON)
+        if(MSVC)
+            target_link_options(thistle_touch_test PRIVATE "/ENTRY:mainCRTStartup")
+        endif()
+    endif()
+
     add_executable(thistle_lights_smoketest examples/lights_smoketest.cpp)
     target_link_libraries(thistle_lights_smoketest PRIVATE thistle)
     if(WIN32)

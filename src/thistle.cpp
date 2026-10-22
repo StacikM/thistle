@@ -315,6 +315,10 @@ struct EngineState {
     float mouse_x = 0.0f;
     float mouse_y = 0.0f;
     float scroll_y = 0.0f; // accumulated this frame, reset after each frame like key_pressed
+    std::vector<Touch> touches;
+    std::vector<uintptr_t> touch_raw; // the OS's id for each of `touches`, same order
+    int next_touch_id = 1;
+    int primary_touch = -1;           // the Touch::id driving mouse button 0, or -1
     std::vector<std::string> dropped_files; // this frame's, cleared after it like key_pressed
     float mouse_dx = 0.0f; // same, for relative movement
     float mouse_dy = 0.0f;
@@ -905,6 +909,14 @@ void frame_cb() {
     for (bool& p : g_state->key_released) p = false;
     for (bool& p : g_state->mouse_pressed) p = false;
     for (bool& p : g_state->mouse_released) p = false;
+    for (std::size_t i = g_state->touches.size(); i-- > 0;) {
+        if (g_state->touches[i].ended) {
+            g_state->touches.erase(g_state->touches.begin() + static_cast<std::ptrdiff_t>(i));
+            g_state->touch_raw.erase(g_state->touch_raw.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            g_state->touches[i].began = false;
+        }
+    }
     g_state->scroll_y = 0.0f;
     g_state->mouse_dx = 0.0f;
     g_state->mouse_dy = 0.0f;
@@ -933,6 +945,67 @@ void cleanup_cb() {
     detail::debug_ui_shutdown();
     sgl_shutdown();
     sg_shutdown();
+}
+
+int live_touch_index(uintptr_t raw) {
+    for (std::size_t i = 0; i < g_state->touches.size(); ++i)
+        if (g_state->touch_raw[i] == raw && !g_state->touches[i].ended) return static_cast<int>(i);
+    return -1;
+}
+
+void end_touch(std::size_t i) {
+    Touch& t = g_state->touches[i];
+    t.ended = true;
+    if (t.id == g_state->primary_touch) {
+        g_state->primary_touch = -1;
+        if (g_state->mouse_held[0]) g_state->mouse_released[0] = true;
+        g_state->mouse_held[0] = false;
+    }
+}
+
+// Every touch event lists all the fingers that are down (sokol passes on
+// the OS's full list on iOS, Android and the web), with `changed` marking
+// the ones this event is about. The first finger down while none were also
+// drives mouse button 0, so mouse_pressed()/mouse() code works on phones.
+void handle_touches(const sapp_event* e) {
+    for (int k = 0; k < e->num_touches; ++k) {
+        const sapp_touchpoint& p = e->touches[k];
+        const vec2 pos{p.pos_x, p.pos_y};
+        int i = live_touch_index(p.identifier);
+        if (i < 0 && p.changed && e->type == SAPP_EVENTTYPE_TOUCHES_BEGAN) {
+            Touch t;
+            t.id = g_state->next_touch_id++;
+            t.pos = t.start = pos;
+            t.began = true;
+            bool any_live = false;
+            for (const Touch& o : g_state->touches) any_live |= !o.ended;
+            if (!any_live) {
+                g_state->primary_touch = t.id;
+                g_state->mouse_held[0] = true;
+                g_state->mouse_pressed[0] = true;
+            }
+            g_state->touches.push_back(t);
+            g_state->touch_raw.push_back(p.identifier);
+            i = static_cast<int>(g_state->touches.size()) - 1;
+        }
+        if (i < 0) continue;
+        Touch& t = g_state->touches[i];
+        t.pos = pos;
+        if (t.id == g_state->primary_touch) {
+            g_state->mouse_x = pos.x;
+            g_state->mouse_y = pos.y;
+        }
+        if (p.changed && (e->type == SAPP_EVENTTYPE_TOUCHES_ENDED || e->type == SAPP_EVENTTYPE_TOUCHES_CANCELLED))
+            end_touch(static_cast<std::size_t>(i));
+    }
+    // A finger the OS no longer lists lost its end event (the app went to the
+    // background mid-touch, say); end it rather than leave it stuck down.
+    for (std::size_t i = 0; i < g_state->touches.size(); ++i) {
+        if (g_state->touches[i].ended) continue;
+        bool listed = false;
+        for (int k = 0; k < e->num_touches && !listed; ++k) listed = e->touches[k].identifier == g_state->touch_raw[i];
+        if (!listed) end_touch(i);
+    }
 }
 
 void event_cb(const sapp_event* e) {
@@ -997,26 +1070,11 @@ void event_cb(const sapp_event* e) {
             g_state->scroll_y += e->scroll_y;
             break;
 
-        // Touch maps onto the primary pointer (mouse button 0) so games written
-        // with mouse_pressed/mouse() work unchanged on phones: a tap is a click.
         case SAPP_EVENTTYPE_TOUCHES_BEGAN:
-            if (e->num_touches > 0) {
-                g_state->mouse_x = e->touches[0].pos_x;
-                g_state->mouse_y = e->touches[0].pos_y;
-                g_state->mouse_held[0] = true;
-                g_state->mouse_pressed[0] = true;
-            }
-            break;
         case SAPP_EVENTTYPE_TOUCHES_MOVED:
-            if (e->num_touches > 0) {
-                g_state->mouse_x = e->touches[0].pos_x;
-                g_state->mouse_y = e->touches[0].pos_y;
-            }
-            break;
         case SAPP_EVENTTYPE_TOUCHES_ENDED:
         case SAPP_EVENTTYPE_TOUCHES_CANCELLED:
-            if (g_state->mouse_held[0]) g_state->mouse_released[0] = true;
-            g_state->mouse_held[0] = false;
+            handle_touches(e);
             break;
 
         default:
@@ -1325,6 +1383,8 @@ bool Frame::touching() const {
 vec2 Frame::touch_pos() const {
     return vec2{g_state->mouse_x, g_state->mouse_y};
 }
+
+const std::vector<Touch>& Frame::touches() const { return g_state->touches; }
 
 // --- gamepad -----------------------------------------------------------
 

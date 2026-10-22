@@ -58,6 +58,34 @@ if (f.touching()) drag(f.touch_pos());
 
 A tap is *also* delivered as a left-mouse click — `mouse_pressed(Mouse::Left)` fires for a finger tap too. `touching()`/`touch_pos()` exist purely for readability when you're writing code you know only runs on a touch device; they're not a separate input path under the hood. Don't write parallel mouse-handling and touch-handling code paths that both try to catch the same tap — you'll double-fire.
 
+The mouse follows one finger: the first one down while no others were. A second finger doesn't move the mouse, and lifting it doesn't release the click; lifting the first one does, even if others are still down. The next finger to land with the screen otherwise empty becomes the new first one.
+
+#### Several fingers
+
+`touches()` lists every finger, each with an `id` that stays the same for as long as that finger is down. That's what a virtual joystick on the left half of the screen and a jump button on the right need: two fingers that never get mixed up.
+
+```cpp
+int stick_finger = 0;   // 0: none (ids start at 1)
+
+for (const Touch& t : f.touches()) {
+    if (t.began && t.start.x < f.width / 2) stick_finger = t.id;
+    if (t.began && t.start.x >= f.width / 2) jump();
+    if (t.id == stick_finger) {
+        if (t.ended) stick_finger = 0;
+        else move = (t.pos - t.start) * (1.0f / 80.0f);   // how far it's pushed from where it landed
+    }
+}
+```
+
+- `began` is true on the frame a finger lands, `ended` on the frame it lifts (with `pos` where it lifted). An ended finger is gone from the list the next frame, so don't hold on to a `Touch`, hold on to its `id`.
+- Look a finger up by `id`, never by its place in the list. The list closes up when a finger in the middle lifts.
+- Ids count up from 1 and are never reused in a run, so a finger that lifts and lands again is a new id, never mistaken for the old one.
+- If the OS stops listing a finger without saying it lifted (the app goes to the background mid-touch, say), it's ended the next time any touch event arrives, rather than left stuck down.
+- Up to 7 fingers at once on iOS (a sokol limit); the rest are ignored.
+- Desktop: always empty. A touch screen on a Windows laptop arrives as the mouse, through the OS, not here.
+
+**Verified:** compiles (Linux, Windows cross-compile; iOS/macOS in CI). Not yet run on a phone or tablet. The owner is testing it on a real iPhone/iPad next. Android and the web use the same code (sokol reports touches the same way on all three), but haven't been run either. `examples/touch_test.cpp` (`thistle_touch_test`) is the program for that: every finger is a circle colored by its id, so ids swapping between fingers would show as colors swapping, and the white ring is the mouse. Its desktop half (an empty list, the ring following the mouse) has been run under Xvfb.
+
 ### Gamepad
 
 ```cpp

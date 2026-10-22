@@ -339,6 +339,15 @@ enum class Pad { A, B, X, Y, Up, Down, Left, Right, L1, R1, Start, Back };
 
 enum class PadKind { None, Xbox, PlayStation, Nintendo, Generic };
 
+// One finger on a touch screen, from Frame::touches().
+struct Touch {
+    int id = 0;          // the same every frame while this finger stays down; never reused
+    vec2 pos{0, 0};      // where it is now, in pixels (where it lifted, when ended)
+    vec2 start{0, 0};    // where it first went down, e.g. a virtual stick's center
+    bool began = false;  // went down this frame
+    bool ended = false;  // lifted this frame; it's gone from the list next frame
+};
+
 // Up to this many controllers at once, one per player (0..3). A controller
 // keeps its player number while it stays connected, so player 2 doesn't
 // become player 1 when player 1 unplugs.
@@ -501,6 +510,12 @@ public:
     // code works as-is; these are just clearer names for the primary finger.
     bool touching() const;   // a finger is currently down
     vec2 touch_pos() const;  // its position in pixels
+    // Every finger that's down, plus the ones that lifted this frame
+    // (ended == true). Find a finger again next frame by its id, not its
+    // place in the list: that shifts when another finger lifts. Phones and
+    // tablets (and the web on a touch screen); always empty on desktop,
+    // where a touch screen arrives as the mouse.
+    const std::vector<Touch>& touches() const;
 
     // Gamepads. `player` is 0..max_pads-1 and defaults to the first, so a
     // one-player game never passes it. pad_pressed/pad_released are edge-
