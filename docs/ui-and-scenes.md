@@ -152,6 +152,34 @@ The first scene registered is the initial one. `set_scene(name)` switches at the
 
 This is entirely optional. Fling doesn't use it — it has one `app.update` lambda with a `Screen` enum and a giant `if (screen == Screen::X) { ... return; }` chain, because that gave it one thing `App::scene` doesn't: trivially sharing local state (input edge-detection flags, the physics world, animation timers) across screens without threading it through every scene's captures. Pick whichever shape matches how much your "screens" actually need to share. Neither is more correct than the other; the giant-lambda-with-an-enum pattern is real and used in the actual shipped game, don't let anyone tell you it's not idiomatic just because it's not `App::scene`.
 
+## Fixed timestep — `fixed_update`, if things must move the same at any frame rate
+
+`update` runs once a frame, so its `dt` is whatever the last frame took: 1/144 s on a fast monitor, 1/30 s on a struggling laptop. Most games are fine with that. Physics and anything that has to come out the same on every machine (a puzzle, a replay, a networked simulation) usually isn't. `fixed_update` runs at a steady rate instead:
+
+```cpp
+App app{{.title = "My Game", .fixed_rate = 60}};   // 60 is the default; leave it out
+
+vec2 prev, pos, vel;
+app.fixed_update([&](Frame f) {          // exactly 60 times a second, f.dt == 1/60
+    prev = pos;
+    if (f.key_down(Key::Right)) vel.x += 900 * f.dt;
+    pos += vel * f.dt;
+});
+app.update([&](Frame f) {
+    if (f.key_pressed(Key::Space)) vel.y = -500;        // presses: check them here, not in fixed_update
+    f.circle(lerp(prev, pos, f.fixed_alpha), 20, coral); // smooth on a 144 Hz screen too
+});
+```
+
+- **When it runs:** before `update`, each frame, as many times as it takes to stay at `fixed_rate`. On a 144 Hz screen that's usually zero or one; at 30 fps it's two. `f.dt` is always exactly one step.
+- **`f.fixed_alpha`** (in `update`): how far it is from the last fixed step to the next, 0..1. Keep the previous and current position, draw `lerp(prev, pos, f.fixed_alpha)`, and motion stays smooth even when the steps and the frames don't line up. Drawing `pos` directly also works; it just judders slightly when the two rates differ.
+- **Input:** read held input (`key_down`, sticks, `mouse()`) in `fixed_update`. Check `*_pressed` and `*_released` in `update`: a frame can run no fixed steps at all, and an edge seen only in that frame would be missed. Store what you saw and let the next fixed step act on it.
+- **Don't draw in it.** It can run several times a frame, or not at all.
+- **Scenes:** with `App::scene`, each scene's own `.fixed_update` runs instead of the App's (the App's is ignored, the same as `app.update`). A scene without one has no fixed steps.
+- **Catching up:** a frame that took longer than a quarter of a second only catches up a quarter of a second, so one hitch can't set off hundreds of steps that make the next frame slow too. sokol already smooths the frame time it reports, so in practice a single long frame is spread over the next few anyway.
+
+Verified under Xvfb on Linux: 50.2 steps a second with `fixed_rate = 50`, `f.dt` exactly 0.02 every step, `fixed_alpha` staying within 0..1, a scene's `fixed_update` running instead of the App's, and none after switching to a scene without one. The quarter-second cap is in the code but wasn't triggered by that test: sokol's smoothing meant the engine never saw a 1 s frame from a 1 s stall.
+
 ## `Tilemap`
 
 ```cpp

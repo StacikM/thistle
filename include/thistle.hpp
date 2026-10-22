@@ -373,10 +373,14 @@ struct Camera3D {
 // Passed to your update callback each frame. Pixels, origin top-left, y down.
 class Frame {
 public:
-    float dt = 0.0f;    // seconds since previous frame
+    float dt = 0.0f;    // seconds since previous frame (one step, inside fixed_update)
     double time = 0.0;  // seconds since app start
     int width = 0;      // framebuffer width in pixels
     int height = 0;     // framebuffer height in pixels
+    // In update, when there's a fixed_update: how far it is from the last
+    // fixed step to the next one, 0..1. Draw lerp(previous, current, f.fixed_alpha)
+    // for smooth motion at any frame rate. 0 without a fixed_update.
+    float fixed_alpha = 0.0f;
 
     void clear(rgba color);
     void rect(vec2 pos, vec2 size, rgba color);
@@ -1469,6 +1473,7 @@ struct Scene {
     std::function<void()> enter;         // called when this scene becomes active
     std::function<void(Frame)> update;   // called every frame while active
     std::function<void()> exit;          // called when leaving this scene
+    std::function<void(Frame)> fixed_update; // optional; see App::fixed_update
 };
 
 struct AppConfig {
@@ -1480,6 +1485,8 @@ struct AppConfig {
     // Empty: the title. Set it when the title changes between versions
     // ("My Game v1.2"), or every update would start players from nothing.
     std::string save_name;
+    // Steps per second for fixed_update (App's and Scene's).
+    int fixed_rate = 60;
 };
 
 class App {
@@ -1489,6 +1496,14 @@ public:
 
     App& start(std::function<void()> fn);
     App& update(std::function<void(Frame)> fn);
+    // Runs at a steady AppConfig::fixed_rate (60 a second unless you say),
+    // before update: none, one or several times a frame, whatever keeps it
+    // at that rate, with f.dt always exactly one step. For physics and
+    // anything that must come out the same at any frame rate. Read held
+    // input (key_down, sticks) here; check *_pressed/*_released in update,
+    // since a frame can run no fixed steps and miss them. Don't draw here.
+    // With scenes, each Scene's own fixed_update runs instead, like update.
+    App& fixed_update(std::function<void(Frame)> fn);
     App& stop(std::function<void()> fn);
 
     // Register a scene. The first one registered becomes the initial scene.

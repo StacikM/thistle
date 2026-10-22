@@ -32,7 +32,13 @@ vec2 p = phys.position(player);
 f.rect({p.x - 24, p.y - 24}, {48, 48}, white);
 ```
 
-`step()` takes the real frame `dt` directly. There is no fixed-timestep accumulator baked in — if your frame rate is unstable, your simulation will be too, exactly like Box2D always behaves when you feed it a variable `dt`. If that matters for your game (it usually doesn't for a small game running on modern hardware; it usually does for a physics puzzle game where reproducibility matters), build your own accumulator around `step()` in game code. The wrapper isn't going to guess whether you need that.
+`step()` takes whatever `dt` you give it. Called from `update` with the frame's `dt`, an unstable frame rate makes an unstable simulation, exactly like Box2D always behaves when you feed it a variable `dt`. That usually doesn't matter for a small game on modern hardware. It usually does for a physics puzzle game where the same shot should land in the same place every time. For that, step it from `app.fixed_update` instead, which always gets the same `dt`:
+
+```cpp
+app.fixed_update([&](Frame f) { phys.step(f.dt); });   // 60 steps a second, whatever the frame rate
+```
+
+See "Fixed timestep" in [ui-and-scenes.md](ui-and-scenes.md) for how that runs and how to draw smoothly between steps.
 
 ## Collisions and queries
 

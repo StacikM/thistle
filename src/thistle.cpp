@@ -262,6 +262,8 @@ struct EngineState {
     AppConfig config;
     std::function<void()> on_start;
     std::function<void(Frame)> on_update;
+    std::function<void(Frame)> on_fixed_update;
+    double fixed_accumulator = 0.0; // simulated time owed to fixed_update, under one step
     std::function<void()> on_stop;
 
     std::unordered_map<std::string, Scene> scenes;
@@ -838,10 +840,31 @@ void frame_cb() {
         g_state->has_pending = false;
     }
 
+    Scene* scene = nullptr;
     if (!g_state->current_scene.empty()) {
         auto cur = g_state->scenes.find(g_state->current_scene);
-        if (cur != g_state->scenes.end() && cur->second.update) cur->second.update(f);
-    } else if (g_state->on_update) {
+        if (cur != g_state->scenes.end()) scene = &cur->second;
+    }
+    const std::function<void(Frame)>* fixed =
+        scene ? &scene->fixed_update : (g_state->current_scene.empty() ? &g_state->on_fixed_update : nullptr);
+    if (fixed && *fixed) {
+        const double step = 1.0 / (g_state->config.fixed_rate > 0 ? g_state->config.fixed_rate : 60);
+        // A hitch (a breakpoint, the window being dragged) only catches up a
+        // quarter of a second, instead of running hundreds of steps at once
+        // and making the next frame slower still.
+        g_state->fixed_accumulator += dt < 0.25 ? dt : 0.25;
+        Frame ff = f;
+        ff.dt = static_cast<float>(step);
+        while (g_state->fixed_accumulator >= step) {
+            (*fixed)(ff);
+            g_state->fixed_accumulator -= step;
+        }
+        f.fixed_alpha = static_cast<float>(g_state->fixed_accumulator / step);
+    }
+
+    if (scene) {
+        if (scene->update) scene->update(f);
+    } else if (g_state->current_scene.empty() && g_state->on_update) {
         g_state->on_update(f);
     }
 
@@ -3542,6 +3565,11 @@ App& App::start(std::function<void()> fn) {
 
 App& App::update(std::function<void(Frame)> fn) {
     g_state->on_update = std::move(fn);
+    return *this;
+}
+
+App& App::fixed_update(std::function<void(Frame)> fn) {
+    g_state->on_fixed_update = std::move(fn);
     return *this;
 }
 
