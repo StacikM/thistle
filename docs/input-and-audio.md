@@ -8,9 +8,15 @@ if (f.key_down(Key::Left)) x -= speed * f.dt;   // true every frame it's held
 
 vec2 m = f.mouse();
 if (f.mouse_pressed(Mouse::Left)) startDrag(m);
+if (f.mouse_released(Mouse::Left)) drop(m);     // true ONLY on the frame it came back up
+
+if (f.key_down(Key::Space)) charge += f.dt;      // hold to charge...
+if (f.key_released(Key::Space)) fire(charge);    // ...let go to fire
 ```
 
-`*_pressed` is edge-triggered (this frame only), `*_down` is level-triggered (held). Mixing these up is the single most common input bug in every game ever written in any engine — if your action fires every frame instead of once, you used `_down` where you meant `_pressed`.
+`*_pressed` and `*_released` are edge-triggered (this frame only), `*_down` is level-triggered (held). Mixing these up is the single most common input bug in every game ever written in any engine — if your action fires every frame instead of once, you used `_down` where you meant `_pressed`.
+
+`key_released`, `mouse_released` and `pad_released` (below) are true for the one frame after the key or button comes back up. A press and release inside the same frame (a very fast tap) gives `_pressed` and `_released` together that frame, and `_down` never. You only get a release for a press the game saw: a key already held when the window opened, or pressed while a debug window had the keyboard, comes up without one. On phones, a finger lifting is `mouse_released(Mouse::Left)`, the same way a tap is a click.
 
 `Key` values match GLFW/sokol keycodes on purpose, so there's no translation table hiding a bug — what you pass is what the platform reports. It covers letters, digits, the punctuation keys, arrows, the Insert/Delete/Home/End/Page Up/Page Down block, Caps Lock, F1–F12, the numpad and the left/right modifiers. It's not a complete keyboard: Print Screen, Scroll Lock, Pause, Num Lock, the Menu key, the numpad's `=` and F13 and up aren't in it, because nothing built on this needed them. Add to the enum in `thistle.hpp` and wire the value through if you need more; don't work around a missing key with something hacky, just add it, it's a one-line enum entry.
 
@@ -57,6 +63,7 @@ A tap is *also* delivered as a left-mouse click — `mouse_pressed(Mouse::Left)`
 ```cpp
 if (f.pad_connected()) {
     if (f.pad_pressed(Pad::A)) jump();
+    if (f.pad_released(Pad::A)) cut_jump_short();   // let go early: a lower jump
     vec2 stick = f.pad_left_stick();     // -1..1 each axis
     const char* label = f.pad_label(Pad::A);   // "A" / "Cross" / "B" depending on brand
 }

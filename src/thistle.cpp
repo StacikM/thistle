@@ -308,8 +308,10 @@ struct EngineState {
 
     bool key_held[512] = {};
     bool key_pressed[512] = {};
+    bool key_released[512] = {};
     bool mouse_held[3] = {};
     bool mouse_pressed[3] = {};
+    bool mouse_released[3] = {};
     float mouse_x = 0.0f;
     float mouse_y = 0.0f;
     float scroll_y = 0.0f; // accumulated this frame, reset after each frame like key_pressed
@@ -900,7 +902,9 @@ void frame_cb() {
 
     // Edge-triggered input is only true for the frame it happened.
     for (bool& p : g_state->key_pressed) p = false;
+    for (bool& p : g_state->key_released) p = false;
     for (bool& p : g_state->mouse_pressed) p = false;
+    for (bool& p : g_state->mouse_released) p = false;
     g_state->scroll_y = 0.0f;
     g_state->mouse_dx = 0.0f;
     g_state->mouse_dy = 0.0f;
@@ -967,6 +971,7 @@ void event_cb(const sapp_event* e) {
             break;
         case SAPP_EVENTTYPE_KEY_UP:
             if (e->key_code >= 0 && e->key_code < 512) {
+                if (g_state->key_held[e->key_code]) g_state->key_released[e->key_code] = true;
                 g_state->key_held[e->key_code] = false;
             }
             break;
@@ -978,6 +983,7 @@ void event_cb(const sapp_event* e) {
             break;
         case SAPP_EVENTTYPE_MOUSE_UP:
             if (e->mouse_button >= 0 && e->mouse_button < 3) {
+                if (g_state->mouse_held[e->mouse_button]) g_state->mouse_released[e->mouse_button] = true;
                 g_state->mouse_held[e->mouse_button] = false;
             }
             break;
@@ -1009,6 +1015,7 @@ void event_cb(const sapp_event* e) {
             break;
         case SAPP_EVENTTYPE_TOUCHES_ENDED:
         case SAPP_EVENTTYPE_TOUCHES_CANCELLED:
+            if (g_state->mouse_held[0]) g_state->mouse_released[0] = true;
             g_state->mouse_held[0] = false;
             break;
 
@@ -1277,6 +1284,11 @@ bool Frame::key_pressed(Key k) const {
     return i >= 0 && i < 512 && g_state->key_pressed[i];
 }
 
+bool Frame::key_released(Key k) const {
+    const int i = static_cast<int>(k);
+    return i >= 0 && i < 512 && g_state->key_released[i];
+}
+
 vec2 Frame::mouse() const {
     return vec2{g_state->mouse_x, g_state->mouse_y};
 }
@@ -1289,6 +1301,11 @@ bool Frame::mouse_down(Mouse b) const {
 bool Frame::mouse_pressed(Mouse b) const {
     const int i = static_cast<int>(b);
     return i >= 0 && i < 3 && g_state->mouse_pressed[i];
+}
+
+bool Frame::mouse_released(Mouse b) const {
+    const int i = static_cast<int>(b);
+    return i >= 0 && i < 3 && g_state->mouse_released[i];
 }
 
 const std::vector<std::string>& Frame::dropped_files() const { return g_state->dropped_files; }
@@ -1393,6 +1410,10 @@ bool Frame::pad_down(Pad b, int player) const { return pad_field(pad_slot(g_stat
 bool Frame::pad_pressed(Pad b, int player) const {
     return pad_field(pad_slot(g_state->pads_cur, player), b) != 0 &&
            pad_field(pad_slot(g_state->pads_prev, player), b) == 0;
+}
+bool Frame::pad_released(Pad b, int player) const {
+    return pad_field(pad_slot(g_state->pads_cur, player), b) == 0 &&
+           pad_field(pad_slot(g_state->pads_prev, player), b) != 0;
 }
 vec2 Frame::pad_left_stick(int player) const {
     const ThistleGamepad& p = pad_slot(g_state->pads_cur, player);

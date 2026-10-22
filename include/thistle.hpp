@@ -475,9 +475,11 @@ public:
     void blend(Blend mode);
 
     // Input. *_down is true while held; *_pressed is true only on the frame
-    // the key/button first went down.
+    // the key/button first went down, *_released only on the frame it came
+    // back up (letting go of a charged shot, the end of a drag).
     bool key_down(Key k) const;
     bool key_pressed(Key k) const;
+    bool key_released(Key k) const;
     vec2 mouse() const; // cursor position in pixels
     // How far the mouse moved this frame, in pixels. Keeps working while the
     // mouse is locked (lock_mouse()), when mouse() itself stops changing —
@@ -485,6 +487,7 @@ public:
     vec2 mouse_delta() const;
     bool mouse_down(Mouse b) const;
     bool mouse_pressed(Mouse b) const;
+    bool mouse_released(Mouse b) const;
     // Vertical scroll wheel/trackpad delta accumulated this frame (positive =
     // scroll up/away from you on most platforms/mice — sign varies by OS and
     // device, so treat it as "some scroll happened this frame," not a
@@ -500,12 +503,14 @@ public:
     vec2 touch_pos() const;  // its position in pixels
 
     // Gamepads. `player` is 0..max_pads-1 and defaults to the first, so a
-    // one-player game never passes it. pad_pressed is edge-triggered. An
-    // unconnected player reads as nothing held and sticks at {0, 0}.
+    // one-player game never passes it. pad_pressed/pad_released are edge-
+    // triggered, like the keys'. An unconnected player reads as nothing held
+    // and sticks at {0, 0}; unplugging with a button held counts as releasing it.
     int pad_count() const;            // how many are connected right now
     bool pad_connected(int player = 0) const;
     bool pad_down(Pad b, int player = 0) const;
     bool pad_pressed(Pad b, int player = 0) const;
+    bool pad_released(Pad b, int player = 0) const;
     vec2 pad_left_stick(int player = 0) const;   // each axis -1..1
     vec2 pad_right_stick(int player = 0) const;
 
