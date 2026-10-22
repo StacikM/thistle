@@ -52,3 +52,17 @@ if (hit.hit) { /* hit.body, hit.point, hit.normal, hit.fraction */ }
 ## Bodies as handles, not pointers
 
 `Body` is `{int id}` — copyable, comparable with `==`, and cheap to store in your own game structs (a `MoverRT` that pairs a `Body` with the two endpoints it patrols between, say). There's no lifetime tracking: destroy the `Physics` world and every `Body` you were holding becomes meaningless, but nothing will tell you that — calling `phys.position()` on a stale handle after the world's gone is undefined, same as any other dangling-handle bug. Don't hold `Body` values past the lifetime of the `Physics` that created them.
+
+## Removing bodies
+
+```cpp
+phys.on_collision([&](Body a, Body b) {
+    if (a == coin || b == coin) { score++; phys.remove(coin); }
+});
+```
+
+`remove(body)` takes it out of the world: a bullet that hit, a coin picked up, an enemy that died. The `Body` you were holding goes stale: `position()` returns `{0, 0}`, `touching()` returns false, the setters do nothing, and its id is never given to a new body, so a stale handle can't silently start pointing at something else. Removing an already-removed body does nothing.
+
+It's safe inside `on_collision`. Box2D locks its world during `step()`, so a body removed there is freed when `step()` returns. No more collisions are reported for it after the call, but it's still in the world for the rest of that one step, so it can still push things for one step.
+
+Verified headlessly (`examples/physics2d_smoketest.cpp`, a ctest): removing outside a step, removing a sensor from inside `on_collision`, stale handles, and a raycast passing where a removed body was.

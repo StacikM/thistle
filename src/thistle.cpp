@@ -1798,7 +1798,8 @@ void Tilemap::draw(Frame& f, vec2 offset) const {
 struct Physics::Impl : public b2ContactListener {
     static constexpr float PPM = 100.0f; // pixels per meter
     b2World world;
-    std::vector<b2Body*> bodies;
+    std::vector<b2Body*> bodies; // removed bodies leave a null slot, so ids are never reused
+    std::vector<b2Body*> pending_destroy;
     std::function<void(Body, Body)> on_begin;
     explicit Impl(b2Vec2 g) : world(g) { world.SetContactListener(this); }
     b2Body* get(Body b) const {
@@ -1815,7 +1816,7 @@ struct Physics::Impl : public b2ContactListener {
         if (!on_begin) return;
         const int a = id_of(c->GetFixtureA()->GetBody());
         const int b = id_of(c->GetFixtureB()->GetBody());
-        if (a >= 0 && b >= 0) on_begin(Body{a}, Body{b});
+        if (get(Body{a}) && get(Body{b})) on_begin(Body{a}, Body{b});
     }
 };
 
@@ -1905,7 +1906,21 @@ Body Physics::add_sensor_box(vec2 center, vec2 size) {
     return impl_->register_body(body);
 }
 
-void Physics::step(float dt) { impl_->world.Step(dt, 8, 3); }
+void Physics::step(float dt) {
+    impl_->world.Step(dt, 8, 3);
+    for (b2Body* body : impl_->pending_destroy) impl_->world.DestroyBody(body);
+    impl_->pending_destroy.clear();
+}
+
+void Physics::remove(Body b) {
+    b2Body* body = impl_->get(b);
+    if (!body) return;
+    impl_->bodies[b.id] = nullptr;
+    // Box2D locks the world during Step(), so a removal from inside an
+    // on_collision callback has to wait until Step() returns.
+    if (impl_->world.IsLocked()) impl_->pending_destroy.push_back(body);
+    else impl_->world.DestroyBody(body);
+}
 
 void Physics::on_collision(std::function<void(Body, Body)> begin) {
     impl_->on_begin = std::move(begin);

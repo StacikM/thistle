@@ -541,7 +541,8 @@ void debug_stats_window();
 
 // Full-screen shader effects applied after the scene is drawn. The frame is
 // rendered to an offscreen texture, then composited through the chosen effect.
-// (Currently implemented on Metal — macOS/iOS; a no-op on other backends.)
+// One shader per backend (Metal, D3D11, GLSL); docs/drawing.md says which
+// have actually been seen on screen.
 enum class PostEffect { None, Grayscale, Vignette, Chromatic, Flash, Fade };
 
 // Set the active effect and its 0..1 strength. Flash/Fade are handy for damage
@@ -1369,6 +1370,12 @@ public:
     Body add_dynamic_circle(vec2 center, float radius, float density = 1.0f, float friction = 0.3f, float restitution = 0.2f);
     // A static overlap trigger (no physical response); use on_collision to react.
     Body add_sensor_box(vec2 center, vec2 size);
+
+    // Takes a body out of the world (a bullet that hit, a coin picked up).
+    // The handle goes stale: every call on it does nothing, and its id is
+    // never handed out again. Safe inside on_collision: no more collisions
+    // are reported for it, and it's freed when that step() returns.
+    void remove(Body b);
 
     void step(float dt);
 

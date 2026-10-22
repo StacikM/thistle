@@ -595,6 +595,10 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_scene_smoketest examples/scene_smoketest.cpp)
     target_link_libraries(thistle_scene_smoketest PRIVATE thistle)
 
+    # The 2D Box2D wrapper's Physics::remove(), inside and outside a step.
+    add_executable(thistle_physics2d_smoketest examples/physics2d_smoketest.cpp)
+    target_link_libraries(thistle_physics2d_smoketest PRIVATE thistle)
+
     # Checks the 3D collision overlap/intersection math against hand-computed
     # expected results. Even more headless than net_smoketest — pure geometry
     # functions, no App/window/GPU touched at all.
@@ -679,6 +683,8 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(net_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME scene_smoketest COMMAND thistle_scene_smoketest)
     set_tests_properties(scene_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME physics2d_smoketest COMMAND thistle_physics2d_smoketest)
+    set_tests_properties(physics2d_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME collision_smoketest COMMAND thistle_collision_smoketest)
     set_tests_properties(collision_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME math3d_smoketest COMMAND thistle_math3d_smoketest)

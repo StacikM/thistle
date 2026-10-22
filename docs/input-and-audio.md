@@ -12,7 +12,7 @@ if (f.mouse_pressed(Mouse::Left)) startDrag(m);
 
 `*_pressed` is edge-triggered (this frame only), `*_down` is level-triggered (held). Mixing these up is the single most common input bug in every game ever written in any engine — if your action fires every frame instead of once, you used `_down` where you meant `_pressed`.
 
-`Key` values match GLFW/sokol keycodes on purpose, so there's no translation table hiding a bug — what you pass is what the platform reports. It's not a complete keyboard (no function keys, no numpad-specific codes, no punctuation beyond what's listed) because nothing in the games built on this needed them. Add to the enum in `thistle.hpp` and wire the value through if you need more; don't work around a missing key with something hacky, just add it, it's a one-line enum entry.
+`Key` values match GLFW/sokol keycodes on purpose, so there's no translation table hiding a bug — what you pass is what the platform reports. It covers letters, digits, the punctuation keys, arrows, the Insert/Delete/Home/End/Page Up/Page Down block, Caps Lock, F1–F12, the numpad and the left/right modifiers. It's not a complete keyboard: Print Screen, Scroll Lock, Pause, Num Lock, the Menu key, the numpad's `=` and F13 and up aren't in it, because nothing built on this needed them. Add to the enum in `thistle.hpp` and wire the value through if you need more; don't work around a missing key with something hacky, just add it, it's a one-line enum entry.
 
 ```cpp
 const float scroll = f.mouse_scroll();   // vertical wheel/trackpad delta this frame, 0 most frames
