@@ -351,6 +351,7 @@ if(APPLE)
             "-framework AudioToolbox"
             "-framework AVFoundation"
             "-framework GameController"
+            "-framework CoreHaptics"
             "-framework StoreKit"
         )
     else()
@@ -365,6 +366,7 @@ if(APPLE)
             "-framework CoreFoundation"
             "-framework StoreKit"
             "-framework GameController"
+            "-framework CoreHaptics"
         )
     endif()
 elseif(WIN32)

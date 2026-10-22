@@ -37,43 +37,123 @@ extern "C" const char* thistle_iap_poll_event_json(void);
 #if defined(__APPLE__)
 #import <Foundation/Foundation.h>
 #import <GameController/GameController.h>
+#import <CoreHaptics/CoreHaptics.h>
 
 // Gamepad polling works the same on macOS and iOS via GameController.framework.
-void thistle_apple_poll_gamepad(ThistleGamepad* g) {
-    std::memset(g, 0, sizeof(*g));
-    @autoreleasepool {
-        GCController* c = nil;
-        for (GCController* cc in [GCController controllers]) { c = cc; break; }
-        if (!c) return;
-        GCExtendedGamepad* gp = c.extendedGamepad;
-        if (!gp) return;
-        g->connected = 1;
+// This file isn't built with ARC, so the slot table holds its own retains.
+namespace {
+GCController* g_pad_slots[THISTLE_MAX_PADS] = {};
+id g_pad_haptic_engines[THISTLE_MAX_PADS] = {}; // CHHapticEngine, created on first rumble
+id g_pad_haptic_players[THISTLE_MAX_PADS] = {}; // id<CHHapticPatternPlayer>, the one playing
 
-        NSString* vn = c.vendorName ? c.vendorName : @"Controller";
-        std::strncpy(g->name, vn.UTF8String, sizeof(g->name) - 1);
-        NSString* low = vn.lowercaseString;
-        if ([low containsString:@"xbox"]) {
-            g->kind = 1;
-        } else if ([low containsString:@"dualsense"] || [low containsString:@"dualshock"] ||
-                   [low containsString:@"sony"] || [low containsString:@"playstation"] ||
-                   [low containsString:@"ps4"] || [low containsString:@"ps5"]) {
-            g->kind = 2;
-        } else if ([low containsString:@"nintendo"] || [low containsString:@"joy-con"] ||
-                   [low containsString:@"joycon"] || [low containsString:@"switch"]) {
-            g->kind = 3;
-        } else {
-            g->kind = 4;
+void release_haptics(int slot) {
+    [g_pad_haptic_players[slot] release];
+    g_pad_haptic_players[slot] = nil;
+    [g_pad_haptic_engines[slot] stopWithCompletionHandler:nil];
+    [g_pad_haptic_engines[slot] release];
+    g_pad_haptic_engines[slot] = nil;
+}
+
+void update_pad_slots() {
+    NSArray<GCController*>* all = [GCController controllers];
+    for (int i = 0; i < THISTLE_MAX_PADS; ++i) {
+        if (g_pad_slots[i] && ![all containsObject:g_pad_slots[i]]) {
+            release_haptics(i);
+            [g_pad_slots[i] release];
+            g_pad_slots[i] = nil;
         }
-        g->a = gp.buttonA.isPressed;      g->b = gp.buttonB.isPressed;
-        g->x = gp.buttonX.isPressed;      g->y = gp.buttonY.isPressed;
-        g->up = gp.dpad.up.isPressed;     g->down = gp.dpad.down.isPressed;
-        g->left = gp.dpad.left.isPressed; g->right = gp.dpad.right.isPressed;
-        g->l1 = gp.leftShoulder.isPressed; g->r1 = gp.rightShoulder.isPressed;
-        if (gp.buttonMenu) g->start = gp.buttonMenu.isPressed;
-        if (gp.buttonOptions) g->back = gp.buttonOptions.isPressed;
-        g->lx = gp.leftThumbstick.xAxis.value;  g->ly = gp.leftThumbstick.yAxis.value;
-        g->rx = gp.rightThumbstick.xAxis.value; g->ry = gp.rightThumbstick.yAxis.value;
-        g->lt = gp.leftTrigger.value;           g->rt = gp.rightTrigger.value;
+    }
+    for (GCController* c in all) {
+        if (!c.extendedGamepad) continue;
+        bool placed = false;
+        for (int i = 0; i < THISTLE_MAX_PADS && !placed; ++i) placed = g_pad_slots[i] == c;
+        for (int i = 0; i < THISTLE_MAX_PADS && !placed; ++i) {
+            if (g_pad_slots[i]) continue;
+            g_pad_slots[i] = [c retain];
+            c.playerIndex = static_cast<GCControllerPlayerIndex>(i); // lights the matching player LED, where there is one
+            placed = true;
+        }
+    }
+}
+
+void fill_pad(GCController* c, ThistleGamepad* g) {
+    std::memset(g, 0, sizeof(*g));
+    GCExtendedGamepad* gp = c.extendedGamepad;
+    if (!gp) return;
+    g->connected = 1;
+
+    NSString* vn = c.vendorName ? c.vendorName : @"Controller";
+    std::strncpy(g->name, vn.UTF8String, sizeof(g->name) - 1);
+    NSString* low = vn.lowercaseString;
+    if ([low containsString:@"xbox"]) {
+        g->kind = 1;
+    } else if ([low containsString:@"dualsense"] || [low containsString:@"dualshock"] ||
+               [low containsString:@"sony"] || [low containsString:@"playstation"] ||
+               [low containsString:@"ps4"] || [low containsString:@"ps5"]) {
+        g->kind = 2;
+    } else if ([low containsString:@"nintendo"] || [low containsString:@"joy-con"] ||
+               [low containsString:@"joycon"] || [low containsString:@"switch"]) {
+        g->kind = 3;
+    } else {
+        g->kind = 4;
+    }
+    g->a = gp.buttonA.isPressed;      g->b = gp.buttonB.isPressed;
+    g->x = gp.buttonX.isPressed;      g->y = gp.buttonY.isPressed;
+    g->up = gp.dpad.up.isPressed;     g->down = gp.dpad.down.isPressed;
+    g->left = gp.dpad.left.isPressed; g->right = gp.dpad.right.isPressed;
+    g->l1 = gp.leftShoulder.isPressed; g->r1 = gp.rightShoulder.isPressed;
+    if (gp.buttonMenu) g->start = gp.buttonMenu.isPressed;
+    if (gp.buttonOptions) g->back = gp.buttonOptions.isPressed;
+    g->lx = gp.leftThumbstick.xAxis.value;  g->ly = gp.leftThumbstick.yAxis.value;
+    g->rx = gp.rightThumbstick.xAxis.value; g->ry = gp.rightThumbstick.yAxis.value;
+    g->lt = gp.leftTrigger.value;           g->rt = gp.rightTrigger.value;
+}
+} // namespace
+
+void thistle_apple_poll_gamepads(ThistleGamepad* pads) {
+    @autoreleasepool {
+        update_pad_slots();
+        for (int i = 0; i < THISTLE_MAX_PADS; ++i) {
+            if (g_pad_slots[i]) fill_pad(g_pad_slots[i], &pads[i]);
+            else std::memset(&pads[i], 0, sizeof(pads[i]));
+        }
+    }
+}
+
+// GCController.haptics (macOS 11 / iOS 14) hands out a Core Haptics engine
+// for the controller's motors; a rumble is one continuous haptic event.
+void thistle_apple_rumble(int slot, float strength, float seconds) {
+    if (slot < 0 || slot >= THISTLE_MAX_PADS || !g_pad_slots[slot]) return;
+    const float s = strength < 0.0f ? 0.0f : (strength > 1.0f ? 1.0f : strength);
+    if (@available(macOS 11.0, iOS 14.0, tvOS 14.0, *)) {
+        @autoreleasepool {
+            if (g_pad_haptic_players[slot]) {
+                [(id<CHHapticPatternPlayer>)g_pad_haptic_players[slot] stopAtTime:CHHapticTimeImmediate error:nil];
+                [g_pad_haptic_players[slot] release];
+                g_pad_haptic_players[slot] = nil;
+            }
+            if (s <= 0.0f) return;
+            GCDeviceHaptics* haptics = g_pad_slots[slot].haptics;
+            if (!haptics) return; // this controller has no motors GameController can drive
+            if (!g_pad_haptic_engines[slot]) {
+                CHHapticEngine* engine = [haptics createEngineWithLocality:GCHapticsLocalityDefault];
+                if (!engine) return;
+                g_pad_haptic_engines[slot] = [engine retain];
+            }
+            CHHapticEngine* engine = (CHHapticEngine*)g_pad_haptic_engines[slot];
+            if (![engine startAndReturnError:nil]) return;
+            CHHapticEventParameter* intensity =
+                [[[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:s] autorelease];
+            CHHapticEvent* event = [[[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous
+                                                                  parameters:@[intensity]
+                                                                relativeTime:0
+                                                                    duration:seconds] autorelease];
+            CHHapticPattern* pattern = [[[CHHapticPattern alloc] initWithEvents:@[event] parameters:@[] error:nil] autorelease];
+            if (!pattern) return;
+            id<CHHapticPatternPlayer> player = [engine createPlayerWithPattern:pattern error:nil];
+            if (!player || ![player startAtTime:CHHapticTimeImmediate error:nil]) return;
+            g_pad_haptic_players[slot] = [player retain];
+        }
     }
 }
 

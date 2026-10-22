@@ -64,9 +64,42 @@ if (f.pad_connected()) {
 
 `Pad` names buttons by *physical position*, Xbox-style (`A` is always the bottom face button, on every controller, regardless of brand) — this is deliberate so your gameplay code never has an `if (brand == PlayStation)` branch. If you want to *display* the brand-correct glyph/name (Cross instead of A on a PlayStation pad), that's what `pad_label()` and `pad_kind()` are for — a display concern, not a gameplay concern. Keep that separation; don't let brand-specific logic leak into your input handling just because you wanted the right icon in a tooltip.
 
-Only the first connected controller is polled. No multi-controller support. If you're building local co-op, that's an engine change (`thistle_gamepad.h`/`.mm`, and the Frame API), not a workaround in game code — don't fake it.
+#### Several controllers (local co-op)
 
-Backed by GameController.framework (iOS/macOS), XInput (Windows), and the kernel joystick API (Linux, `/dev/input/js0`) — Android and web still get a no-op. The Linux backend assumes a fairly standard Xbox-shaped button/axis layout (matching the kernel's `xpad` driver, by far the most common case); a controller using a different driver may report the wrong button in the wrong slot. This hasn't been verified against real hardware on Windows or Linux yet — it's checked in by code review and a clean compile/link against the real XInput/joystick APIs, not by an actual button press. Try it on real hardware before trusting it for something that matters.
+Up to four (`max_pads`). Every `pad_*` call takes a player number as its last argument, 0 when you leave it out, so one-player code never mentions it:
+
+```cpp
+for (int p = 0; p < max_pads; ++p) {
+    if (!f.pad_connected(p)) continue;
+    players[p].move(f.pad_left_stick(p));
+    if (f.pad_pressed(Pad::A, p)) players[p].jump();
+}
+if (f.pad_count() < 2) f.text("Player 2: connect a controller", {20, 20});
+```
+
+A controller keeps its player number while it's connected: if player 1 unplugs, player 2 stays player 2 and slot 0 is empty until a controller is plugged in again, which then takes the lowest free slot. On Windows the slot is XInput's own (the quadrant lit on an Xbox controller's ring). On macOS/iOS the engine sets the controller's player light to match, on controllers that have one.
+
+#### Rumble
+
+```cpp
+pad_rumble(0.8f, 0.25f);      // player 0, 80% strength, a quarter of a second
+pad_rumble(1.0f, 0.5f, 1);    // player 1
+pad_rumble(0.0f, 0.0f);       // stop early
+```
+
+Both motors at one strength; a new call replaces whatever's playing, and the engine stops it when the time is up. It does nothing on a controller without motors. Per platform:
+
+- **Windows:** XInput, so Xbox controllers and anything that presents itself as one.
+- **macOS 11+ / iOS 14+:** the controller's haptics through Core Haptics. Older systems: a no-op.
+- **Linux:** force feedback through evdev. It needs write access to the controller's `/dev/input/event*` node. Desktop distros grant that to the logged-in user for gamepads, so it normally just works. Where they don't (some minimal setups, a game run over SSH), the controller still works for input and rumble silently does nothing.
+
+Android and web: a no-op, like the rest of gamepad support there.
+
+#### Backends, and what's been verified
+
+GameController.framework (iOS/macOS), XInput (Windows), and evdev (Linux, `/dev/input/event*`). Android and web still get a no-op. Linux used to read the legacy joystick API (`/dev/input/js0`). It moved to evdev for more than one controller and rumble, and because evdev names buttons and axes by meaning (`BTN_SOUTH`, `ABS_RX`) and gives each axis's range, where the joystick API only passed on the driver's own numbering. It still trusts the driver to follow the kernel's gamepad layout. `xpad` (Xbox controllers over USB), `hid-playstation` and `hid-nintendo` do, except that `xpad` swaps the two top-row face buttons; that's handled for Xbox controllers. A controller on some other driver can still report a button in the wrong slot. This is not SDL's per-device database.
+
+**None of this has been tried with a real controller yet**: not one controller, not several, not rumble, on any OS. What's been checked: it compiles and links on Linux (GCC) and cross-compiles for Windows (MinGW); macOS/iOS compile in CI only. The container this was written in has no `/dev/input` at all, so the Linux code hasn't even read an event. Test it on real hardware before relying on it, and if a button comes out in the wrong place on Linux, the controller's name and driver (`cat /proc/bus/input/devices`) is what's needed to fix it.
 
 ## Audio
 

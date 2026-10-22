@@ -339,6 +339,11 @@ enum class Pad { A, B, X, Y, Up, Down, Left, Right, L1, R1, Start, Back };
 
 enum class PadKind { None, Xbox, PlayStation, Nintendo, Generic };
 
+// Up to this many controllers at once, one per player (0..3). A controller
+// keeps its player number while it stays connected, so player 2 doesn't
+// become player 1 when player 1 unplugs.
+inline constexpr int max_pads = 4;
+
 // --- minor 3D -------------------------------------------------------------
 // A small perspective/depth-tested drawing mode layered onto the same
 // immediate-mode Frame — for simple 3D objects (a spinning prop, a debug
@@ -494,16 +499,19 @@ public:
     bool touching() const;   // a finger is currently down
     vec2 touch_pos() const;  // its position in pixels
 
-    // Gamepad (first connected controller). pad_pressed is edge-triggered.
-    bool pad_connected() const;
-    bool pad_down(Pad b) const;
-    bool pad_pressed(Pad b) const;
-    vec2 pad_left_stick() const;   // each axis -1..1
-    vec2 pad_right_stick() const;
+    // Gamepads. `player` is 0..max_pads-1 and defaults to the first, so a
+    // one-player game never passes it. pad_pressed is edge-triggered. An
+    // unconnected player reads as nothing held and sticks at {0, 0}.
+    int pad_count() const;            // how many are connected right now
+    bool pad_connected(int player = 0) const;
+    bool pad_down(Pad b, int player = 0) const;
+    bool pad_pressed(Pad b, int player = 0) const;
+    vec2 pad_left_stick(int player = 0) const;   // each axis -1..1
+    vec2 pad_right_stick(int player = 0) const;
 
-    PadKind pad_kind() const;         // Xbox / PlayStation / Nintendo / ...
-    std::string pad_name() const;     // vendor name, e.g. "Xbox Wireless Controller"
-    const char* pad_label(Pad b) const; // brand-correct label, e.g. A -> "Cross" on PS
+    PadKind pad_kind(int player = 0) const;         // Xbox / PlayStation / Nintendo / ...
+    std::string pad_name(int player = 0) const;     // vendor name, e.g. "Xbox Wireless Controller"
+    const char* pad_label(Pad b, int player = 0) const; // brand-correct label, e.g. A -> "Cross" on PS
 };
 
 // --- audio --------------------------------------------------------------
@@ -612,6 +620,12 @@ void quit();
 // Trigger device haptic feedback (iOS only; a no-op elsewhere).
 enum class Haptic { Light, Medium, Heavy, Success };
 void haptic(Haptic style = Haptic::Light);
+
+// Shakes a gamepad: both motors at `strength` (0..1) for `seconds`. Calling
+// it again replaces what's playing; strength 0 stops it. Does nothing for a
+// controller without motors, or one the OS won't let the game drive (see
+// docs/input-and-audio.md).
+void pad_rumble(float strength, float seconds, int player = 0);
 
 // --- crash reporting (fully local — nothing is ever sent anywhere) ------
 // Installed automatically when you construct an App. On a crash (segfault,

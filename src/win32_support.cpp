@@ -243,37 +243,58 @@ void thistle_http_free(void* handle) { delete static_cast<HttpPtr*>(handle); }
 // GameController.framework or a Linux joystick device name lets us pick a
 // real display name. -32768..32767 sticks and 0..255 triggers get normalized
 // to match the same -1..1 / 0..1 ranges every other platform reports.
-void thistle_win32_poll_gamepad(ThistleGamepad* g) {
-    std::memset(g, 0, sizeof(*g));
-    XINPUT_STATE state{};
-    DWORD found = ERROR_DEVICE_NOT_CONNECTED;
-    for (DWORD i = 0; i < XUSER_MAX_COUNT && found != ERROR_SUCCESS; ++i) {
-        found = XInputGetState(i, &state);
+// XInput's own user index (0-3, the light on the controller) is the slot.
+namespace {
+ULONGLONG g_xinput_next_check[XUSER_MAX_COUNT] = {};
+}
+
+void thistle_win32_poll_gamepads(ThistleGamepad* pads) {
+    static_assert(XUSER_MAX_COUNT == THISTLE_MAX_PADS, "one slot per XInput user index");
+    const ULONGLONG now = GetTickCount64();
+    for (DWORD i = 0; i < XUSER_MAX_COUNT; ++i) {
+        ThistleGamepad* g = &pads[i];
+        std::memset(g, 0, sizeof(*g));
+        // XInputGetState on an empty slot can take milliseconds (a known
+        // XInput cost), so empty slots are only asked again once a second.
+        if (now < g_xinput_next_check[i]) continue;
+        XINPUT_STATE state{};
+        if (XInputGetState(i, &state) != ERROR_SUCCESS) {
+            g_xinput_next_check[i] = now + 1000;
+            continue;
+        }
+
+        g->connected = 1;
+        g->kind = 1; // Xbox
+        std::strncpy(g->name, "XInput Controller", sizeof(g->name) - 1);
+
+        const WORD b = state.Gamepad.wButtons;
+        g->a = (b & XINPUT_GAMEPAD_A) != 0;
+        g->b = (b & XINPUT_GAMEPAD_B) != 0;
+        g->x = (b & XINPUT_GAMEPAD_X) != 0;
+        g->y = (b & XINPUT_GAMEPAD_Y) != 0;
+        g->up = (b & XINPUT_GAMEPAD_DPAD_UP) != 0;
+        g->down = (b & XINPUT_GAMEPAD_DPAD_DOWN) != 0;
+        g->left = (b & XINPUT_GAMEPAD_DPAD_LEFT) != 0;
+        g->right = (b & XINPUT_GAMEPAD_DPAD_RIGHT) != 0;
+        g->l1 = (b & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0;
+        g->r1 = (b & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0;
+        g->start = (b & XINPUT_GAMEPAD_START) != 0;
+        g->back = (b & XINPUT_GAMEPAD_BACK) != 0;
+
+        g->lx = state.Gamepad.sThumbLX / 32767.0f;
+        g->ly = state.Gamepad.sThumbLY / 32767.0f;
+        g->rx = state.Gamepad.sThumbRX / 32767.0f;
+        g->ry = state.Gamepad.sThumbRY / 32767.0f;
+        g->lt = state.Gamepad.bLeftTrigger / 255.0f;
+        g->rt = state.Gamepad.bRightTrigger / 255.0f;
     }
-    if (found != ERROR_SUCCESS) return;
+}
 
-    g->connected = 1;
-    g->kind = 1; // Xbox
-    std::strncpy(g->name, "XInput Controller", sizeof(g->name) - 1);
-
-    const WORD b = state.Gamepad.wButtons;
-    g->a = (b & XINPUT_GAMEPAD_A) != 0;
-    g->b = (b & XINPUT_GAMEPAD_B) != 0;
-    g->x = (b & XINPUT_GAMEPAD_X) != 0;
-    g->y = (b & XINPUT_GAMEPAD_Y) != 0;
-    g->up = (b & XINPUT_GAMEPAD_DPAD_UP) != 0;
-    g->down = (b & XINPUT_GAMEPAD_DPAD_DOWN) != 0;
-    g->left = (b & XINPUT_GAMEPAD_DPAD_LEFT) != 0;
-    g->right = (b & XINPUT_GAMEPAD_DPAD_RIGHT) != 0;
-    g->l1 = (b & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0;
-    g->r1 = (b & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0;
-    g->start = (b & XINPUT_GAMEPAD_START) != 0;
-    g->back = (b & XINPUT_GAMEPAD_BACK) != 0;
-
-    g->lx = state.Gamepad.sThumbLX / 32767.0f;
-    g->ly = state.Gamepad.sThumbLY / 32767.0f;
-    g->rx = state.Gamepad.sThumbRX / 32767.0f;
-    g->ry = state.Gamepad.sThumbRY / 32767.0f;
-    g->lt = state.Gamepad.bLeftTrigger / 255.0f;
-    g->rt = state.Gamepad.bRightTrigger / 255.0f;
+void thistle_win32_rumble(int slot, float strength, float /*seconds*/) {
+    if (slot < 0 || slot >= XUSER_MAX_COUNT) return;
+    const float s = strength < 0.0f ? 0.0f : (strength > 1.0f ? 1.0f : strength);
+    XINPUT_VIBRATION v{};
+    v.wLeftMotorSpeed = static_cast<WORD>(s * 65535.0f);
+    v.wRightMotorSpeed = static_cast<WORD>(s * 65535.0f);
+    XInputSetState(static_cast<DWORD>(slot), &v);
 }

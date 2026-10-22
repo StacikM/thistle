@@ -5,6 +5,8 @@
 extern "C" {
 #endif
 
+#define THISTLE_MAX_PADS 4
+
 typedef struct ThistleGamepad {
     int connected;
     int kind;          // 0=none 1=Xbox 2=PlayStation 3=Nintendo 4=Generic
@@ -15,14 +17,21 @@ typedef struct ThistleGamepad {
     float lx, ly, rx, ry, lt, rt;
 } ThistleGamepad;
 
-// Fills *g from the first connected controller (zeros it if none). Each
-// platform has its own real backend now — Apple via GameController.framework
-// (ios_support.mm), Windows via XInput (win32_support.cpp), Linux via the
-// kernel joystick API (linux_gamepad.cpp) — Android and web still get a no-op
-// zero-fill (see thistle.cpp's dispatch in the frame-poll code).
-void thistle_apple_poll_gamepad(ThistleGamepad* g);
-void thistle_win32_poll_gamepad(ThistleGamepad* g);
-void thistle_linux_poll_gamepad(ThistleGamepad* g);
+// Fills pads[0..THISTLE_MAX_PADS) — one slot per player, zeroed when empty.
+// A controller keeps its slot while it stays connected, so player 2 doesn't
+// become player 1 when player 1 unplugs. Apple via GameController.framework
+// (ios_support.mm), Windows via XInput (win32_support.cpp), Linux via evdev
+// (linux_gamepad.cpp); Android and web get a zero-fill (thistle.cpp).
+void thistle_apple_poll_gamepads(ThistleGamepad* pads);
+void thistle_win32_poll_gamepads(ThistleGamepad* pads);
+void thistle_linux_poll_gamepads(ThistleGamepad* pads);
+
+// Both motors at `strength` (0..1; 0 stops) for up to `seconds`. thistle.cpp
+// also stops it itself when the time is up, so a backend whose API has no
+// duration (XInput) can ignore `seconds`.
+void thistle_apple_rumble(int slot, float strength, float seconds);
+void thistle_win32_rumble(int slot, float strength, float seconds);
+void thistle_linux_rumble(int slot, float strength, float seconds);
 
 #ifdef __cplusplus
 }

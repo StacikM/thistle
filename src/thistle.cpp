@@ -321,8 +321,9 @@ struct EngineState {
     std::string text_buffer;
     std::size_t text_max = 40;
 
-    ThistleGamepad pad_cur{};
-    ThistleGamepad pad_prev{};
+    ThistleGamepad pads_cur[THISTLE_MAX_PADS] = {};
+    ThistleGamepad pads_prev[THISTLE_MAX_PADS] = {};
+    double rumble_until[THISTLE_MAX_PADS] = {}; // elapsed time to stop at; 0 = not rumbling
 
     uint64_t frame_index = 0;
 
@@ -790,23 +791,15 @@ void draw_debug(Frame& f) {
 }
 #endif
 
+void poll_gamepads(); // with the rest of the gamepad code, below
+
 void frame_cb() {
     const int w = sapp_width();
     const int h = sapp_height();
     const double dt = sapp_frame_duration();
     g_state->elapsed += dt;
 
-    // Poll the gamepad (previous frame kept for edge detection).
-    g_state->pad_prev = g_state->pad_cur;
-#if defined(__APPLE__)
-    thistle_apple_poll_gamepad(&g_state->pad_cur);
-#elif defined(_WIN32)
-    thistle_win32_poll_gamepad(&g_state->pad_cur);
-#elif defined(__linux__) && !defined(__ANDROID__)
-    thistle_linux_poll_gamepad(&g_state->pad_cur);
-#else
-    g_state->pad_cur = ThistleGamepad{};
-#endif
+    poll_gamepads();
 
     // Pixel-space, top-left origin, y down; alpha blending on.
     sgl_defaults();
@@ -1336,18 +1329,82 @@ int pad_field(const ThistleGamepad& g, Pad b) {
     }
     return 0;
 }
+
+const ThistleGamepad& pad_slot(const ThistleGamepad* pads, int player) {
+    static const ThistleGamepad none{};
+    return (player >= 0 && player < max_pads) ? pads[player] : none;
+}
+
+void backend_rumble(int player, float strength, float seconds) {
+#if defined(__APPLE__)
+    thistle_apple_rumble(player, strength, seconds);
+#elif defined(_WIN32)
+    thistle_win32_rumble(player, strength, seconds);
+#elif defined(__linux__) && !defined(__ANDROID__)
+    thistle_linux_rumble(player, strength, seconds);
+#else
+    (void)player; (void)strength; (void)seconds;
+#endif
+}
+
+void poll_gamepads() {
+    std::memcpy(g_state->pads_prev, g_state->pads_cur, sizeof(g_state->pads_cur));
+#if defined(__APPLE__)
+    thistle_apple_poll_gamepads(g_state->pads_cur);
+#elif defined(_WIN32)
+    thistle_win32_poll_gamepads(g_state->pads_cur);
+#elif defined(__linux__) && !defined(__ANDROID__)
+    thistle_linux_poll_gamepads(g_state->pads_cur);
+#else
+    for (ThistleGamepad& p : g_state->pads_cur) p = ThistleGamepad{};
+#endif
+    for (int i = 0; i < max_pads; ++i) {
+        if (g_state->rumble_until[i] <= 0.0) continue;
+        if (!g_state->pads_cur[i].connected) {
+            g_state->rumble_until[i] = 0.0;
+        } else if (g_state->elapsed >= g_state->rumble_until[i]) {
+            g_state->rumble_until[i] = 0.0;
+            backend_rumble(i, 0.0f, 0.0f);
+        }
+    }
+}
 } // namespace
 
-bool Frame::pad_connected() const { return g_state->pad_cur.connected != 0; }
-bool Frame::pad_down(Pad b) const { return pad_field(g_state->pad_cur, b) != 0; }
-bool Frame::pad_pressed(Pad b) const {
-    return pad_field(g_state->pad_cur, b) != 0 && pad_field(g_state->pad_prev, b) == 0;
-}
-vec2 Frame::pad_left_stick() const { return {g_state->pad_cur.lx, g_state->pad_cur.ly}; }
-vec2 Frame::pad_right_stick() const { return {g_state->pad_cur.rx, g_state->pad_cur.ry}; }
+static_assert(max_pads == THISTLE_MAX_PADS, "the header's max_pads and the backends' slot count must agree");
 
-PadKind Frame::pad_kind() const {
-    switch (g_state->pad_cur.kind) {
+void pad_rumble(float strength, float seconds, int player) {
+    if (!g_state || player < 0 || player >= max_pads || !g_state->pads_cur[player].connected) return;
+    if (strength <= 0.0f || seconds <= 0.0f) {
+        g_state->rumble_until[player] = 0.0;
+        backend_rumble(player, 0.0f, 0.0f);
+        return;
+    }
+    g_state->rumble_until[player] = g_state->elapsed + seconds;
+    backend_rumble(player, strength, seconds);
+}
+
+int Frame::pad_count() const {
+    int n = 0;
+    for (const ThistleGamepad& p : g_state->pads_cur) n += p.connected != 0;
+    return n;
+}
+bool Frame::pad_connected(int player) const { return pad_slot(g_state->pads_cur, player).connected != 0; }
+bool Frame::pad_down(Pad b, int player) const { return pad_field(pad_slot(g_state->pads_cur, player), b) != 0; }
+bool Frame::pad_pressed(Pad b, int player) const {
+    return pad_field(pad_slot(g_state->pads_cur, player), b) != 0 &&
+           pad_field(pad_slot(g_state->pads_prev, player), b) == 0;
+}
+vec2 Frame::pad_left_stick(int player) const {
+    const ThistleGamepad& p = pad_slot(g_state->pads_cur, player);
+    return {p.lx, p.ly};
+}
+vec2 Frame::pad_right_stick(int player) const {
+    const ThistleGamepad& p = pad_slot(g_state->pads_cur, player);
+    return {p.rx, p.ry};
+}
+
+PadKind Frame::pad_kind(int player) const {
+    switch (pad_slot(g_state->pads_cur, player).kind) {
         case 1: return PadKind::Xbox;
         case 2: return PadKind::PlayStation;
         case 3: return PadKind::Nintendo;
@@ -1356,10 +1413,10 @@ PadKind Frame::pad_kind() const {
     }
 }
 
-std::string Frame::pad_name() const { return std::string(g_state->pad_cur.name); }
+std::string Frame::pad_name(int player) const { return std::string(pad_slot(g_state->pads_cur, player).name); }
 
-const char* Frame::pad_label(Pad b) const {
-    switch (pad_kind()) {
+const char* Frame::pad_label(Pad b, int player) const {
+    switch (pad_kind(player)) {
         case PadKind::PlayStation:
             switch (b) {
                 case Pad::A: return "Cross";  case Pad::B: return "Circle";
