@@ -719,8 +719,10 @@ const std::string& text_input();
 // --- networking ---------------------------------------------------------
 
 // Minimal async HTTP for small JSON payloads (e.g. community levels).
-// Implemented on Apple (NSURLSession) and Windows (WinHTTP); on other
-// platforms it completes immediately as a failure (status 0). Start a
+// Implemented on Apple (NSURLSession), Windows (WinHTTP) and Linux (libcurl,
+// loaded at run time: no build dependency, and without it every request
+// fails); on Android and the web it completes immediately as a failure
+// (status 0). Not in thistle_server at all (a link error). Start a
 // request, poll done() each frame, then read status()/body().
 //   Http req = Http::get("http://host/levels");
 //   ... each frame: if (req.done() && req.ok()) parse(req.body());

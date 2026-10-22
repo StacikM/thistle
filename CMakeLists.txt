@@ -383,7 +383,7 @@ elseif(ANDROID)
         GLESv3 EGL android log OpenSLES
     )
 elseif(UNIX)
-    target_sources(thistle PRIVATE src/linux_gamepad.cpp)
+    target_sources(thistle PRIVATE src/linux_gamepad.cpp src/linux_http.cpp)
     find_package(OpenGL REQUIRED)
     target_link_libraries(thistle PRIVATE
         OpenGL::GL X11 Xi Xcursor GL EGL dl m pthread
@@ -729,6 +729,14 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(scene3d_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME server_smoketest COMMAND thistle_server_smoketest)
     set_tests_properties(server_smoketest PROPERTIES TIMEOUT 60)
+    # Http against a local server the test runs. Linux only: it checks the
+    # libcurl backend, and its server is plain POSIX sockets.
+    if(UNIX AND NOT APPLE AND NOT ANDROID)
+        add_executable(thistle_http_smoketest examples/http_smoketest.cpp)
+        target_link_libraries(thistle_http_smoketest PRIVATE thistle)
+        add_test(NAME http_smoketest COMMAND thistle_http_smoketest)
+        set_tests_properties(http_smoketest PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+    endif()
     # The `thistle` CLI's new/init, which the Thistle Editor's projects screen
     # runs. Python, like the CLI; skipped where there's no Python 3.
     find_package(Python3 COMPONENTS Interpreter QUIET)
