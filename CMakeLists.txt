@@ -377,6 +377,7 @@ elseif(EMSCRIPTEN)
     # sokol uses WebGL2 (SOKOL_GLES3); the executable sets the emcc link flags.
     # Nothing to link into the engine library itself here.
 elseif(ANDROID)
+    target_sources(thistle PRIVATE src/android_support.cpp)
     target_link_libraries(thistle PRIVATE
         GLESv3 EGL android log OpenSLES
     )

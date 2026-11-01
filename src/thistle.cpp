@@ -114,6 +114,12 @@ extern "C" void  thistle_http_free(void* h);
 #endif
 
 #if defined(__ANDROID__)
+// Real HTTP on Android too (see src/android_support.cpp): java.net.HttpURLConnection
+// over JNI, same poll-based interface as the Apple and Windows backends.
+extern "C" void* thistle_http_start(const char* method, const char* url, const char* body);
+extern "C" int   thistle_http_poll(void* h, int* status, const char** body, int* len);
+extern "C" void  thistle_http_free(void* h);
+
 // App::run() has no sapp_run() call to block in on Android — there's no
 // process main() for it to block from. Instead it stashes the desc here and
 // sokol_main() (defined at the bottom of this file, called by sokol_app.h's
@@ -2280,7 +2286,7 @@ const std::string& text_input() { return g_state->text_buffer; }
 
 Http Http::get(const std::string& url) {
     Http r;
-#if defined(__APPLE__) || defined(_WIN32)
+#if defined(__APPLE__) || defined(_WIN32) || defined(__ANDROID__)
     void* raw = thistle_http_start("GET", url.c_str(), nullptr);
     r.h_ = std::shared_ptr<void>(raw, [](void* p) { if (p) thistle_http_free(p); });
 #else
@@ -2291,7 +2297,7 @@ Http Http::get(const std::string& url) {
 
 Http Http::post(const std::string& url, const std::string& json_body) {
     Http r;
-#if defined(__APPLE__) || defined(_WIN32)
+#if defined(__APPLE__) || defined(_WIN32) || defined(__ANDROID__)
     void* raw = thistle_http_start("POST", url.c_str(), json_body.c_str());
     r.h_ = std::shared_ptr<void>(raw, [](void* p) { if (p) thistle_http_free(p); });
 #else
@@ -2303,7 +2309,7 @@ Http Http::post(const std::string& url, const std::string& json_body) {
 bool Http::done() {
     if (done_) return true;
     if (!h_) { done_ = true; return true; }   // unsupported / failed to start
-#if defined(__APPLE__) || defined(_WIN32)
+#if defined(__APPLE__) || defined(_WIN32) || defined(__ANDROID__)
     int status = 0; const char* body = nullptr; int len = 0;
     if (thistle_http_poll(h_.get(), &status, &body, &len)) {
         status_ = status;
