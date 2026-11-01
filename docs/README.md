@@ -2,6 +2,8 @@
 
 You want to make a game, not read a novel. Here's the map:
 
+- [learn-by-example.md](learn-by-example.md) — **start here if you want to make a game.** Nineteen small runnable programs in learning order (window, input, sprites, collision, physics, camera, UI, scenes, audio, saving, levels, debugging) and ten recipes (shooter, platformer, dialogue, inventory, Sokoban, ...).
+- [from-gdevelop.md](from-gdevelop.md) — the translation table if you're coming from GDevelop: events, objects, behaviors, layers, variables, and what Thistle doesn't have.
 - [building.md](building.md) — how this thing actually compiles and links. Read this first, it's not optional.
 - [drawing.md](drawing.md) — putting pixels on the screen: shapes, sprites, text, camera, blend modes, post-processing, and the "minor 3D" mode.
 - [ui-and-scenes.md](ui-and-scenes.md) — immediate-mode widgets, `Menu`, the `Node` scene graph, particles, tilemaps, `App::scene`, and the optional Dear ImGui debug UI.

@@ -1,0 +1,9 @@
+{
+  "name": "Level 1",
+  "background": [0.08, 0.09, 0.14],
+  "time_limit": 60,
+  "enemies": [
+    { "pos": [400, 300], "speed": 90 },
+    { "pos": [700, 200], "speed": 140 }
+  ]
+}
