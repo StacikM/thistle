@@ -14,14 +14,25 @@ Body player = phys.add_dynamic_circle({640, 100}, 24, 1.0f, 0.3f, 0.2f);
 phys.set_fixed_rotation(player, true);   // stops a circle from spinning like a wheel on every bump
 ```
 
+Under the hood Box2D works in meters, and the wrapper uses **100 pixels per meter**. Box2D is happiest with things between roughly 0.1 and 10 meters (10 to 1000 pixels): a 4-pixel object moving fast is a bad time, and so is a 3000-pixel dynamic one (static ground can be as long as you like).
+
 `Physics` owns a Box2D world for its whole lifetime and is non-copyable on purpose — copying a physics world is almost never what you meant, so it's deleted rather than left to silently do the wrong thing (a shallow copy sharing Box2D internals, or worse, ODR issues). If you need to reload a level, destroy the `Physics` and construct a new one; don't try to "reset" one in place, that's not a thing Box2D supports cleanly and this wrapper doesn't pretend otherwise.
 
 ## Body kinds — pick the right one, not just the one that compiles
 
 - `add_static_box` — never moves. Floors, walls, level geometry. Cheapest kind, use it for anything that doesn't move.
 - `add_kinematic_box` — you drive its velocity (`set_velocity`), nothing else can push it, but dynamic bodies resting on it get carried along. This is the moving-platform kind. If you make a moving platform `dynamic` instead, gravity and collisions will fight you the whole way and it will not behave like a platform — this mistake has already been made and fixed once in Fling, don't repeat it.
+- `set_fixed_rotation(body, true)` stops collisions from tipping a body over (a circle player that shouldn't roll). It doesn't stop a spin you set yourself with `set_angular_velocity`.
 - `add_dynamic_box` / `add_dynamic_circle` — full simulation: gravity, collision response, the works. Density/friction/restitution are Box2D's usual knobs; if you don't know what they do, `1.0f, 0.3f, 0.0f`-ish defaults are fine starting points, tune by feel, not by reading the Box2D manual cover to cover.
 - `add_sensor_box` — detects overlap, applies zero physical force. Use for triggers (a goal zone, a level-end line) with `on_collision`, not for anything you want to actually push against.
+
+## Removing bodies
+
+```cpp
+phys.remove(bullet);   // after step(), never from inside an on_collision callback
+```
+
+The handle (and any copy of it) goes dead: `position()` gives `{0, 0}`, `touching()` is false, setters do nothing, and removing it twice is harmless. Other bodies' handles are unaffected, and a new body never reuses a removed one's handle. Before this existed there was no way to take a body out; the workaround was teleporting it far away.
 
 ## The loop
 
@@ -47,7 +58,12 @@ if (hit.hit) { /* hit.body, hit.point, hit.normal, hit.fraction */ }
 
 `on_collision` fires once per pair when they *start* touching, in unspecified order — don't assume `a` is always "your" body, check both orderings, as the example above does. This is not a full contact-listener API (no separate "still touching" or "stopped touching" events) — if you need those, `touching(a, b)` polls the current state every frame, which covers "still touching" without a dedicated callback.
 
-**Box2D ignores a raycast that starts inside a shape.** This bit Fling for real — a raycast from a player's own center to check "am I grounded" silently missed every time because the ray originated inside the player's own circle. Cast from *outside* the shape you're standing on top of (offset the ray's start point outward first), or cast from the body's edge, not its center. This is a Box2D behavior, not a bug in this wrapper, and it will bite you exactly once until you internalize it.
+**A raycast ignores any shape it starts inside.** That has two consequences, both checked by `physics2d_smoketest`:
+
+- A ray from the *center of your player* downward ignores the player's own body and hits the ground below, so you don't need to filter yourself out. That's what the grounded check in [examples/guide/11_physics_platformer.cpp](examples/guide/11_physics_platformer.cpp) (and Fling) does.
+- A ray that starts *inside the thing you're testing* doesn't hit it. If the player has sunk into the floor, a ray from its center won't see that floor. Start rays from outside what you're testing, and cast a little past the player's edge.
+
+(The older version of this paragraph blamed the player's own circle; the ray from the player's center works because of the first point.)
 
 ## Bodies as handles, not pointers
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <string>
@@ -23,12 +24,27 @@ struct vec2 {
     vec2& operator+=(vec2 o) { x += o.x; y += o.y; return *this; }
     vec2& operator-=(vec2 o) { x -= o.x; y -= o.y; return *this; }
     vec2& operator*=(float s) { x *= s; y *= s; return *this; }
+
+    // Members rather than free functions on purpose: a free length(vec2)
+    // would make a braced call like length({1, 2}) ambiguous with the vec3 one.
+    float length() const { return std::sqrt(x * x + y * y); }
+    float dot(vec2 o) const { return x * o.x + y * o.y; }
+    float distance_to(vec2 o) const { return vec2{o.x - x, o.y - y}.length(); }
+    // Same direction, length 1; a zero vector stays zero instead of becoming NaN.
+    vec2 normalized() const {
+        const float len = length();
+        return len > 0.0f ? vec2{x / len, y / len} : vec2{0.0f, 0.0f};
+    }
 };
 
 inline vec2 operator+(vec2 a, vec2 b) { return {a.x + b.x, a.y + b.y}; }
 inline vec2 operator-(vec2 a, vec2 b) { return {a.x - b.x, a.y - b.y}; }
 inline vec2 operator*(vec2 v, float s) { return {v.x * s, v.y * s}; }
 inline vec2 operator*(float s, vec2 v) { return {v.x * s, v.y * s}; }
+inline vec2 operator/(vec2 v, float s) { return {v.x / s, v.y / s}; }
+inline vec2 operator-(vec2 v) { return {-v.x, -v.y}; }
+inline bool operator==(vec2 a, vec2 b) { return a.x == b.x && a.y == b.y; }
+inline bool operator!=(vec2 a, vec2 b) { return !(a == b); }
 
 // ADL hooks so vec2 can be a NetVar<vec2> or go straight into a NetArgs
 // payload — `nlohmann::json(v)` / `j.get<vec2>()` just work.
@@ -74,6 +90,17 @@ struct Rect {
     bool contains(vec2 p) const {
         return p.x >= pos.x && p.y >= pos.y &&
                p.x <= pos.x + size.x && p.y <= pos.y + size.y;
+    }
+    // True when the two rects share any area. Rects that only touch along an
+    // edge don't count, so something resting exactly on a floor isn't "inside" it.
+    bool overlaps(const Rect& o) const {
+        return pos.x < o.pos.x + o.size.x && o.pos.x < pos.x + size.x &&
+               pos.y < o.pos.y + o.size.y && o.pos.y < pos.y + size.y;
+    }
+    vec2 center() const { return {pos.x + size.x * 0.5f, pos.y + size.y * 0.5f}; }
+    // The same rect grown by `amount` pixels on every side (negative shrinks it).
+    Rect expanded(float amount) const {
+        return {{pos.x - amount, pos.y - amount}, {size.x + amount * 2.0f, size.y + amount * 2.0f}};
     }
 };
 
@@ -253,12 +280,12 @@ Mesh make_plane_mesh();
 // with mesh_prim == Trigger never gets a real `mesh` and Node::draw_meshes()
 // never draws it — mesh_pos/mesh_scale describe an invisible volume's
 // center/half-extent, mesh_tint and name (below) are just for identifying it
-// while editing. Thistle has no 3D collision system at all (see docs/
-// drawing.md) — there's no overlap test, no callback, nothing that fires
-// when something enters this volume. A trigger here is exactly what a brush
-// in a level editor like Hammer actually is on its own: geometry and a name,
-// with the *engine* (Source, in Hammer's case — your own game code, here)
-// responsible for actually testing overlap against it and doing something.
+// while editing. Nothing fires when something enters this volume: there's no
+// callback. A trigger here is exactly what a brush in a level editor like
+// Hammer actually is on its own: geometry and a name, with the *engine*
+// (Source, in Hammer's case — your own game code, here) responsible for
+// actually testing overlap against it and doing something. The overlap tests
+// are in "3D collision" below (box3d_overlap() and friends).
 enum class Prim { None, Cube, Sphere, Cylinder, Cone, Plane, Trigger };
 
 // Optional per-sprite draw settings. Use designated initializers:
@@ -321,6 +348,9 @@ struct Font {
 
 // Loads a .ttf font. Safe to call before run() only after the App exists.
 // The first font loaded becomes the default used when TextOpts::font is unset.
+// The handle is valid() even if the file couldn't be read (the file is opened
+// once the window exists); a warning is logged and text using it just doesn't
+// draw. There is no built-in font, so with none loaded no text draws at all.
 Font load_font(const std::string& path);
 
 enum class Align { Left, Center, Right };
@@ -735,9 +765,10 @@ const std::string& text_input();
 // --- networking ---------------------------------------------------------
 
 // Minimal async HTTP for small JSON payloads (e.g. community levels).
-// Implemented on Apple (NSURLSession) and Windows (WinHTTP); on other
-// platforms it completes immediately as a failure (status 0). Start a
-// request, poll done() each frame, then read status()/body().
+// Implemented on Apple (NSURLSession), Windows (WinHTTP) and Android
+// (HttpURLConnection); on Linux it completes immediately as a failure
+// (status 0). Start a request, poll done() each frame, then read
+// status()/body().
 //   Http req = Http::get("http://host/levels");
 //   ... each frame: if (req.done() && req.ok()) parse(req.body());
 class Http {
@@ -1424,6 +1455,12 @@ public:
     Body add_dynamic_circle(vec2 center, float radius, float density = 1.0f, float friction = 0.3f, float restitution = 0.2f);
     // A static overlap trigger (no physical response); use on_collision to react.
     Body add_sensor_box(vec2 center, vec2 size);
+
+    // Removes a body from the world. The handle (and any copy of it) stops
+    // working: position() returns {0, 0}, touching() is false, and setters do
+    // nothing. Other bodies' handles stay valid. Don't call it from inside
+    // an on_collision callback; remember the body and remove it after step().
+    void remove(Body b);
 
     void step(float dt);
 

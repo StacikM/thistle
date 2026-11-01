@@ -67,7 +67,7 @@ f.camera({0, 0});           // reset — draw screen-space UI on top, unaffected
 f.text("score: 100", {20, 20});
 ```
 
-No zoom, no rotation, no viewport rectangle. If you want zoom, scale your world-space sizes and positions yourself before drawing them — there's nothing stopping you, the engine just isn't going to do the math for you. `camera()` also resets the projection matrix and pipeline to 2D/orthographic, which matters if you called `camera3d()` earlier this frame (see below) — it's the one function that guarantees "back to normal 2D drawing," use it after any 3D pass.
+`camera()` itself is only a translation. For **zoom** (and rotation) wrap the world in one `push_transform`, which translates, rotates, then scales: `f.push_transform(screen_center - cam * zoom, 0.0f, {zoom, zoom}); ... f.pop_transform();` puts the world point `cam` at the middle of the screen. The mouse in world coordinates is then `cam + (f.mouse() - screen_center) / zoom`. [examples/guide/12_camera.cpp](examples/guide/12_camera.cpp) is a working follow-camera with zoom, shake, parallax and that mouse conversion. There's no viewport rectangle (split-screen) support. `camera()` also resets the projection matrix and pipeline to 2D/orthographic, which matters if you called `camera3d()` earlier this frame (see below) — it's the one function that guarantees "back to normal 2D drawing," use it after any 3D pass.
 
 For local transforms — rotate/scale/translate a subtree without hand-computing every child's world position — use `push_transform()`/`pop_transform()`, or just use `Node` (see [ui-and-scenes.md](ui-and-scenes.md)) if you have more than a couple of these:
 

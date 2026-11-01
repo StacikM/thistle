@@ -607,6 +607,16 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_anchor_smoketest examples/anchor_smoketest.cpp)
     target_link_libraries(thistle_anchor_smoketest PRIVATE thistle)
 
+    # vec2::length()/normalized()/dot()/distance_to() and Rect::overlaps()/
+    # center()/expanded(), against hand-computed results. Pure math.
+    add_executable(thistle_math2d_smoketest examples/math2d_smoketest.cpp)
+    target_link_libraries(thistle_math2d_smoketest PRIVATE thistle)
+
+    # The 2D physics wrapper with a real simulation: falling, resting, raycasts,
+    # sensors, moving platforms, removing bodies. Headless: Physics needs no App.
+    add_executable(thistle_physics2d_smoketest examples/physics2d_smoketest.cpp)
+    target_link_libraries(thistle_physics2d_smoketest PRIVATE thistle)
+
     # thistle::three's quat/mat4/Transform against hand-computed results.
     add_executable(thistle_math3d_smoketest examples/math3d_smoketest.cpp)
     target_link_libraries(thistle_math3d_smoketest PRIVATE thistle)
@@ -689,6 +699,10 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(collision_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME anchor_smoketest COMMAND thistle_anchor_smoketest)
     set_tests_properties(anchor_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME math2d_smoketest COMMAND thistle_math2d_smoketest)
+    set_tests_properties(math2d_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME physics2d_smoketest COMMAND thistle_physics2d_smoketest)
+    set_tests_properties(physics2d_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME math3d_smoketest COMMAND thistle_math3d_smoketest)
     set_tests_properties(math3d_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME mesh3d_smoketest COMMAND thistle_mesh3d_smoketest)
@@ -724,4 +738,41 @@ if(THISTLE_BUILD_SMOKETEST)
         add_test(NAME cli_smoketest COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/thistle-cli/test_cli.py")
         set_tests_properties(cli_smoketest PROPERTIES TIMEOUT 60)
     endif()
+endif()
+
+# Compiles every program the docs show (docs/examples/<folder>/<name>.cpp, one
+# executable each, named doc_<folder>_<name>). A doc whose code doesn't build is
+# worse than no doc, so this is how they're kept honest; tools/check-doc-examples.py
+# checks that the code shown in the .md files is the code in these files.
+# They open windows, so CI would only build them, not run them.
+option(THISTLE_BUILD_DOC_EXAMPLES "Build the example programs shown in docs/" OFF)
+if(THISTLE_BUILD_DOC_EXAMPLES)
+    file(GLOB THISTLE_DOC_EXAMPLE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/docs/examples/*/*.cpp")
+    list(FILTER THISTLE_DOC_EXAMPLE_SOURCES EXCLUDE REGEX "/docs/examples/tests/")
+    set(THISTLE_DOC_EXAMPLE_TARGETS "")
+    foreach(src IN LISTS THISTLE_DOC_EXAMPLE_SOURCES)
+        get_filename_component(example_name "${src}" NAME_WE)
+        get_filename_component(example_dir "${src}" DIRECTORY)
+        get_filename_component(example_group "${example_dir}" NAME)
+        set(target "doc_${example_group}_${example_name}")
+        add_executable(${target} "${src}")
+        target_link_libraries(${target} PRIVATE thistle)
+        thistle_bundle_assets(${target} "${CMAKE_CURRENT_SOURCE_DIR}/docs/examples/assets")
+        list(APPEND THISTLE_DOC_EXAMPLE_TARGETS ${target})
+    endforeach()
+    add_custom_target(doc_examples DEPENDS ${THISTLE_DOC_EXAMPLE_TARGETS})
+
+    # docs/examples/tests/*.cpp include an example with its main() renamed and
+    # assert on the plain functions inside it (tile collision, push-out, ...),
+    # so what the docs teach is checked by more than "it compiled". Headless.
+    enable_testing()
+    file(GLOB THISTLE_DOC_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/docs/examples/tests/*.cpp")
+    foreach(src IN LISTS THISTLE_DOC_TEST_SOURCES)
+        get_filename_component(test_name "${src}" NAME_WE)
+        add_executable(${test_name} "${src}")
+        target_link_libraries(${test_name} PRIVATE thistle)
+        add_test(NAME ${test_name} COMMAND ${test_name})
+        set_tests_properties(${test_name} PROPERTIES TIMEOUT 30)
+        add_dependencies(doc_examples ${test_name})
+    endforeach()
 endif()

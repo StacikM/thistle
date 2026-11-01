@@ -533,6 +533,9 @@ void init_cb() {
             const int fid = fonsAddFont(g_state->fons, "font", g_state->font_paths[i].c_str());
 #endif
             g_state->font_ids[i] = fid;
+            if (fid == FONS_INVALID) {
+                log_warn("load_font: could not load \"" + g_state->font_paths[i] + "\" — text using it will not draw");
+            }
             if (fid != FONS_INVALID && g_state->default_font == FONS_INVALID) {
                 g_state->default_font = fid;
             }
@@ -1915,6 +1918,13 @@ Body Physics::add_sensor_box(vec2 center, vec2 size) {
     return impl_->register_body(body);
 }
 
+void Physics::remove(Body b) {
+    b2Body* body = impl_->get(b);
+    if (!body) return;
+    impl_->world.DestroyBody(body);
+    impl_->bodies[b.id] = nullptr;
+}
+
 void Physics::step(float dt) { impl_->world.Step(dt, 8, 3); }
 
 void Physics::on_collision(std::function<void(Body, Body)> begin) {
@@ -3067,6 +3077,9 @@ Font load_font(const std::string& path) {
 #else
         fid = fonsAddFont(g_state->fons, "font", path.c_str());
 #endif
+        if (fid == FONS_INVALID) {
+            log_warn("load_font: could not load \"" + path + "\" — text using it will not draw");
+        }
         if (fid != FONS_INVALID && g_state->default_font == FONS_INVALID) {
             g_state->default_font = fid;
         }
