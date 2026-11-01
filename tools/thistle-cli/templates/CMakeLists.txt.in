@@ -70,3 +70,9 @@ target_include_directories({{name}} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generat
 # Gets assets/ next to the built executable on every platform — see the
 # function's definition (and why it exists) in the engine's own CMakeLists.txt.
 thistle_bundle_assets({{name}} "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+
+# Visual Studio only (other generators ignore these): open the solution with
+# the game as the startup project (CMake's default, ALL_BUILD, can't be run),
+# and start it from the folder the build put assets/ in, so F5 finds them.
+set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY VS_STARTUP_PROJECT {{name}})
+set_target_properties({{name}} PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:{{name}}>")
