@@ -3103,6 +3103,10 @@ Texture make_texture(int width, int height, const unsigned char* rgba) {
     return register_texture(pixels, width, height, "");
 }
 
+bool read_asset_text(const std::string& path, std::string& out) {
+    return thistle_read_text_asset(path, out);
+}
+
 Texture load_texture(const std::string& path) {
     int w = 0, h = 0, channels = 0;
     unsigned char* pixels = thistle_stbi_load(path, &w, &h, &channels, 4);

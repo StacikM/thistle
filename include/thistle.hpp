@@ -172,6 +172,12 @@ void unload_texture(Texture& tex);
 // Re-reads a texture from its original file and re-uploads it (hot reload).
 void reload_texture(Texture tex);
 
+// Reads a bundled text file (JSON, CSV, ...) into `out`; false if it can't be
+// opened. Use this instead of std::ifstream for anything shipped in assets/:
+// on Android those files live inside the APK, where plain file I/O can't
+// reach them, and this reads them through the asset manager.
+bool read_asset_text(const std::string& path, std::string& out);
+
 // --- meshes ---------------------------------------------------------------
 
 // A lightweight handle to mesh geometry loaded from a .obj file. Copyable,
