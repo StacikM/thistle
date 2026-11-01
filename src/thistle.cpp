@@ -2658,7 +2658,15 @@ void Frame::text(const std::string& str, vec2 pos, TextOpts opts) {
     if (opts.font.valid() && opts.font.id < static_cast<int>(g_state->font_ids.size())) {
         fid = g_state->font_ids[opts.font.id];
     }
-    if (fid == FONS_INVALID) return;
+    if (fid == FONS_INVALID) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            log_warn("text isn't drawing: no font is loaded. There's no built-in font: put a .ttf in assets/ and call "
+                     "load_font(\"assets/font.ttf\") once, after creating the App.");
+        }
+        return;
+    }
 
     const TextLayout L = layout_text(fons, fid, str, opts);
     const float ref = opts.max_width > 0.0f ? opts.max_width : L.width;
