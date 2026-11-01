@@ -2672,6 +2672,10 @@ void Frame::text(const std::string& str, vec2 pos, TextOpts opts) {
     }
 }
 
+void Frame::text(const std::string& str, Anchor a, vec2 offset, TextOpts opts) {
+    text(str, anchored(a, measure_text(str, opts), offset).pos, opts);
+}
+
 vec2 Frame::measure_text(const std::string& str, TextOpts opts) const {
     FONScontext* fons = g_state->fons;
     if (!fons) return {};

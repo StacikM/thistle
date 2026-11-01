@@ -14,7 +14,7 @@ f.progress_bar(loading_t, {{100, 260}, {200, 16}}, coral);
 
 `button()` draws itself and returns `true` on the exact frame it's clicked (or tapped — a tap delivers as a left-mouse click, you don't need separate touch handling for buttons). There's no retained widget tree, no IDs, no diffing. You call it every frame with the same rectangle and it just works, because it *is* the drawing — there's nothing to keep in sync because nothing is cached.
 
-The tradeoff, and it's a real one: **you lay out every rectangle yourself, every frame.** There's no flow layout, no anchors, no percentage sizing beyond what you compute from `f.width`/`f.height` yourself. Fling's entire UI is hand-computed percentages of screen height (`H * 0.14f` for a button width, etc.) specifically so it holds up across a 1280×720 desktop window and a phone's actual framebuffer size. That's not a shortcut, that's the actual technique — learn it, don't fight it looking for a layout system that isn't coming.
+The tradeoff, and it's a real one: **you still choose and draw every rectangle yourself, every frame.** There's no flow layout and no automatic sizing. What you don't have to do is type absolute pixel positions: [anchors](#anchors-place-things-relative-to-the-screen) place a rect against a screen edge or corner, or the center, with an offset. For sizes, compute them from `f.width`/`f.height` yourself. Fling's UI sizes everything as a percentage of screen height (`H * 0.14f` for a button width, etc.) so it holds up across a 1280×720 desktop window and a phone's actual framebuffer size.
 
 `ButtonStyle` controls colors/text size/font per call — there's no global theme object, so if you want a consistent look, build your own `ButtonStyle` presets in game code and reuse them. The engine won't do this for you and shouldn't; it doesn't know your game's palette.
 
@@ -43,6 +43,25 @@ const bool clicked = hover && f.mouse_pressed(Mouse::Left);
 ```
 
 Draw whatever you want above (a `sprite9` skin, a `rounded_rect`, an icon `sprite`, custom-font `text` via `TextOpts::font`), check `clicked` for the action, and you have a fully custom button — same amount of code as before, just not locked into `f.button()`'s specific look. This is the same relationship `Menu` has to raw `f.button()` calls: a convenience for the common shape, not a wall around the engine's actual drawing primitives.
+
+## Anchors: place things relative to the screen
+
+Instead of typing `{{1180, 20}, {64, 64}}` for a pause button and having it land in the wrong place at another resolution, say where it goes:
+
+```cpp
+if (f.button("Play",  f.anchored(Anchor::Center,   {240, 64})))            start_game();
+if (f.button("Pause", f.anchored(Anchor::TopRight, {64, 64}, {-20, 20}))) pause();
+f.text("Score: 12", Anchor::TopLeft, {20, 20});
+f.text("Paused", Anchor::Center);
+```
+
+`Anchor` is one of `TopLeft`, `Top`, `TopRight`, `Left`, `Center`, `Right`, `BottomLeft`, `Bottom`, `BottomRight`. `f.anchored(anchor, size, offset)` returns a `Rect` whose matching point sits on that point of the screen, so `TopRight` hugs the top-right corner and `Center` is centered. It plugs into anything that takes a `Rect` (`button`, `checkbox`, `slider`, `progress_bar`), and its `.pos` into `rect`/`sprite`.
+
+- **The offset is in pixels, y down.** `{-20, 20}` on `TopRight` is 20px in from the right edge and 20px down.
+- **Text** takes the anchor directly and measures itself first, so it lines up whatever the string or font. If you set `max_width`, the wrapped block is what's anchored.
+- **A different pivot:** `f.anchored(Anchor::Center, size, offset, Anchor::TopLeft)` puts the rect's *top-left* corner on the screen center, the way Unity separates anchor from pivot.
+- **A parent that isn't the screen:** `anchored(Anchor::BottomRight, {100, 40}, {-10, -10}, panel)` works inside any `Rect`, so a panel's contents can be anchored to the panel. `f.screen()` is the full-screen `Rect`.
+- If you used `f.camera(offset)`, call `f.camera({0, 0})` before drawing a HUD, or the anchors shift with it.
 
 ## `Menu`: for when you actually have a vertical stack
 

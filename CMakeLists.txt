@@ -602,6 +602,11 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_collision_smoketest examples/collision_smoketest.cpp)
     target_link_libraries(thistle_collision_smoketest PRIVATE thistle)
 
+    # Checks the UI anchor math (Anchor / anchored()) against hand-computed
+    # positions. Pure rect math like the collision test: nothing opens.
+    add_executable(thistle_anchor_smoketest examples/anchor_smoketest.cpp)
+    target_link_libraries(thistle_anchor_smoketest PRIVATE thistle)
+
     # thistle::three's quat/mat4/Transform against hand-computed results.
     add_executable(thistle_math3d_smoketest examples/math3d_smoketest.cpp)
     target_link_libraries(thistle_math3d_smoketest PRIVATE thistle)
@@ -682,6 +687,8 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(scene_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME collision_smoketest COMMAND thistle_collision_smoketest)
     set_tests_properties(collision_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME anchor_smoketest COMMAND thistle_anchor_smoketest)
+    set_tests_properties(anchor_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME math3d_smoketest COMMAND thistle_math3d_smoketest)
     set_tests_properties(math3d_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME mesh3d_smoketest COMMAND thistle_mesh3d_smoketest)

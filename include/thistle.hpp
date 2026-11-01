@@ -77,6 +77,35 @@ struct Rect {
     }
 };
 
+// --- anchors ---------------------------------------------------------------
+// Place things relative to the screen (or any rect) instead of typing pixel
+// coordinates: "this button, 20px in from the top-right corner" survives any
+// window size, phone or tablet. Same idea as Unity's RectTransform anchors.
+enum class Anchor { TopLeft, Top, TopRight, Left, Center, Right, BottomLeft, Bottom, BottomRight };
+
+// Where `a` sits inside `r`, e.g. Center is the middle, BottomRight the corner.
+inline vec2 anchor_point(Anchor a, Rect r) {
+    const float fx = (a == Anchor::TopLeft || a == Anchor::Left || a == Anchor::BottomLeft) ? 0.0f
+                   : (a == Anchor::TopRight || a == Anchor::Right || a == Anchor::BottomRight) ? 1.0f : 0.5f;
+    const float fy = (a == Anchor::TopLeft || a == Anchor::Top || a == Anchor::TopRight) ? 0.0f
+                   : (a == Anchor::BottomLeft || a == Anchor::Bottom || a == Anchor::BottomRight) ? 1.0f : 0.5f;
+    return {r.pos.x + fx * r.size.x, r.pos.y + fy * r.size.y};
+}
+
+// A rect of `size` whose `pivot` point sits on `parent`'s `anchor` point, then
+// shifted by `offset` (pixels, y down). With no pivot given, it's the same
+// point as the anchor, so TopRight hugs the top-right corner and Center is
+// centered, which is what you almost always want. Pass the result to
+// button(), rect(), and so on.
+inline Rect anchored(Anchor anchor, vec2 size, vec2 offset, Rect parent, Anchor pivot) {
+    const vec2 at = anchor_point(anchor, parent);
+    const vec2 own = anchor_point(pivot, Rect{{0.0f, 0.0f}, size});
+    return {{at.x - own.x + offset.x, at.y - own.y + offset.y}, size};
+}
+inline Rect anchored(Anchor anchor, vec2 size, vec2 offset, Rect parent) {
+    return anchored(anchor, size, offset, parent, anchor);
+}
+
 inline void to_json(nlohmann::json& j, const Rect& r) { j = {{"pos", r.pos}, {"size", r.size}}; }
 inline void from_json(const nlohmann::json& j, Rect& r) { j.at("pos").get_to(r.pos); j.at("size").get_to(r.size); }
 
@@ -370,6 +399,21 @@ public:
     int width = 0;      // framebuffer width in pixels
     int height = 0;     // framebuffer height in pixels
 
+    // The whole screen as a Rect, to use as a parent for anchored().
+    Rect screen() const { return {{0.0f, 0.0f}, {static_cast<float>(width), static_cast<float>(height)}}; }
+
+    // A rect of `size` placed against the screen, e.g.
+    //   f.button("Play", f.anchored(Anchor::Center, {240, 64}));
+    //   f.button("Pause", f.anchored(Anchor::TopRight, {64, 64}, {-20, 20}));
+    // `offset` is in pixels, y down. Draws made after f.camera(offset) are
+    // shifted by it, so anchor your HUD after f.camera({0, 0}).
+    Rect anchored(Anchor a, vec2 size, vec2 offset = {}) const {
+        return ::thistle::anchored(a, size, offset, screen());
+    }
+    Rect anchored(Anchor a, vec2 size, vec2 offset, Anchor pivot) const {
+        return ::thistle::anchored(a, size, offset, screen(), pivot);
+    }
+
     void clear(rgba color);
     void rect(vec2 pos, vec2 size, rgba color);
 
@@ -401,6 +445,11 @@ public:
 
     // Draw text with its top-left corner at pos.
     void text(const std::string& str, vec2 pos, TextOpts opts = {});
+
+    // Text placed against the screen by its own measured size, e.g.
+    //   f.text("Score: 12", Anchor::TopLeft, {20, 20});
+    //   f.text("Paused", Anchor::Center);
+    void text(const std::string& str, Anchor a, vec2 offset = {}, TextOpts opts = {});
 
     // Pixel width/height the string would occupy with the given options.
     vec2 measure_text(const std::string& str, TextOpts opts = {}) const;
