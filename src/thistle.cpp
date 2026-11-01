@@ -534,7 +534,7 @@ void init_cb() {
 #endif
             g_state->font_ids[i] = fid;
             if (fid == FONS_INVALID) {
-                log_warn("load_font: could not load \"" + g_state->font_paths[i] + "\" — text using it will not draw");
+                log_warn("load_font: could not load \"" + g_state->font_paths[i] + "\" - text using it will not draw");
             }
             if (fid != FONS_INVALID && g_state->default_font == FONS_INVALID) {
                 g_state->default_font = fid;
@@ -3086,7 +3086,7 @@ Font load_font(const std::string& path) {
         fid = fonsAddFont(g_state->fons, "font", path.c_str());
 #endif
         if (fid == FONS_INVALID) {
-            log_warn("load_font: could not load \"" + path + "\" — text using it will not draw");
+            log_warn("load_font: could not load \"" + path + "\" - text using it will not draw");
         }
         if (fid != FONS_INVALID && g_state->default_font == FONS_INVALID) {
             g_state->default_font = fid;
