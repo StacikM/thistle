@@ -70,7 +70,7 @@ MISSING_TOOL_HINTS = {
     "cmake": "Thistle builds games with CMake. Install it from https://cmake.org/download/ "
              "(Windows: `winget install Kitware.CMake`, macOS: `brew install cmake`, Linux: your "
              "package manager), then open a new terminal. On Windows you also need Visual Studio's "
-             "C++ compiler: the \"Desktop development with C++\" workload of Visual Studio 2022 or its Build Tools.",
+             "C++ compiler: the \"Desktop development with C++\" workload of Visual Studio 2022 or 2026, or their Build Tools.",
     "git": "Install Git from https://git-scm.com/downloads, then open a new terminal.",
 }
 
@@ -290,6 +290,11 @@ def cmd_build(args) -> None:
     # All cores: without it Make builds one file at a time, and the first
     # build (the whole engine) takes many times longer than it needs to.
     run(["cmake", "--build", str(build_dir), "--config", config, "--parallel", str(os.cpu_count() or 2)])
+    # On Windows CMake's default is a Visual Studio generator, so the build
+    # folder holds a .sln; say where, because nothing else does.
+    solutions = sorted(build_dir.glob("*.sln"))
+    if solutions:
+        print(f"Visual Studio solution: {solutions[0]}")
 
 
 def _find_executable(build_dir: Path, name: str, config: str) -> "Path | None":
