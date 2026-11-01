@@ -3000,9 +3000,16 @@ public:
 // blocks running a game loop. THISTLE_MAIN/THISTLE_RUN hide that difference:
 // wrap your entry point in THISTLE_MAIN { ... THISTLE_RUN(app); } and the
 // exact same source compiles unchanged on every platform, Android included.
+//
+// On Android your THISTLE_MAIN body runs on its own thread, and THISTLE_RUN
+// leaves that thread parked for the life of the process after handing the
+// window config to sokol. That is what keeps your locals alive: the update
+// lambda's [&] captures (textures, fonts, the App itself) would otherwise
+// point at a stack frame that returned before the first frame ever ran.
 #if defined(__ANDROID__)
+    namespace thistle::detail { [[noreturn]] void android_park(); }
     #define THISTLE_MAIN extern "C" void thistle_user_main()
-    #define THISTLE_RUN(app) do { (app).run(); return; } while (0)
+    #define THISTLE_RUN(app) do { (app).run(); ::thistle::detail::android_park(); } while (0)
 #else
     #define THISTLE_MAIN int main()
     #define THISTLE_RUN(app) return (app).run()

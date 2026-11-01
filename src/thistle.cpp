@@ -16,6 +16,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -3518,9 +3522,42 @@ extern "C" __attribute__((weak)) void thistle_user_main() {}
 // Declared by sokol_app.h; its own ANativeActivity_onCreate calls this
 // directly (there is no process main() to call it for us) to get the desc it
 // needs before it starts the real frame loop on a background thread.
+//
+// The game's entry point runs on its own thread, not here. THISTLE_RUN ends in
+// android_park(), which signals that the desc is ready and then never returns,
+// so the entry point's stack frame (the App, textures, anything the update
+// lambda captures by reference) stays alive for the whole process. If the
+// entry point returns without parking (a headless build with the weak no-op
+// above), that counts as ready too, so this can't wait forever.
+namespace {
+std::mutex g_android_ready_mutex;
+std::condition_variable g_android_ready_cv;
+bool g_android_ready = false;
+
+void android_signal_ready() {
+    {
+        std::lock_guard<std::mutex> lock(g_android_ready_mutex);
+        g_android_ready = true;
+    }
+    g_android_ready_cv.notify_all();
+}
+} // namespace
+
+namespace thistle::detail {
+[[noreturn]] void android_park() {
+    android_signal_ready();
+    for (;;) std::this_thread::sleep_for(std::chrono::hours(24));
+}
+} // namespace thistle::detail
+
 sapp_desc sokol_main(int argc, char* argv[]) {
     (void)argc; (void)argv;
-    thistle_user_main();
+    std::thread([] {
+        thistle_user_main();
+        android_signal_ready();
+    }).detach();
+    std::unique_lock<std::mutex> lock(g_android_ready_mutex);
+    g_android_ready_cv.wait(lock, [] { return g_android_ready; });
     return g_thistle_android_desc;
 }
 #endif
