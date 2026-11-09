@@ -212,6 +212,7 @@ set(THISTLE_SERVER_SOURCES
     src/three_math.cpp
     src/three_mesh.cpp
     src/three_models.cpp
+    src/three_occlusion.cpp
     src/three_model.cpp
     src/three_voxel.cpp
     src/three_collision.cpp
@@ -269,6 +270,7 @@ add_library(thistle STATIC
     src/three_mesh.cpp
     src/three_render.cpp
     src/three_models.cpp
+    src/three_occlusion.cpp
     src/three_model.cpp
     src/three_voxel.cpp
     src/three_collision.cpp
@@ -670,6 +672,15 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_scene3d_smoketest examples/scene3d_smoketest.cpp)
     target_link_libraries(thistle_scene3d_smoketest PRIVATE thistle)
 
+    # PBR materials, HDR post-processing (bloom), LOD and occlusion culling,
+    # on screen. Opens a window; CI builds it but doesn't run it.
+    add_executable(thistle_post_demo examples/post_demo.cpp)
+    target_link_libraries(thistle_post_demo PRIVATE thistle)
+
+    # LOD picking and the CPU occlusion buffer; no GPU.
+    add_executable(thistle_lod_occlusion_smoketest examples/lod_occlusion_smoketest.cpp)
+    target_link_libraries(thistle_lod_occlusion_smoketest PRIVATE thistle)
+
     # DedicatedServer, against the headless library (which gets built for
     # it: otherwise only a game's server program makes it build).
     add_executable(thistle_server_smoketest examples/server_smoketest.cpp)
@@ -695,6 +706,8 @@ if(THISTLE_BUILD_SMOKETEST)
     set_tests_properties(net_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME scene_smoketest COMMAND thistle_scene_smoketest)
     set_tests_properties(scene_smoketest PROPERTIES TIMEOUT 30)
+    add_test(NAME lod_occlusion_smoketest COMMAND thistle_lod_occlusion_smoketest)
+    set_tests_properties(lod_occlusion_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME collision_smoketest COMMAND thistle_collision_smoketest)
     set_tests_properties(collision_smoketest PROPERTIES TIMEOUT 30)
     add_test(NAME anchor_smoketest COMMAND thistle_anchor_smoketest)

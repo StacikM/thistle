@@ -37,6 +37,8 @@ struct ModelRecord {
     Bounds bounds;
     Skeleton skeleton;
     std::vector<AnimationClip> animations;
+    std::vector<ModelLod> lods;
+    bool occluder = false;
     bool alive = true;
 };
 
