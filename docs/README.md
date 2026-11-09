@@ -19,6 +19,7 @@ You want to make a game, not read a novel. Here's the map:
 - [networking.md](networking.md) — realtime client/server (Mirror-flavored `NetVar`/Command/ClientRpc over TCP), multiplayer block worlds (`VoxelSync`) and smoothing remote movement. Read the scope section before you plan a game around it.
 - [iap.md](iap.md) — in-app purchases via StoreKit (iOS/macOS only). Read the "what's actually been verified" section before you assume a purchase has ever succeeded.
 - [cli.md](cli.md) — the `thistle` CLI: scaffold a project (blank, or a playable fps, third-person, voxel or multiplayer game), build/run it (and its dedicated server), manage its version, turn optional modules on, run the editor. No dependencies to install, on purpose.
+- [unity-import.md](unity-import.md) — `thistle import-unity`: bring a Unity project's scenes, prefabs, materials and assets over. Read what it doesn't do.
 - [crash-handler.md](crash-handler.md) — local-only crash reporting: a report file plus a native popup, automatically, on every crash. No telemetry, ever.
 - [android.md](android.md) — building, packaging (no Gradle needed), and what is and isn't verified on Android yet. Read the "what's not verified" section before you assume rendering works.
 
