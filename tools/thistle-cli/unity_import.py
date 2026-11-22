@@ -336,17 +336,28 @@ class Node:
         self.properties = []
         self.children = []
         self.sun_only = False  # a directional light's object: it only sets the scene's sun
+        self.tintable = False  # a shape or a converted mesh: Unity's material color can be its color (a glTF model has its own)
 
 
 class Importer:
-    def __init__(self, project: Path, out: Path, force: bool):
+    def __init__(self, project: Path, out: Path, force: bool, scenes=None, ambient_scale: float = 0.4, light_scale: float = 0.28, sun_scale: float = 1.0):
         self.project, self.out, self.force = project, out, force
+        self.only_scenes = list(scenes or [])
+        # Unity's lights and ambient are far hotter than Thistle's for the same numbers: a scene lit
+        # "1.0 ambient, point lights at 6" comes out white. These are the factors one game's scenes
+        # were hand-tuned to (0.4 and 0.28), not derived: expect to retune.
+        self.ambient_scale, self.light_scale, self.sun_scale = ambient_scale, light_scale, sun_scale
         self.assets = project / "Assets"
         self.guid_path = {}  # guid -> path relative to Assets/, with forward slashes
         self.warnings = []
         self.counts = {}
         self.skipped_types = {}
         self.to_convert = []  # model files Thistle can't read yet
+        self.used = set()     # Assets-relative files the converted scenes need
+        self.names = {}       # (kind, rel) -> a name that no other file of that kind has
+        self.embedded = {}    # (doc rel, fileID) -> (output path relative to assets/, mesh data), meshes saved inside a scene
+        self.unresolved = {}  # "Type.path" -> count: overrides whose target isn't in the prefab
+        self.ignored = {}     # "Type.path" -> count: overrides on things Thistle has no equivalent for
         self._docs = {}
         self.environment = {}
 
@@ -359,6 +370,9 @@ class Importer:
     def count(self, what: str, n: int = 1) -> None:
         self.counts[what] = self.counts.get(what, 0) + n
 
+    def use(self, rel: str) -> None:
+        self.used.add(rel)
+
     # -- scanning --
 
     def scan_guids(self) -> None:
@@ -370,6 +384,25 @@ class Importer:
             m = re.search(r"^guid: ([0-9a-fA-F]{32})", head, re.MULTILINE)
             if m:
                 self.guid_path[m.group(1)] = meta.with_suffix("").relative_to(self.assets).as_posix()
+
+    def assign_names(self) -> None:
+        """Scenes, prefabs and materials are written as <name>.json in one folder per kind, so two files
+        with the same name in different folders would overwrite each other (or be skipped). Decided over
+        every file up front, so the names don't depend on which scenes you asked for."""
+        for kind, ext in (("scene", ".unity"), ("prefab", ".prefab"), ("material", ".mat")):
+            taken = set()
+            for path in sorted(self.assets.rglob("*" + ext)):
+                rel = path.relative_to(self.assets).as_posix()
+                stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", path.stem)
+                folder = re.sub(r"[^A-Za-z0-9_.-]+", "_", path.parent.name or "Assets")
+                name, n = stem, 1
+                if name in taken:
+                    name = f"{stem}_{folder}"
+                while name in taken:
+                    n += 1
+                    name = f"{stem}_{folder}_{n}"
+                taken.add(name)
+                self.names[(kind, rel)] = name
 
     def load_doc(self, rel: str):
         """{fileID: UnityObject} for a scene or prefab, or None if it isn't text-serialized."""
@@ -391,6 +424,7 @@ class Importer:
 
     def model_path(self, rel: str) -> str:
         ext = Path(rel).suffix.lower()
+        self.use(rel)
         if ext == MESH_ASSET_EXT:
             return "assets/" + str(Path(rel).with_suffix(".obj").as_posix())
         if ext in CONVERT_MODEL_EXT:
@@ -400,13 +434,26 @@ class Importer:
             return "assets/" + glb
         return "assets/" + rel
 
+    def embedded_mesh(self, doc_rel: str, objects: dict, file_id: int):
+        """The model path for a Mesh saved inside the scene or prefab file itself, or None."""
+        obj = objects.get(file_id)
+        if obj is None or obj.class_id != 43:
+            return None
+        key = (doc_rel, file_id)
+        if key not in self.embedded:
+            name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(obj.data.get("m_Name") or "mesh"))
+            doc = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(doc_rel).stem)
+            self.embedded[key] = (f"meshes/{doc}/{name}_{file_id}.obj", obj.data)
+        return "assets/" + self.embedded[key][0]
+
     # -- one document -> a tree of nodes --
 
-    def build_nodes(self, objects: dict, depth: int = 0):
-        """(root nodes, {transform fileID: Node}) for everything in one scene or prefab."""
+    def build_nodes(self, objects: dict, doc_rel: str, depth: int = 0):
+        """(root nodes, {transform fileID: Node}, {any fileID: (Node, UnityObject)}) for one scene or prefab."""
         transforms = {fid: o for fid, o in objects.items() if o.class_id in (4, 224) and not o.stripped}
         gameobjects = {fid: o for fid, o in objects.items() if o.class_id == 1}
         anchors = {}   # transform fileID -> Node (also stripped ones, mapped into prefab expansions)
+        index = {}     # fileID of a GameObject or any of its components -> (Node, that object)
         by_go = {}
         for fid, go in gameobjects.items():
             comps = [c.get("component", {}).get("fileID") for c in (go.data.get("m_Component") or []) if isinstance(c, dict)]
@@ -418,8 +465,12 @@ class Importer:
                 node.properties.append(("tag", str(tag)))
             if go.data.get("m_Layer", 0):
                 node.properties.append(("layer", str(go.data["m_Layer"])))
-            self.fill_node(node, [objects[c] for c in comps if c in objects], objects)
+            comp_objs = [objects[c] for c in comps if c in objects]
+            self.fill_node(node, comp_objs, objects, doc_rel)
             by_go[fid] = node
+            index[fid] = (node, go)
+            for c in comp_objs:
+                index[c.file_id] = (node, c)
             self.count("GameObjects")
         for fid, tr in transforms.items():
             node = by_go.get(tr.data.get("m_GameObject", {}).get("fileID"))
@@ -437,15 +488,20 @@ class Importer:
             if node is not None:
                 pending.append((node, tr.data.get("m_Father", {}).get("fileID", 0), tr.data.get("m_RootOrder", 0)))
         for inst in [o for o in objects.values() if o.class_id == 1001]:
-            expansion = self.expand_prefab(inst, objects, depth)
+            expansion = self.expand_prefab(inst, objects, doc_rel, depth)
             if expansion is None:
                 continue
-            roots, inner, parent = expansion
-            for stripped_fid, s in objects.items():
-                if s.stripped and s.class_id in (4, 224) and s.data.get("m_PrefabInstance", {}).get("fileID") == inst.file_id:
-                    target = inner.get(s.data.get("m_CorrespondingSourceObject", {}).get("fileID"))
-                    if target is not None:
-                        anchors[stripped_fid] = target
+            roots, inner_anchors, parent, inner_index = expansion
+            # The scene's "stripped" stand-ins for the prefab's own objects: anything that points at
+            # one (a child's m_Father, an override) means the object inside the expansion.
+            for stripped_fid, st in objects.items():
+                if st.stripped and st.data.get("m_PrefabInstance", {}).get("fileID") == inst.file_id:
+                    source_fid = st.data.get("m_CorrespondingSourceObject", {}).get("fileID")
+                    hit = inner_index.get(source_fid)
+                    if hit is not None:
+                        index[stripped_fid] = hit
+                        if st.class_id in (4, 224):
+                            anchors[stripped_fid] = hit[0]
             for r in roots:
                 pending.append((r, parent, 0))
         roots_out = []
@@ -456,14 +512,18 @@ class Importer:
                 roots_out.append(node)
             else:
                 parent.children.append(node)
-        return roots_out, anchors
+        return roots_out, anchors, index
 
-    def fill_node(self, node: Node, comps: list, objects: dict) -> None:
+    def fill_node(self, node: Node, comps: list, objects: dict, doc_rel: str) -> None:
         mesh_filter = next((c for c in comps if c.class_id == 33), None)
         renderer = next((c for c in comps if c.class_id == 23), None)
         extras = []
         if mesh_filter is not None:
-            self.fill_mesh(node, mesh_filter, renderer)
+            self.set_mesh(node, mesh_filter.data.get("m_Mesh") or {}, doc_rel, objects)
+            if renderer is not None:
+                mats = renderer.data.get("m_Materials") or []
+                if mats:
+                    self.set_material(node, mats[0])
         elif renderer is not None:
             self.skipped_types["renderer without a mesh"] = self.skipped_types.get("renderer without a mesh", 0) + 1
         for c in comps:
@@ -497,47 +557,57 @@ class Importer:
                 self.skipped_types[label] = self.skipped_types.get(label, 0) + 1
         node.children.extend(extras)
 
-    def fill_mesh(self, node: Node, mesh_filter, renderer) -> None:
-        ref = mesh_filter.data.get("m_Mesh") or {}
+    def set_mesh(self, node: Node, ref: dict, doc_rel: str, objects: dict) -> None:
+        """Make `node` the shape or model a MeshFilter's m_Mesh reference points at."""
         guid = str(ref.get("guid", ""))
         file_id = ref.get("fileID", 0)
         if guid == BUILTIN_GUID:
             shape = BUILTIN_MESHES.get(file_id)
             if shape in ("box", "sphere", "cylinder", "plane"):
-                node.kind = shape
+                node.kind, node.model, node.tintable = shape, "", True
                 if shape == "cylinder":
                     node.properties.append(("unity_scale_note", "cylinder: height doubled to match Unity's 2 m cylinder"))
             elif shape == "capsule":
-                node.kind = "cylinder"
+                node.kind, node.model, node.tintable = "cylinder", "", True
                 self.warn("A Unity capsule was imported as a cylinder of the same height and width.")
                 node.properties.append(("unity_scale_note", "capsule: imported as a cylinder"))
             else:
                 self.warn(f"Built-in Unity mesh {shape or file_id} has no Thistle shape; the object was kept as an empty.")
                 return
             self.count("built-in shapes")
-        else:
-            rel = self.asset_of(ref)
-            if rel is None:
-                self.warn("A mesh reference points at a file that isn't in Assets/ (a package or a missing asset); the object was kept as an empty.")
+            return
+        if not guid and file_id:
+            path = self.embedded_mesh(doc_rel, objects, file_id)
+            if path is None:
+                self.warn(f"{doc_rel}: a mesh reference to object {file_id} that isn't a Mesh saved in the same file; the object was kept as an empty.")
                 return
-            node.kind, node.model = "model", self.model_path(rel)
+            node.kind, node.model, node.tintable = "model", path, True
             self.count("models")
-            if file_id not in (0, 4300000):
-                self.warn(f"{rel}: an object uses one mesh inside this file; Thistle draws the whole model there.")
-        if renderer is not None and node.kind != "model":
-            mats = renderer.data.get("m_Materials") or []
-            mat_rel = self.asset_of(mats[0]) if mats else None
-            if mat_rel and mat_rel.endswith(".mat"):
-                info = self.read_material(mat_rel)
-                if info:
-                    node.color = info["color"]
+            return
+        rel = self.asset_of(ref)
+        if rel is None:
+            self.warn("A mesh reference points at a file that isn't in Assets/ (a package or a missing asset); the object was kept as an empty.")
+            return
+        node.kind, node.model = "model", self.model_path(rel)
+        node.tintable = rel.lower().endswith(MESH_ASSET_EXT)  # a converted mesh has no material of its own; a glTF/FBX model does
+        self.count("models")
+        if file_id not in (0, 4300000):
+            self.warn(f"{rel}: an object uses one mesh inside this file; Thistle draws the whole model there.")
+
+    def set_material(self, node: Node, ref: dict) -> None:
+        rel = self.asset_of(ref)
+        if rel and rel.endswith(".mat"):
+            self.use(rel)
+            info = self.read_material(rel)
+            if info and node.tintable:
+                node.color = info["color"]
 
     def light_node(self, node: Node, c) -> "Node | None":
         kind = c.data.get("m_Type", 2)
         color = _color(c.data.get("m_Color"))
         intensity = float(c.data.get("m_Intensity", 1.0))
         if kind == 1:
-            self.environment["sun"] = {"color": [round(v, 4) for v in color], "intensity": intensity, "light_node": node,
+            self.environment["sun"] = {"color": [round(v, 4) for v in color], "intensity": intensity * self.sun_scale, "light_node": node,
                                        "shadows": (c.data.get("m_Shadows") or {}).get("m_Type", 0) != 0}
             node.sun_only = True
             self.count("directional lights (became the scene's sun)")
@@ -546,19 +616,27 @@ class Importer:
         light.kind = "spot_light" if kind == 0 else "point_light"
         if kind == 3:
             self.warn("A Unity area light was imported as a point light.")
-        light.color, light.intensity, light.range = color, intensity, float(c.data.get("m_Range", 10.0))
+        light.color, light.intensity, light.range = color, intensity * self.light_scale, float(c.data.get("m_Range", 10.0))
         light.spot_angle = math.radians(float(c.data.get("m_SpotAngle", 60.0))) / 2.0
         self.count("point and spot lights")
         return light
 
-    def script_properties(self, node: Node, c) -> None:
+    def script_name(self, c) -> str:
         script = self.asset_of(c.data.get("m_Script"))
-        name = Path(script).stem if script else "MonoBehaviour"
-        node.properties.append(("unity_script", name))
+        return Path(script).stem if script else "MonoBehaviour"
+
+    @staticmethod
+    def set_property(node: Node, key: str, value) -> None:
+        node.properties = [p for p in node.properties if p[0] != key] + [(key, str(value))]
+
+    def script_properties(self, node: Node, c) -> None:
+        name = self.script_name(c)
+        if not any(p[0] == "unity_script" and p[1] == name for p in node.properties):
+            node.properties.append(("unity_script", name))
         for key, value in c.data.items():
             if key.startswith("m_") or key in ("serializedVersion",) or isinstance(value, (dict, list)) or value is None:
                 continue
-            node.properties.append((f"{name}.{key}", str(value)))
+            self.set_property(node, f"{name}.{key}", value)
         self.skipped_types[f"C# script {name}"] = self.skipped_types.get(f"C# script {name}", 0) + 1
 
     def render_settings(self, c) -> None:
@@ -573,21 +651,22 @@ class Importer:
                 self.warn("Exponential fog was approximated as linear fog that reaches full strength where Unity's fades to 1%.")
             env["fog"] = {"enabled": True, "start": start, "end": end, "color": [round(v, 4) for v in _color(d.get("m_FogColor"))], "match_sky": False}
         mode = d.get("m_AmbientMode", 0)
+        ambient = float(d.get("m_AmbientIntensity", 1.0)) * self.ambient_scale
         if mode == 1:
             env["sky"] = {"top": _color(d.get("m_AmbientSkyColor")), "horizon": _color(d.get("m_AmbientEquatorColor")), "ground": _color(d.get("m_AmbientGroundColor"))}
-            env["ambient"] = float(d.get("m_AmbientIntensity", 1.0))
+            env["ambient"] = ambient
         elif mode == 3:
             flat = _color(d.get("m_AmbientSkyColor"))
             env["sky"] = {"top": flat, "horizon": flat, "ground": flat}
-            env["ambient"] = float(d.get("m_AmbientIntensity", 1.0))
+            env["ambient"] = ambient
         elif (d.get("m_SkyboxMaterial") or {}).get("fileID"):
             self.warn("The scene uses a skybox material; Thistle's sky colors were left at their defaults (set world.sky.skybox in code).")
         self.count("render settings")
 
     # -- prefabs --
 
-    def expand_prefab(self, inst, objects: dict, depth: int):
-        """(root nodes, {source transform fileID: Node}, parent transform fileID) or None."""
+    def expand_prefab(self, inst, objects: dict, doc_rel: str, depth: int):
+        """(root nodes, {source transform fileID: Node}, parent transform fileID, {source fileID: (Node, object)}) or None."""
         src = inst.data.get("m_SourcePrefab") or inst.data.get("m_ParentPrefab") or {}
         rel = self.asset_of(src)
         mod = inst.data.get("m_Modification") or {}
@@ -595,11 +674,11 @@ class Importer:
         if rel is None:
             self.warn("A prefab instance points at a prefab that isn't in Assets/; it was skipped.")
             return None
+        self.use(rel)
         overrides = {}
-        nested = 0
         for m in mod.get("m_Modifications") or []:
             if isinstance(m, dict):
-                overrides.setdefault((m.get("target") or {}).get("fileID"), {})[m.get("propertyPath")] = m.get("value")
+                overrides.setdefault((m.get("target") or {}).get("fileID"), {})[m.get("propertyPath")] = (m.get("value"), m.get("objectReference"))
         ext = Path(rel).suffix.lower()
         if ext == ".prefab":
             if depth > 8:
@@ -608,48 +687,69 @@ class Importer:
             sub = self.load_doc(rel)
             if sub is None:
                 return None
-            roots, inner = self.build_nodes(sub, depth + 1)
-            root_tr = next((fid for fid, o in sub.items() if o.class_id in (4, 224) and not o.stripped and not o.data.get("m_Father", {}).get("fileID")), None)
-            root_go = sub[root_tr].data.get("m_GameObject", {}).get("fileID") if root_tr else None
-            nodes = [r for r in roots]
-            root = inner.get(root_tr)
-            for target, props in overrides.items():
-                node = root if target == root_tr else None
-                if target == root_go:
-                    node = root
-                if node is None:
-                    nested += len(props)
-                    continue
-                self.apply_overrides(node, props)
-            if nested:
-                self.warn(f"{nested} property overrides on objects inside {rel} (not its root) were not applied.")
+            roots, inner_anchors, inner_index = self.build_nodes(sub, rel, depth + 1)
+            self.apply_overrides(overrides, inner_index, rel, objects, doc_rel)
             self.count("prefab instances")
-            return nodes, inner, parent
+            return list(roots), inner_anchors, parent, inner_index
         if ext in MODEL_EXT or ext in CONVERT_MODEL_EXT:
             node = Node(Path(rel).stem)
             node.kind, node.model = "model", self.model_path(rel)
-            for _target, props in overrides.items():
-                self.apply_overrides(node, props)
+            # An imported model's own objects have fileIDs we can't see; its root is 100000 (object) and 400000 (transform).
+            index = {100000: (node, UnityObject(1, 100000, "GameObject", {}, False)), 400000: (node, UnityObject(4, 400000, "Transform", {}, False))}
+            self.apply_overrides(overrides, index, rel, objects, doc_rel)
             self.count("models")
-            return [node], {}, parent
+            return [node], {400000: node}, parent, index
         self.warn(f"A prefab instance of {rel} ({ext}) was skipped.")
         return None
 
-    @staticmethod
-    def apply_overrides(node: Node, props: dict) -> None:
-        for path, value in props.items():
-            if path == "m_Name":
-                node.name = str(value)
+    def apply_overrides(self, overrides: dict, index: dict, rel: str, objects: dict, doc_rel: str) -> None:
+        """Apply a prefab instance's property overrides to whatever object each one names, wherever it is in the prefab."""
+        for target, props in overrides.items():
+            hit = index.get(target)
+            if hit is None:
+                for path in props:
+                    key = f"{Path(rel).stem}.{path}"
+                    self.unresolved[key] = self.unresolved.get(key, 0) + 1
                 continue
+            node, obj = hit
+            for path, (value, ref) in props.items():
+                if not self.apply_override(node, obj, path, value, ref, objects, doc_rel):
+                    key = f"{obj.type_name}.{path}"
+                    self.ignored[key] = self.ignored.get(key, 0) + 1
+
+    def apply_override(self, node: Node, obj, path: str, value, ref, objects: dict, doc_rel: str) -> bool:
+        cls = obj.class_id
+        if cls == 1 and path == "m_Name":
+            node.name = str(value)
+            return True
+        if cls == 1 and path == "m_IsActive":
+            if value in (0, "0"):
+                self.set_property(node, "active", "false")
+            else:
+                node.properties = [p for p in node.properties if p[0] != "active"]
+            return True
+        if cls in (4, 224):
             for field, (prefix, size) in VEC_KEYS.items():
                 if path.startswith(prefix + "."):
-                    axis = path.split(".", 1)[1]
-                    idx = "xyzw".find(axis)
+                    idx = "xyzw".find(path.split(".", 1)[1])
                     if 0 <= idx < size:
                         try:
                             getattr(node, "pos" if field == "position" else "rot" if field == "rotation" else "scale")[idx] = float(value)
                         except (TypeError, ValueError):
-                            pass
+                            return False
+                        return True
+            return False
+        if cls == 33 and path == "m_Mesh" and isinstance(ref, dict):
+            self.set_mesh(node, ref, doc_rel, objects)
+            return True
+        if cls == 23 and path.startswith("m_Materials.Array.data[") and isinstance(ref, dict):
+            if path == "m_Materials.Array.data[0]":
+                self.set_material(node, ref)
+            return True
+        if cls == 114 and not path.startswith("m_") and not path.startswith("Array"):
+            self.set_property(node, f"{self.script_name(obj)}.{path}", value)
+            return True
+        return False
 
     # -- materials --
 
@@ -676,6 +776,7 @@ class Importer:
                     path = self.asset_of((tex or {}).get("m_Texture"))
                     if path:
                         textures[key] = "assets/" + path
+                        self.use(path)
         base = colors.get("_BaseColor") or colors.get("_Color")
         smooth = floats.get("_Smoothness", floats.get("_Glossiness", 0.5))
         mode = floats.get("_Surface", 0) if "_Surface" in floats else {0: 0, 1: 1, 2: 2, 3: 2}.get(int(floats.get("_Mode", 0)), 0)
@@ -730,7 +831,7 @@ class Importer:
             e["properties"] = props
         return e
 
-    def scene_json(self, roots: list, environment: dict, anchors: dict = None) -> dict:
+    def scene_json(self, roots: list, environment: dict) -> dict:
         flat = self.flatten(roots)
         env = {
             "ambient": environment.get("ambient", 0.55),
@@ -746,9 +847,8 @@ class Importer:
         sun = environment.get("sun")
         if sun:
             node = sun["light_node"]
-            rot = node.rot
             parent_rot = getattr(node, "_world_parent_rot", [0.0, 0.0, 0.0, 1.0])
-            forward = _qrot(_qmul(parent_rot, rot), [0.0, 0.0, 1.0])
+            forward = _qrot(_qmul(parent_rot, node.rot), [0.0, 0.0, 1.0])
             env["sun"].update({"direction": _round(_mirror_pos(forward)), "color": sun["color"], "intensity": sun["intensity"], "shadows": sun["shadows"]})
         return {"thistle_scene": 1, "environment": env, "entities": [self.entity_json(n, p) for n, p in flat]}
 
@@ -760,7 +860,7 @@ class Importer:
         path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return True
 
-    def convert_doc(self, rel: str, folder: str, kind: str) -> None:
+    def convert_doc(self, rel: str, folder: str, kind: str, kind_key: str) -> None:
         objects = self.load_doc(rel)
         if objects is None:
             return
@@ -768,12 +868,11 @@ class Importer:
         for o in objects.values():
             if o.class_id == 104:
                 self.render_settings(o)
-        roots, _anchors = self.build_nodes(objects)
+        roots, _anchors, _index = self.build_nodes(objects, rel)
         env = dict(self.environment)
         if "sun" in env:
             self.give_world_rotation(roots, env["sun"]["light_node"])
-        name = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(rel).stem)
-        dest = self.out / "assets" / folder / f"{name}.scene.json"
+        dest = self.out / "assets" / folder / f"{self.names[(kind_key, rel)]}.scene.json"
         if self.write_json(dest, self.scene_json(roots, env)):
             self.count(kind)
 
@@ -788,9 +887,19 @@ class Importer:
             return False
         walk(roots, [0.0, 0.0, 0.0, 1.0])
 
+    def write_mesh(self, text: str, dest: Path, label: str) -> None:
+        if dest.exists() and not self.force:
+            self.warn(f"{dest.relative_to(self.out).as_posix()} already exists; kept it (use --force to overwrite).")
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+        self.count("meshes converted to .obj")
+
     def convert_mesh_assets(self) -> None:
         for path in sorted(self.assets.rglob("*" + MESH_ASSET_EXT)):
             rel = path.relative_to(self.assets)
+            if self.only_scenes and rel.as_posix() not in self.used:
+                continue
             text = path.read_text(encoding="utf-8", errors="replace") if path.stat().st_size < 200_000_000 else ""
             if not text.startswith("%YAML") or "--- !u!43 " not in text:
                 continue
@@ -802,20 +911,54 @@ class Importer:
                 except (ValueError, KeyError, struct.error) as why:
                     self.warn(f"Mesh {rel.as_posix()} was not converted: {why}.")
                     continue
-                dest = self.out / "assets" / rel.with_suffix(".obj")
-                if dest.exists() and not self.force:
-                    self.warn(f"{dest.relative_to(self.out).as_posix()} already exists; kept it (use --force to overwrite).")
-                    continue
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_text(obj_text, encoding="utf-8")
-                self.count("mesh .asset files converted to .obj")
+                self.write_mesh(obj_text, self.out / "assets" / rel.with_suffix(".obj"), rel.as_posix())
+        for (doc_rel, file_id), (out_rel, data) in sorted(self.embedded.items()):
+            try:
+                obj_text, _name = mesh_asset_to_obj(data)
+            except (ValueError, KeyError, struct.error) as why:
+                self.warn(f"A mesh saved inside {doc_rel} (object {file_id}) was not converted: {why}.")
+                continue
+            self.write_mesh(obj_text, self.out / "assets" / out_rel, out_rel)
+
+    def dependencies(self, rel: str) -> list:
+        """Files a glTF or OBJ model reads next to itself (buffers, textures, .mtl), Assets-relative."""
+        path = self.assets / rel
+        base = Path(rel).parent
+        found = []
+        try:
+            if rel.lower().endswith(".gltf"):
+                doc = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+                for entry in (doc.get("buffers") or []) + (doc.get("images") or []):
+                    uri = entry.get("uri", "")
+                    if uri and not uri.startswith("data:"):
+                        found.append((base / uri).as_posix())
+            elif rel.lower().endswith(".obj"):
+                for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if line.startswith("mtllib "):
+                        mtl = (base / line.split(None, 1)[1].strip()).as_posix()
+                        found.append(mtl)
+                        mtl_path = self.assets / mtl
+                        if mtl_path.exists():
+                            for l in mtl_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                                if l.strip().lower().startswith(("map_kd", "map_bump", "map_ke", "bump")):
+                                    found.append((Path(mtl).parent / l.split()[-1]).as_posix())
+        except (OSError, ValueError):
+            pass
+        return [f for f in found if (self.assets / f).exists()]
 
     def copy_assets(self) -> None:
+        wanted = None
+        if self.only_scenes:
+            wanted = set(self.used)
+            for rel in list(wanted):
+                wanted.update(self.dependencies(rel))
         for path in sorted(self.assets.rglob("*")):
             if not path.is_file() or path.suffix == ".meta" or path.suffix.lower() in (".unity", ".prefab", ".mat", MESH_ASSET_EXT):
                 continue
             ext = path.suffix.lower()
             rel = path.relative_to(self.assets)
+            if wanted is not None and rel.as_posix() not in wanted:
+                continue
             if ext in COPY_EXT:
                 dest = self.out / "assets" / rel
                 if dest.exists() and not self.force:
@@ -826,24 +969,51 @@ class Importer:
             elif ext in CONVERT_MODEL_EXT:
                 if rel.as_posix() not in self.to_convert:
                     self.to_convert.append(rel.as_posix())
-            elif ext not in (".cs", ".asmdef", ".asmref", ".meta", ".dll", ".shader", ".cginc", ".hlsl", ".anim", ".controller", ".asset", ".json", ".txt", ".md"):
-                self.skipped_types[f"{ext or 'no extension'} files"] = self.skipped_types.get(f"{ext or 'no extension'} files", 0) + 1
-            elif ext in (".cs", ".shader", ".anim", ".controller"):
+            elif wanted is None and ext in (".cs", ".shader", ".anim", ".controller"):
                 label = {".cs": "C# scripts (not translated)", ".shader": "shaders", ".anim": "animation clips", ".controller": "animator controllers"}[ext]
                 self.skipped_types[label] = self.skipped_types.get(label, 0) + 1
+            elif wanted is None and ext not in (".asmdef", ".asmref", ".dll", ".cginc", ".hlsl", ".asset", ".json", ".txt", ".md"):
+                self.skipped_types[f"{ext or 'no extension'} files"] = self.skipped_types.get(f"{ext or 'no extension'} files", 0) + 1
+
+    def pick_scenes(self, scenes: list) -> list:
+        if not self.only_scenes:
+            return scenes
+        chosen = []
+        for want in self.only_scenes:
+            w = want.lower().removesuffix(".unity").replace("\\", "/")
+            hits = [s for s in scenes if Path(s).stem.lower() == w or s.lower().removesuffix(".unity") == w or s.lower().removesuffix(".unity").endswith("/" + w)]
+            if not hits:
+                print(f"error: no scene matches --scene {want!r}. Scenes in this project:")
+                for s in scenes[:60]:
+                    print("  " + Path(s).stem)
+                if len(scenes) > 60:
+                    print(f"  ... and {len(scenes) - 60} more")
+                return []
+            chosen += [h for h in hits if h not in chosen]
+        return chosen
 
     def run(self) -> int:
         if not self.assets.is_dir():
             print(f"error: {self.project} has no Assets/ folder - is it a Unity project?")
             return 1
         self.scan_guids()
-        for scene in sorted(self.assets.rglob("*.unity")):
-            self.convert_doc(scene.relative_to(self.assets).as_posix(), "scenes", "scenes")
+        self.assign_names()
+        all_scenes = sorted(p.relative_to(self.assets).as_posix() for p in self.assets.rglob("*.unity"))
+        scenes = self.pick_scenes(all_scenes)
+        if self.only_scenes and not scenes:
+            return 1
+        for scene in scenes:
+            self.convert_doc(scene, "scenes", "scenes", "scene")
         for prefab in sorted(self.assets.rglob("*.prefab")):
-            self.convert_doc(prefab.relative_to(self.assets).as_posix(), "prefabs", "prefabs")
+            rel = prefab.relative_to(self.assets).as_posix()
+            if not self.only_scenes or rel in self.used:
+                self.convert_doc(rel, "prefabs", "prefabs", "prefab")
         for mat in sorted(self.assets.rglob("*.mat")):
-            info = self.read_material(mat.relative_to(self.assets).as_posix())
-            if info and self.write_json(self.out / "assets" / "materials" / (re.sub(r"[^A-Za-z0-9_.-]+", "_", mat.stem) + ".json"), info):
+            rel = mat.relative_to(self.assets).as_posix()
+            if self.only_scenes and rel not in self.used:
+                continue
+            info = self.read_material(rel)
+            if info and self.write_json(self.out / "assets" / "materials" / f"{self.names[('material', rel)]}.json", info):
                 self.count("materials")
         self.convert_mesh_assets()
         self.copy_assets()
@@ -851,13 +1021,22 @@ class Importer:
         return 0
 
     def write_report(self) -> None:
-        lines = ["# Unity import report", "", f"From `{self.project}`. See docs/unity-import.md for what this does and doesn't carry over.", "", "## Converted", ""]
+        lines = ["# Unity import report", "", f"From `{self.project}`. See docs/unity-import.md for what this does and doesn't carry over.", ""]
+        if self.only_scenes:
+            lines += [f"Only the scene(s) {', '.join(self.only_scenes)} and the files they use were converted.", ""]
+        lines += ["## Converted", ""]
         lines += [f"- {n} {what}" for what, n in sorted(self.counts.items())] or ["- nothing"]
         if self.to_convert:
             lines += ["", "## Models Thistle can't read yet (convert to .glb, same name, same folder under assets/)", ""]
             lines += [f"- `{p}` -> `assets/{Path(p).with_suffix('.glb').as_posix()}`" for p in sorted(set(self.to_convert))]
         if self.skipped_types:
             lines += ["", "## Left behind", ""] + [f"- {n} x {what}" for what, n in sorted(self.skipped_types.items())]
+        if self.unresolved:
+            lines += ["", "## Prefab overrides that name an object this tool couldn't find in the prefab (not applied)", ""]
+            lines += [f"- {n} x `{key}`" for key, n in sorted(self.unresolved.items(), key=lambda kv: -kv[1])[:40]]
+        if self.ignored:
+            lines += ["", "## Prefab overrides with no Thistle equivalent (ignored)", ""]
+            lines += [f"- {n} x `{key}`" for key, n in sorted(self.ignored.items(), key=lambda kv: -kv[1])[:25]]
         if self.warnings:
             lines += ["", "## Warnings", ""] + [f"- {w}" for w in self.warnings]
         text = "\n".join(lines) + "\n"
@@ -865,5 +1044,5 @@ class Importer:
         print(text)
 
 
-def import_unity(project: Path, out: Path, force: bool = False) -> int:
-    return Importer(project, out, force).run()
+def import_unity(project: Path, out: Path, force: bool = False, **options) -> int:
+    return Importer(project, out, force, **options).run()

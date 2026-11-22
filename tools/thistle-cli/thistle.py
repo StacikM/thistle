@@ -423,7 +423,8 @@ def cmd_import_unity(args) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from unity_import import import_unity
     out = Path(args.out).resolve() if args.out else Path.cwd()
-    sys.exit(import_unity(Path(args.unity_project).resolve(), out, args.force))
+    sys.exit(import_unity(Path(args.unity_project).resolve(), out, args.force, scenes=args.scene,
+                          ambient_scale=args.ambient_scale, light_scale=args.light_scale, sun_scale=args.sun_scale))
 
 
 def cmd_version(args) -> None:
@@ -543,6 +544,11 @@ def main() -> None:
     p_unity.add_argument("unity_project", help="the Unity project folder (the one with Assets/ in it)")
     p_unity.add_argument("--out", help="the Thistle project to write into (default: the current folder)")
     p_unity.add_argument("--force", action="store_true", help="overwrite files that already exist")
+    p_unity.add_argument("--scene", action="append", default=[], metavar="NAME",
+                         help="convert only this scene (its file name without .unity, or its path) and the files it uses; repeatable. Default: every scene")
+    p_unity.add_argument("--ambient-scale", type=float, default=0.4, help="multiply Unity's ambient intensity by this (default 0.4)")
+    p_unity.add_argument("--light-scale", type=float, default=0.28, help="multiply point and spot light intensities by this (default 0.28)")
+    p_unity.add_argument("--sun-scale", type=float, default=1.0, help="multiply the directional light's intensity by this (default 1.0)")
     p_unity.set_defaults(func=cmd_import_unity)
 
     p_build = sub.add_parser("build", help="configure + build the project in the current directory")
