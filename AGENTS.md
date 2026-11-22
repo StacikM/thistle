@@ -34,6 +34,7 @@ ctest --test-dir build --output-on-failure
 - `examples/android/` — the Android APK build, entirely Gradle-free (`build_apk.sh` uses `aapt`/`zipalign`/`apksigner` directly). See `docs/android.md`.
 - `docs/` — one file per feature area, written for the person about to use it, not as a spec. If you change behavior, update the doc in the same PR — a doc that's wrong is worse than no doc.
 - `tools/thistle-cli` — the `thistle` command-line tool for scaffolding/building/running a game project. See `docs/cli.md`. The editor runs it too (New project, Make it a Thistle project, Build & run), so it stays the one place a project's shape is decided.
+- `tools/thistle-import` — `import-unity` in Rust (optional, needs cargo; `thistle build-importer`): a port of `tools/thistle-cli/unity_import.py` held to the same test script (`unity_import_rust_smoketest`). **Change the importer in both**, or the two will drift: the test compares what they write only through the checks in `test_unity_import.py`, so add a check there for anything you change.
 - `tools/thistle-editor` — the Thistle Editor, a 3D level editor for `three::Scene3D` files, drawn with the engine's own 2D API. `main.cpp` is the editor, `hub.cpp` its projects screen and Build & run, `platform.cpp` running the CLI as a child process (POSIX and Windows). See its README for what's been verified by clicking through it.
 
 ## Conventions

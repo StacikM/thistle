@@ -15,6 +15,20 @@ Reads the project's `Assets/` folder and writes into the Thistle project's `asse
 
 The Unity project has to be **text-serialized** (Edit > Project Settings > Editor > Asset Serialization = Force Text; the default in modern Unity). A binary scene is reported and skipped.
 
+## A faster importer, in Rust
+
+A big project is slow to import in Python: it reads Unity's YAML at about 5 MB/s. There's a Rust version of the same converter in `tools/thistle-import`. Build it once (it needs [cargo](https://rustup.rs); nothing else in Thistle does):
+
+```bash
+thistle build-importer
+```
+
+After that `thistle import-unity` uses it automatically and says so (`--python` forces the Python one; `THISTLE_IMPORT_BIN` or `thistle-import` on `PATH` point it at a binary elsewhere). Same arguments, same files, same report.
+
+**Measured** on one synthetic 40 MB scene (91,000 objects, about 20,000 prefab instances), whole `import-unity` run: **Rust 0.9 s, Python 8.2 s**. (Python took 41 s before a quadratic scan over prefab instances was fixed in both: that scan is why a map with a lot of prefab instances, like a level full of terminals, was slow.) A real project spends the rest of its time copying files and running Blender, which Rust doesn't speed up.
+
+**How it's held to the Python one:** `unity_import_smoketest` (Python) and `unity_import_rust_smoketest` (builds the binary, then runs the same script against it) run the same checks on the same hand-written projects, including the engine loading the output. Comparing the two outputs file by file found two differences the checks missed (one was a bug in the Rust one: the default `emissive` of a material with no emission was white), now fixed and covered. The only difference left is `0` vs `0.0` in a few JSON numbers. **Not checked:** a real Unity project with the Rust one (nobody has run it on one), and Windows/macOS beyond what CI builds. One thing the Python one has that the Rust one doesn't: it gives up on a Blender run after 10 minutes.
+
 ## What it converts
 
 | Unity | Thistle |

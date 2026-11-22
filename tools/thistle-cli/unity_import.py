@@ -525,21 +525,24 @@ class Importer:
             node = anchors.get(fid)
             if node is not None:
                 pending.append((node, tr.data.get("m_Father", {}).get("fileID", 0), tr.data.get("m_RootOrder", 0)))
+        # The scene's "stripped" stand-ins for the prefab's own objects, by the instance that owns them: anything
+        # that points at one (a child's m_Father, an override) means the object inside the expansion.
+        stand_ins = {}
+        for stripped_fid, st in objects.items():
+            if st.stripped:
+                stand_ins.setdefault((st.data.get("m_PrefabInstance") or {}).get("fileID"), []).append((stripped_fid, st))
         for inst in [o for o in objects.values() if o.class_id == 1001]:
             expansion = self.expand_prefab(inst, objects, doc_rel, depth)
             if expansion is None:
                 continue
             roots, inner_anchors, parent, inner_index = expansion
-            # The scene's "stripped" stand-ins for the prefab's own objects: anything that points at
-            # one (a child's m_Father, an override) means the object inside the expansion.
-            for stripped_fid, st in objects.items():
-                if st.stripped and st.data.get("m_PrefabInstance", {}).get("fileID") == inst.file_id:
-                    source_fid = st.data.get("m_CorrespondingSourceObject", {}).get("fileID")
-                    hit = inner_index.get(source_fid)
-                    if hit is not None:
-                        index[stripped_fid] = hit
-                        if st.class_id in (4, 224):
-                            anchors[stripped_fid] = hit[0]
+            for stripped_fid, st in stand_ins.get(inst.file_id, []):
+                source_fid = st.data.get("m_CorrespondingSourceObject", {}).get("fileID")
+                hit = inner_index.get(source_fid)
+                if hit is not None:
+                    index[stripped_fid] = hit
+                    if st.class_id in (4, 224):
+                        anchors[stripped_fid] = hit[0]
             for r in roots:
                 pending.append((r, parent, 0))
         roots_out = []
@@ -1127,7 +1130,8 @@ class Importer:
             if self.only_scenes and rel not in self.used:
                 continue
             info = self.read_material(rel)
-            if info and self.write_json(self.out / "assets" / "materials" / f"{self.names[('material', rel)]}.json", info):
+            sidecar = {k: v for k, v in (info or {}).items() if k != "metallic_set"}  # an internal flag, not part of the file
+            if info and self.write_json(self.out / "assets" / "materials" / f"{self.names[('material', rel)]}.json", sidecar):
                 self.count("materials")
         self.convert_mesh_assets()
         self.copy_assets()
