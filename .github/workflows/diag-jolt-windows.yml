@@ -12,10 +12,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {name: control windows-latest,          os: windows-latest, extra: ''}
-          - {name: windows-2022 image,              os: windows-2022,   extra: ''}
-          - {name: windows-latest + Jolt AVX2 etc,  os: windows-latest, extra: '-DUSE_AVX=ON -DUSE_AVX2=ON -DUSE_LZCNT=ON -DUSE_TZCNT=ON -DUSE_F16C=ON -DUSE_FMADD=ON'}
-    runs-on: ${{ matrix.os }}
+          - {name: Jolt v5.7.0 Release,        jolt: v5.7.0, config: Release, extra: ''}
+          - {name: Jolt v5.6.0 Debug,          jolt: v5.6.0, config: Debug,   extra: ''}
+          - {name: Jolt v5.6.0 Release /O1,    jolt: v5.6.0, config: Release, extra: '-DCMAKE_CXX_FLAGS_RELEASE="/O1 /DNDEBUG"'}
+    runs-on: windows-latest
     name: ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
@@ -27,10 +27,13 @@ jobs:
           & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property displayName
           & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property catalog_productDisplayVersion
           Get-CimInstance Win32_Processor | Select-Object -ExpandProperty Name
+      - name: Pick the Jolt version
+        shell: pwsh
+        run: (Get-Content CMakeLists.txt) -replace 'GIT_TAG        v5.6.0', 'GIT_TAG        ${{ matrix.jolt }}' | Set-Content CMakeLists.txt
       - name: Configure
         run: cmake -S . -B build -DTHISTLE_BUILD_SMOKETEST=ON -DTHISTLE_PHYSICS3D=ON ${{ matrix.extra }}
       - name: Build the two failing tests
-        run: cmake --build build --config Release --target thistle_physics3d_smoketest thistle_destruction_smoketest --parallel
+        run: cmake --build build --config ${{ matrix.config }} --target thistle_physics3d_smoketest thistle_destruction_smoketest --parallel
       - name: Run them
         shell: pwsh
         run: |
