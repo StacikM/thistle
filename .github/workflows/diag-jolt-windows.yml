@@ -1,0 +1,43 @@
+# Throwaway: finds out why the Windows + Jolt physics tests started failing.
+# Delete this file (and its branch) once the cause is known.
+name: diag-jolt-windows
+on:
+  push:
+    branches: ['claude/diag-*']
+  workflow_dispatch:
+
+jobs:
+  jolt:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: control windows-latest,          os: windows-latest, extra: ''}
+          - {name: windows-2022 image,              os: windows-2022,   extra: ''}
+          - {name: windows-latest + Jolt AVX2 etc,  os: windows-latest, extra: '-DUSE_AVX=ON -DUSE_AVX2=ON -DUSE_LZCNT=ON -DUSE_TZCNT=ON -DUSE_F16C=ON -DUSE_FMADD=ON'}
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Which image and compiler
+        shell: pwsh
+        run: |
+          "ImageVersion=$env:ImageVersion ImageOS=$env:ImageOS"
+          cmake --version | Select-Object -First 1
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property displayName
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property catalog_productDisplayVersion
+          Get-CimInstance Win32_Processor | Select-Object -ExpandProperty Name
+      - name: Configure
+        run: cmake -S . -B build -DTHISTLE_BUILD_SMOKETEST=ON -DTHISTLE_PHYSICS3D=ON ${{ matrix.extra }}
+      - name: Build the two failing tests
+        run: cmake --build build --config Release --target thistle_physics3d_smoketest thistle_destruction_smoketest --parallel
+      - name: Run them
+        shell: pwsh
+        run: |
+          $rc = 0
+          foreach ($t in 'thistle_physics3d_smoketest','thistle_destruction_smoketest') {
+            "=== $t"
+            & ".\build\Release\$t.exe" 2>&1 | Select-String -Pattern 'FAIL|FAILED|passed|rests|lands' | ForEach-Object { $_.Line }
+            if ($LASTEXITCODE -ne 0) { $rc = 1 }
+          }
+          exit $rc
