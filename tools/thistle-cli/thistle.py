@@ -328,6 +328,11 @@ def cmd_run(args) -> None:
     exe = _find_executable(root / "build", proj["name"], _config_name(args))
     if not exe:
         die("built, but couldn't find the executable to run — check the build output above")
+    if args.screenshot:
+        # The game runs from its own folder (below), so the file has to be named from here, now.
+        os.environ["THISTLE_SCREENSHOT"] = str(Path(args.screenshot).resolve())
+        os.environ["THISTLE_SCREENSHOT_FRAME"] = str(args.screenshot_frame)
+        print(f"(taking a screenshot after frame {args.screenshot_frame}: {os.environ['THISTLE_SCREENSHOT']})")
     print("$ " + " ".join([str(exe)] + rest))
     # Run it from its own folder, where the build put its assets/ (as a
     # player's copy runs), not from wherever this was typed: from src/ the
@@ -561,6 +566,10 @@ def main() -> None:
     p_run.add_argument("--release", action="store_true")
     p_run.add_argument("--server", action="store_true",
                        help="build and run the dedicated server instead; what follows -- goes to it (--port 47001)")
+    p_run.add_argument("--screenshot", metavar="FILE.png",
+                       help="run the game, save one frame as a PNG, and quit (exit code 0, or 3 if it couldn't): for checking rendering and layout without looking")
+    p_run.add_argument("--screenshot-frame", type=int, default=5, metavar="N",
+                       help="which frame to save (default 5: assets and layout have settled; raise it for games that load for a while)")
     p_run.add_argument("args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     p_run.set_defaults(func=cmd_run)
 
