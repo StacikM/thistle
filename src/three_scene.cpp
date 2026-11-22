@@ -30,12 +30,13 @@ const char* kind_name(SceneEntity::Kind k) {
         case SceneEntity::Kind::Trigger: return "trigger";
         case SceneEntity::Kind::Spawn: return "spawn";
         case SceneEntity::Kind::Voxels: return "voxels";
+        case SceneEntity::Kind::Wedge: return "wedge";
     }
     return "empty";
 }
 
 SceneEntity::Kind kind_from(const std::string& s) {
-    for (int k = 0; k <= static_cast<int>(SceneEntity::Kind::Voxels); ++k) {
+    for (int k = 0; k <= static_cast<int>(SceneEntity::Kind::Wedge); ++k) {
         if (s == kind_name(static_cast<SceneEntity::Kind>(k))) return static_cast<SceneEntity::Kind>(k);
     }
     return SceneEntity::Kind::Empty;
@@ -67,6 +68,41 @@ Texture cached_texture(const std::string& path) {
     auto it = cache.find(key);
     if (it == cache.end()) it = cache.emplace(key, load_texture(path)).first;
     return it->second;
+}
+
+// The same unit shapes World::box() and friends draw, as models the collision
+// world can read triangles from and World::draw(model, transform, material)
+// can draw. Made once, shared. Indexed like World::shape().
+const Model& unit_shape(int index) {
+    static Model shapes[6];
+    static bool made = false;
+    if (!made) {
+        shapes[0] = make_model(box_mesh());
+        shapes[1] = make_model(sphere_mesh());
+        shapes[2] = make_model(cylinder_mesh());
+        shapes[3] = make_model(cone_mesh());
+        shapes[4] = make_model(plane_mesh());
+        shapes[5] = make_model(wedge_mesh());
+        made = true;
+    }
+    return shapes[index];
+}
+
+int shape_index(SceneEntity::Kind k) {
+    switch (k) {
+        case SceneEntity::Kind::Box: return 0;
+        case SceneEntity::Kind::Sphere: return 1;
+        case SceneEntity::Kind::Cylinder: return 2;
+        case SceneEntity::Kind::Cone: return 3;
+        case SceneEntity::Kind::Plane: return 4;
+        case SceneEntity::Kind::Wedge: return 5;
+        default: return -1;
+    }
+}
+
+bool has_custom_material(const SceneEntity& e) {
+    return !e.texture.empty() || !e.normal_texture.empty() || e.metallic >= 0.0f || e.roughness >= 0.0f ||
+           e.uv_scale.x != 1.0f || e.uv_scale.y != 1.0f;
 }
 
 template <class T>
@@ -111,6 +147,11 @@ std::string Scene3D::to_json(bool voxel_blocks) const {
         nlohmann::json je = {{"name", e.name}, {"kind", kind_name(e.kind)}, {"parent", e.parent}, {"position", e.transform.position},
                              {"rotation", e.transform.rotation}, {"scale", e.transform.scale}, {"color", e.color}};
         if (e.kind == SceneEntity::Kind::Model) je["model"] = e.model;
+        if (!e.texture.empty()) je["texture"] = e.texture;
+        if (!e.normal_texture.empty()) je["normal_texture"] = e.normal_texture;
+        if (e.metallic >= 0.0f) je["metallic"] = e.metallic;
+        if (e.roughness >= 0.0f) je["roughness"] = e.roughness;
+        if (e.uv_scale.x != 1.0f || e.uv_scale.y != 1.0f) je["uv_scale"] = e.uv_scale;
         if (e.kind == SceneEntity::Kind::PointLight || e.kind == SceneEntity::Kind::SpotLight) {
             je["intensity"] = e.intensity;
             je["range"] = e.range;
@@ -180,6 +221,11 @@ bool Scene3D::from_json(const std::string& text) {
         e.transform.scale = get_or(je, "scale", vec3{1, 1, 1});
         e.model = get_or<std::string>(je, "model", "");
         e.color = get_or(je, "color", white);
+        e.texture = get_or<std::string>(je, "texture", "");
+        e.normal_texture = get_or<std::string>(je, "normal_texture", "");
+        e.metallic = get_or(je, "metallic", e.metallic);
+        e.roughness = get_or(je, "roughness", e.roughness);
+        e.uv_scale = get_or(je, "uv_scale", e.uv_scale);
         e.intensity = get_or(je, "intensity", e.intensity);
         e.range = get_or(je, "range", e.range);
         e.spot_angle = get_or(je, "spot_angle", e.spot_angle);
@@ -343,6 +389,7 @@ Bounds Scene3D::local_bounds(int index) const {
         case SceneEntity::Kind::Sphere:
         case SceneEntity::Kind::Cylinder:
         case SceneEntity::Kind::Cone:
+        case SceneEntity::Kind::Wedge:
         case SceneEntity::Kind::Trigger: return {{-0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, 0.5f}};
         case SceneEntity::Kind::Plane: return {{-0.5f, -0.01f, -0.5f}, {0.5f, 0.01f, 0.5f}};
         case SceneEntity::Kind::Spawn: return {{-0.25f, 0.0f, -0.25f}, {0.25f, 1.8f, 0.25f}}; // a person standing there
@@ -387,31 +434,30 @@ void Scene3D::place_voxels() {
 }
 
 std::vector<int> Scene3D::add_colliders(CollisionWorld& world) const {
-    // The same unit shapes World::box() and friends draw, as models the
-    // collision world can read triangles from. Made once, shared.
-    static Model shapes[5];
-    static bool made = false;
-    if (!made) {
-        shapes[0] = make_model(box_mesh());
-        shapes[1] = make_model(sphere_mesh());
-        shapes[2] = make_model(cylinder_mesh());
-        shapes[3] = make_model(cone_mesh());
-        shapes[4] = make_model(plane_mesh());
-        made = true;
-    }
     std::vector<int> ids;
     for (size_t i = 0; i < entities.size(); ++i) {
         const SceneEntity& e = entities[i];
-        if (e.property("solid") == "false") continue;
+        const std::string collider = e.property("collider");
+        if (e.property("solid") == "false" || collider == "none") continue;
+        if (!collider.empty() && collider != "mesh" && collider != "box") {
+            log_warn("Scene3D::add_colliders: '" + e.name + "' has collider='" + collider + "' (use box, mesh or none); using mesh");
+        }
         const Transform t = world_transform(static_cast<int>(i));
+        if (const int shape = shape_index(e.kind); shape >= 0) {
+            ids.push_back(world.add(unit_shape(shape), t));
+            continue;
+        }
         switch (e.kind) {
-            case SceneEntity::Kind::Box: ids.push_back(world.add(shapes[0], t)); break;
-            case SceneEntity::Kind::Sphere: ids.push_back(world.add(shapes[1], t)); break;
-            case SceneEntity::Kind::Cylinder: ids.push_back(world.add(shapes[2], t)); break;
-            case SceneEntity::Kind::Cone: ids.push_back(world.add(shapes[3], t)); break;
-            case SceneEntity::Kind::Plane: ids.push_back(world.add(shapes[4], t)); break;
             case SceneEntity::Kind::Model:
-                if (Model m = model(static_cast<int>(i)); m.valid()) ids.push_back(world.add(m, t));
+                if (Model m = model(static_cast<int>(i)); m.valid()) {
+                    const Bounds b = model_bounds(m);
+                    if (collider == "box" && b.valid()) {
+                        // One box around the whole model: far cheaper to walk on than a dense mesh.
+                        ids.push_back(world.add(unit_shape(0), t * Transform(b.center(), quat{}, b.size())));
+                    } else {
+                        ids.push_back(world.add(m, t));
+                    }
+                }
                 break;
             case SceneEntity::Kind::Voxels:
                 if (e.voxels) {
@@ -430,6 +476,22 @@ std::vector<int> Scene3D::add_colliders(CollisionWorld& world) const {
 }
 
 #if !defined(THISTLE_SERVER) // drawing: not in the server library
+namespace {
+Material entity_material(const SceneEntity& e) {
+    Material m;
+    m.color = e.color;
+    if (!e.texture.empty()) m.texture = cached_texture(e.texture);
+    m.uv_scale = e.uv_scale;
+    if (!e.normal_texture.empty()) m.normal_texture = cached_texture(e.normal_texture);
+    if (e.metallic >= 0.0f || e.roughness >= 0.0f || !e.normal_texture.empty()) {
+        m.pbr = true;
+        m.metallic = std::max(e.metallic, 0.0f);
+        m.roughness = e.roughness >= 0.0f ? e.roughness : 0.5f;
+    }
+    return m;
+}
+} // namespace
+
 void Scene3D::draw(World& world, bool environment) const {
     if (environment) {
         const Skybox keep = world.sky.skybox; // not part of the file: leave whatever the game set
@@ -443,12 +505,27 @@ void Scene3D::draw(World& world, bool environment) const {
         const SceneEntity& e = entities[i];
         const Transform t = world_transform(static_cast<int>(i));
         switch (e.kind) {
-            case SceneEntity::Kind::Model: world.draw(model(static_cast<int>(i)), t, e.color); break;
-            case SceneEntity::Kind::Box: world.box(t, e.color); break;
-            case SceneEntity::Kind::Sphere: world.sphere(t, e.color); break;
-            case SceneEntity::Kind::Cylinder: world.cylinder(t, e.color); break;
-            case SceneEntity::Kind::Cone: world.cone(t, e.color); break;
-            case SceneEntity::Kind::Plane: world.plane(t, e.color); break;
+            case SceneEntity::Kind::Model:
+                if (has_custom_material(e)) world.draw(model(static_cast<int>(i)), t, entity_material(e));
+                else world.draw(model(static_cast<int>(i)), t, e.color);
+                break;
+            case SceneEntity::Kind::Box: case SceneEntity::Kind::Sphere: case SceneEntity::Kind::Cylinder:
+            case SceneEntity::Kind::Cone: case SceneEntity::Kind::Plane: case SceneEntity::Kind::Wedge: {
+                const int shape = shape_index(e.kind);
+                if (has_custom_material(e)) {
+                    world.draw(unit_shape(shape), t, entity_material(e));
+                } else {
+                    switch (shape) {
+                        case 0: world.box(t, e.color); break;
+                        case 1: world.sphere(t, e.color); break;
+                        case 2: world.cylinder(t, e.color); break;
+                        case 3: world.cone(t, e.color); break;
+                        case 4: world.plane(t, e.color); break;
+                        default: world.wedge(t, e.color); break;
+                    }
+                }
+                break;
+            }
             case SceneEntity::Kind::Voxels:
                 if (e.voxels) {
                     e.voxels->origin = t.position; // as place_voxels(), which isn't const

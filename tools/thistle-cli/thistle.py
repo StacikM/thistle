@@ -328,6 +328,11 @@ def cmd_run(args) -> None:
     exe = _find_executable(root / "build", proj["name"], _config_name(args))
     if not exe:
         die("built, but couldn't find the executable to run — check the build output above")
+    if args.screenshot:
+        # The game runs from its own folder (below), so the file has to be named from here, now.
+        os.environ["THISTLE_SCREENSHOT"] = str(Path(args.screenshot).resolve())
+        os.environ["THISTLE_SCREENSHOT_FRAME"] = str(args.screenshot_frame)
+        print(f"(taking a screenshot after frame {args.screenshot_frame}: {os.environ['THISTLE_SCREENSHOT']})")
     print("$ " + " ".join([str(exe)] + rest))
     # Run it from its own folder, where the build put its assets/ (as a
     # player's copy runs), not from wherever this was typed: from src/ the
@@ -423,7 +428,9 @@ def cmd_import_unity(args) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from unity_import import import_unity
     out = Path(args.out).resolve() if args.out else Path.cwd()
-    sys.exit(import_unity(Path(args.unity_project).resolve(), out, args.force))
+    sys.exit(import_unity(Path(args.unity_project).resolve(), out, args.force, scenes=args.scene,
+                          ambient_scale=args.ambient_scale, light_scale=args.light_scale, sun_scale=args.sun_scale,
+                          blender=args.blender or "", convert_fbx=not args.no_fbx))
 
 
 def cmd_version(args) -> None:
@@ -543,6 +550,13 @@ def main() -> None:
     p_unity.add_argument("unity_project", help="the Unity project folder (the one with Assets/ in it)")
     p_unity.add_argument("--out", help="the Thistle project to write into (default: the current folder)")
     p_unity.add_argument("--force", action="store_true", help="overwrite files that already exist")
+    p_unity.add_argument("--scene", action="append", default=[], metavar="NAME",
+                         help="convert only this scene (its file name without .unity, or its path) and the files it uses; repeatable. Default: every scene")
+    p_unity.add_argument("--ambient-scale", type=float, default=0.4, help="multiply Unity's ambient intensity by this (default 0.4)")
+    p_unity.add_argument("--light-scale", type=float, default=0.28, help="multiply point and spot light intensities by this (default 0.28)")
+    p_unity.add_argument("--sun-scale", type=float, default=1.0, help="multiply the directional light's intensity by this (default 1.0)")
+    p_unity.add_argument("--blender", metavar="PATH", help="the Blender (or FBX2glTF) to convert .fbx models with; default: FBX2glTF or blender on PATH, or a standard Blender install")
+    p_unity.add_argument("--no-fbx", action="store_true", help="don't convert .fbx models (just list them)")
     p_unity.set_defaults(func=cmd_import_unity)
 
     p_build = sub.add_parser("build", help="configure + build the project in the current directory")
@@ -555,6 +569,10 @@ def main() -> None:
     p_run.add_argument("--release", action="store_true")
     p_run.add_argument("--server", action="store_true",
                        help="build and run the dedicated server instead; what follows -- goes to it (--port 47001)")
+    p_run.add_argument("--screenshot", metavar="FILE.png",
+                       help="run the game, save one frame as a PNG, and quit (exit code 0, or 3 if it couldn't): for checking rendering and layout without looking")
+    p_run.add_argument("--screenshot-frame", type=int, default=5, metavar="N",
+                       help="which frame to save (default 5: assets and layout have settled; raise it for games that load for a while)")
     p_run.add_argument("args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     p_run.set_defaults(func=cmd_run)
 

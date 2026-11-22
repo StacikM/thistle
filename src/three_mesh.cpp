@@ -233,6 +233,32 @@ MeshData cone_mesh(float radius, float height, int segments) {
     return m;
 }
 
+MeshData wedge_mesh(vec3 size) {
+    const float hx = size.x * 0.5f, hy = size.y * 0.5f, hz = size.z * 0.5f;
+    MeshData m;
+    // Each face is flat-shaded; the winding is fixed up against the intended outward normal, so
+    // the corners below can be listed in any order.
+    auto face = [&m](std::initializer_list<vec3> corners, vec3 normal, std::initializer_list<vec2> uvs) {
+        std::vector<vec3> p(corners);
+        std::vector<vec2> t(uvs);
+        const bool flip = dot(cross(p[1] - p[0], p[2] - p[0]), normal) < 0.0f;
+        const uint32_t base = static_cast<uint32_t>(m.vertices.size());
+        for (size_t i = 0; i < p.size(); ++i) m.vertices.push_back({p[i], normal, t[i]});
+        for (size_t i = 1; i + 1 < p.size(); ++i) {
+            const uint32_t a = base, b = base + static_cast<uint32_t>(i), c = base + static_cast<uint32_t>(i + 1);
+            if (flip) m.indices.insert(m.indices.end(), {a, c, b});
+            else m.indices.insert(m.indices.end(), {a, b, c});
+        }
+    };
+    face({{-hx, -hy, -hz}, {hx, -hy, -hz}, {hx, -hy, hz}, {-hx, -hy, hz}}, {0, -1, 0}, {{0, 0}, {1, 0}, {1, 1}, {0, 1}});
+    face({{-hx, -hy, hz}, {hx, -hy, hz}, {hx, hy, hz}, {-hx, hy, hz}}, {0, 0, 1}, {{0, 0}, {1, 0}, {1, 1}, {0, 1}});
+    // The slope rises from the bottom front edge to the top back edge; its normal is up and toward -Z.
+    face({{-hx, -hy, -hz}, {hx, -hy, -hz}, {hx, hy, hz}, {-hx, hy, hz}}, normalize(vec3{0.0f, size.z, -size.y}), {{0, 0}, {1, 0}, {1, 1}, {0, 1}});
+    face({{hx, -hy, -hz}, {hx, -hy, hz}, {hx, hy, hz}}, {1, 0, 0}, {{0, 1}, {1, 1}, {1, 0}});
+    face({{-hx, -hy, -hz}, {-hx, -hy, hz}, {-hx, hy, hz}}, {-1, 0, 0}, {{1, 1}, {0, 1}, {0, 0}});
+    return m;
+}
+
 MeshData capsule_mesh(float radius, float height, int segments) {
     segments = segments < 3 ? 3 : segments;
     const int half_rings = segments / 2 < 2 ? 2 : segments / 2;

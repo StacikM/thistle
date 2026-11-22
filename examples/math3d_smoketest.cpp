@@ -26,6 +26,29 @@ bool same_rotation(quat a, quat b) { return near(std::fabs(dot(a, b)), 1.0f, 1e-
 } // namespace
 
 int main() {
+    {
+        // MouseLook's recoil kick: added to the camera, never to the player's own aim.
+        App app{{.title = "recoil test", .width = 64, .height = 64}};
+        Frame f;
+        f.dt = 0.1f;
+        MouseLook look;
+        look.pitch = 0.2f;
+        look.yaw = 0.5f;
+        Camera cam;
+        look.kick(0.1f, -0.05f);
+        look.update(cam, f);
+        const float settle = std::exp(-0.1f * look.recoil_recovery);
+        check(near(look.pitch, 0.2f) && near(look.yaw, 0.5f), "recoil: the player's aim (pitch, yaw) isn't touched by a kick");
+        check(near(look.recoil_pitch, 0.1f * settle) && near(look.recoil_yaw, -0.05f * settle), "recoil: the kick eases back toward zero");
+        check(same_rotation(cam.rotation, quat::euler(0.2f + 0.1f * settle, 0.5f - 0.05f * settle)), "recoil: the camera looks where aim plus kick says");
+        check(near(look.forward_flat(), {-std::sin(0.5f), 0.0f, -std::cos(0.5f)}), "recoil: forward_flat() (movement) ignores it");
+        for (int i = 0; i < 60; ++i) look.update(cam, f);
+        check(look.recoil_pitch == 0.0f && look.recoil_yaw == 0.0f && same_rotation(cam.rotation, quat::euler(0.2f, 0.5f)), "recoil: after a few seconds the camera is back exactly on the aim");
+        look.pitch = look.max_pitch;
+        look.kick(0.5f);
+        look.update(cam, f);
+        check(same_rotation(cam.rotation, quat::euler(look.max_pitch, 0.5f)), "recoil: a kick can't push the view past straight up");
+    }
     // vec3 helpers
     check(near(dot({1, 2, 3}, {4, -5, 6}), 12.0f), "dot product");
     check(near(cross({1, 0, 0}, {0, 1, 0}), {0, 0, 1}), "cross X x Y = Z (right-handed)");

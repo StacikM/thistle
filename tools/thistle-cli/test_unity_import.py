@@ -6,7 +6,9 @@ reads every real project). Then, if given the path to thistle_scene_dump, loads
 the result with the engine's own three::Scene3D. Run by ctest as
 unity_import_smoketest; standard library only."""
 import json
+import os
 import math
+import shutil
 import struct
 import subprocess
 import sys
@@ -249,6 +251,10 @@ PrefabInstance:
       propertyPath: m_LocalPosition.y
       value: 99
       objectReference: {fileID: 0}
+    - target: {fileID: 777777, guid: cccccccccccccccccccccccccccccccc, type: 3}
+      propertyPath: m_Foo
+      value: 1
+      objectReference: {fileID: 0}
     m_RemovedComponents: []
   m_SourcePrefab: {fileID: 100100000, guid: cccccccccccccccccccccccccccccccc, type: 3}
 --- !u!1001 &101
@@ -337,9 +343,428 @@ Material:
 """
 
 
+DEPOT_PREFAB = HEADER + """--- !u!1 &1000
+GameObject:
+  m_Component:
+  - component: {fileID: 1001}
+  m_Layer: 0
+  m_Name: Terminal
+  m_TagString: Untagged
+  m_IsActive: 1
+--- !u!4 &1001
+Transform:
+  m_GameObject: {fileID: 1000}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 100, y: 100, z: 100}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children:
+  - {fileID: 1003}
+  m_Father: {fileID: 0}
+--- !u!1 &1002
+GameObject:
+  m_Component:
+  - component: {fileID: 1003}
+  - component: {fileID: 1004}
+  - component: {fileID: 1005}
+  - component: {fileID: 1006}
+  m_Layer: 0
+  m_Name: Screen
+  m_TagString: Untagged
+  m_IsActive: 1
+--- !u!4 &1003
+Transform:
+  m_GameObject: {fileID: 1002}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 2, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 1001}
+--- !u!33 &1004
+MeshFilter:
+  m_GameObject: {fileID: 1002}
+  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}
+--- !u!23 &1005
+MeshRenderer:
+  m_GameObject: {fileID: 1002}
+  m_Materials:
+  - {fileID: 2100000, guid: aaaaaaaa11111111aaaaaaaa11111111, type: 2}
+--- !u!114 &1006
+MonoBehaviour:
+  m_GameObject: {fileID: 1002}
+  m_Script: {fileID: 11500000, guid: dddddddd22222222dddddddd22222222, type: 3}
+  terminalNumber: 0
+  idleYOffset: -1
+"""
+
+
+def depot_scene() -> str:
+    def instance(k: int, material: str = "") -> str:
+        mods = [(1001, "m_LocalPosition.x", 10 * k, ""), (1001, "m_LocalPosition.z", 7 * k, ""), (1000, "m_Name", f"Relay {k}", ""),
+                (1003, "m_LocalPosition.y", 5, ""), (1006, "terminalNumber", k, ""), (1006, "sceneId", 555, ""), (1001, "m_LocalEulerAnglesHint.y", -270, "")]
+        if material:
+            mods.append((1005, "m_Materials.Array.data[0]", "", f"{{fileID: 2100000, guid: {material}, type: 2}}"))
+        body = "".join(f"    - target: {{fileID: {t}, guid: 77777777777777777777777777777777, type: 3}}\n      propertyPath: {p}\n      value: {v}\n      objectReference: {r or '{fileID: 0}'}\n"
+                       for t, p, v, r in mods)
+        return f"""--- !u!1001 &{200 + k}
+PrefabInstance:
+  m_Modification:
+    m_TransformParent: {{fileID: 50}}
+    m_Modifications:
+{body}    m_RemovedComponents: []
+  m_SourcePrefab: {{fileID: 100100000, guid: 77777777777777777777777777777777, type: 3}}
+"""
+    embedded = ramp_asset()[len(HEADER):].replace("&4300000", "&4300001").replace("m_Name: Ramp", "m_Name: Wedge")
+    return HEADER + """--- !u!104 &2
+RenderSettings:
+  m_AmbientMode: 3
+  m_AmbientSkyColor: {r: 0.5, g: 0.5, b: 0.5, a: 1}
+  m_AmbientIntensity: 1
+--- !u!1 &49
+GameObject:
+  m_Component:
+  - component: {fileID: 50}
+  m_Layer: 0
+  m_Name: Terminals
+  m_TagString: Untagged
+  m_IsActive: 1
+--- !u!4 &50
+Transform:
+  m_GameObject: {fileID: 49}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+--- !u!1 &60
+GameObject:
+  m_Component:
+  - component: {fileID: 61}
+  - component: {fileID: 62}
+  m_Layer: 0
+  m_Name: Lamp
+  m_TagString: Untagged
+  m_IsActive: 1
+--- !u!4 &61
+Transform:
+  m_GameObject: {fileID: 60}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 3, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+--- !u!108 &62
+Light:
+  m_GameObject: {fileID: 60}
+  m_Type: 2
+  m_Color: {r: 1, g: 1, b: 1, a: 1}
+  m_Intensity: 6
+  m_Range: 12
+--- !u!1 &70
+GameObject:
+  m_Component:
+  - component: {fileID: 71}
+  - component: {fileID: 72}
+  - component: {fileID: 73}
+  - component: {fileID: 74}
+  m_Layer: 0
+  m_Name: Ramp Piece
+  m_TagString: Untagged
+  m_IsActive: 1
+--- !u!4 &71
+Transform:
+  m_GameObject: {fileID: 70}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 20}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+--- !u!33 &72
+MeshFilter:
+  m_GameObject: {fileID: 70}
+  m_Mesh: {fileID: 4300000, guid: 99999999999999999999999999999999, type: 3}
+--- !u!23 &73
+MeshRenderer:
+  m_GameObject: {fileID: 70}
+  m_Materials:
+  - {fileID: 2100000, guid: bbbbbbbb11111111bbbbbbbb11111111, type: 2}
+--- !u!65 &74
+BoxCollider:
+  m_GameObject: {fileID: 70}
+  m_IsTrigger: 0
+  m_Size: {x: 1, y: 1, z: 1}
+  m_Center: {x: 0, y: 0, z: 0}
+--- !u!1 &80
+GameObject:
+  m_Component:
+  - component: {fileID: 81}
+  - component: {fileID: 82}
+  m_Layer: 0
+  m_Name: Wedge
+  m_TagString: Untagged
+  m_IsActive: 1
+--- !u!4 &81
+Transform:
+  m_GameObject: {fileID: 80}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 30}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+--- !u!33 &82
+MeshFilter:
+  m_GameObject: {fileID: 80}
+  m_Mesh: {fileID: 4300001}
+--- !u!1 &90
+GameObject:
+  m_Component:
+  - component: {fileID: 91}
+  m_Layer: 0
+  m_Name: Badge
+  m_TagString: Untagged
+  m_IsActive: 1
+--- !u!4 &91
+Transform:
+  m_GameObject: {fileID: 90}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 1}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 301}
+--- !u!4 &301 stripped
+Transform:
+  m_CorrespondingSourceObject: {fileID: 1003, guid: 77777777777777777777777777777777, type: 3}
+  m_PrefabInstance: {fileID: 201}
+  m_PrefabAsset: {fileID: 0}
+""" + instance(1) + instance(2, "bbbbbbbb11111111bbbbbbbb11111111") + instance(3) + embedded
+
+
+def mat_doc(name: str, r: float, g: float, b: float, textured: bool = False) -> str:
+    tex = """    m_TexEnvs:
+    - _MainTex:
+        m_Texture: {fileID: 2800000, guid: cccccccc33333333cccccccc33333333, type: 3}
+        m_Scale: {x: 4, y: 2}
+        m_Offset: {x: 0, y: 0}
+    - _BumpMap:
+        m_Texture: {fileID: 2800000, guid: cccccccc44444444cccccccc44444444, type: 3}
+        m_Scale: {x: 4, y: 2}
+        m_Offset: {x: 0, y: 0}
+    - _OcclusionMap:
+        m_Texture: {fileID: 2800000, guid: cccccccc55555555cccccccc55555555, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+""" if textured else ""
+    return HEADER + f"""--- !u!21 &2100000
+Material:
+  m_Name: {name}
+  m_Shader: {{fileID: 46, guid: 0000000000000000f000000000000000, type: 0}}
+  m_SavedProperties:
+{tex}    m_Floats:
+    - _Glossiness: {0.25 if textured else 0.5}
+    - _Metallic: {0.8 if textured else 0.0}
+    m_Colors:
+    - _Color: {{r: {r}, g: {g}, b: {b}, a: 1}}
+"""
+
+
+def test_depot() -> None:
+    """The structure of a real game's scene, as one of its owners sent it: terminals that are instances of one
+    prefab, each placed by overrides on the prefab's root, renamed, given script fields and a material, plus a
+    child attached under a 'stripped' stand-in for an object inside the prefab, a mesh saved inside the scene
+    file, and a second scene that --scene should leave out."""
+    print("a scene built like a real game's: prefab instances with overrides")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        unity, out = root / "Unity", root / "Out"
+        a = unity / "Assets"
+        for d in ("Scenes", "Prefabs", "Materials/A", "Materials/B", "Meshes", "Models", "Scripts"):
+            (a / d).mkdir(parents=True)
+        out.mkdir()
+        (a / "Scenes" / "Metro Depot.unity").write_text(depot_scene(), encoding="utf-8")
+        (a / "Scenes" / "Other.unity").write_text(HEADER + "--- !u!1 &1\nGameObject:\n  m_Component:\n  - component: {fileID: 2}\n  - component: {fileID: 3}\n  m_Name: Thing\n"
+                                                   "--- !u!4 &2\nTransform:\n  m_GameObject: {fileID: 1}\n  m_Father: {fileID: 0}\n"
+                                                   "--- !u!33 &3\nMeshFilter:\n  m_GameObject: {fileID: 1}\n  m_Mesh: {fileID: 4300000, guid: " + "8" * 32 + ", type: 3}\n", encoding="utf-8")
+        (a / "Prefabs" / "Terminal.prefab").write_text(DEPOT_PREFAB, encoding="utf-8")
+        meta(a / "Prefabs" / "Terminal.prefab", "7" * 32)
+        (a / "Materials" / "A" / "Red.mat").write_text(mat_doc("Red", 0.8, 0.1, 0.1, textured=True), encoding="utf-8")
+        (a / "Textures").mkdir()
+        for name, guid in (("concrete.png", "3"), ("concrete_n.png", "4"), ("ao.psd", "5")):
+            (a / "Textures" / name).write_bytes(b"\x89PNG")
+            meta(a / "Textures" / name, "cccccccc" + guid * 8 + "cccccccc" + guid * 8)
+        (a / "Materials" / "B" / "Red.mat").write_text(mat_doc("Red", 0.1, 0.8, 0.1), encoding="utf-8")
+        meta(a / "Materials" / "A" / "Red.mat", "aaaaaaaa11111111aaaaaaaa11111111")
+        meta(a / "Materials" / "B" / "Red.mat", "bbbbbbbb11111111bbbbbbbb11111111")
+        (a / "Meshes" / "Ramp.asset").write_text(ramp_asset(), encoding="utf-8")
+        meta(a / "Meshes" / "Ramp.asset", "9" * 32)
+        (a / "Meshes" / "Unused.asset").write_text(ramp_asset(), encoding="utf-8")
+        meta(a / "Meshes" / "Unused.asset", "8" * 32)
+        (a / "Models" / "ship.glb").write_bytes(b"glTF")
+        (a / "Scripts" / "Door.cs").write_text("class Door {}", encoding="utf-8")
+        meta(a / "Scripts" / "Door.cs", "dddddddd22222222dddddddd22222222")
+
+        def run(*extra: str) -> subprocess.CompletedProcess:
+            return subprocess.run([sys.executable, str(CLI), "import-unity", str(unity), "--out", str(out), "--force", *extra], capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+        r = run("--scene", "metro depot")
+        check(r.returncode == 0, "import-unity --scene 'metro depot' (any case) exits 0")
+        if r.returncode != 0:
+            print(r.stdout + r.stderr)
+        scene = json.loads((out / "assets" / "scenes" / "Metro_Depot.scene.json").read_text(encoding="utf-8"))
+        ents = scene["entities"]
+        by_name = {e["name"]: (i, e) for i, e in enumerate(ents)}
+
+        terminals = [by_name[f"Relay {k}"][1] for k in (1, 2, 3)]
+        check([t["position"] for t in terminals] == [[10.0, 100.0, -7.0], [20.0, 100.0, -14.0], [30.0, 100.0, -21.0]],
+              "three instances of one prefab each land where their overrides put them (not stacked at the prefab's default)")
+        check(all(t["parent"] == by_name["Terminals"][0] for t in terminals), "...under the scene object they were parented to")
+        screens = [e for e in ents if e["name"] == "Screen"]
+        check(len(screens) == 3 and all(near(s["position"], [0, 5, 0]) for s in screens), "an override on a child inside the prefab moves that child")
+        check([next(p[1] for p in s["properties"] if p[0] == "Door.terminalNumber") for s in screens] == ["1", "2", "3"], "script field overrides (terminalNumber) become properties, per instance")
+        check(all(["Door.sceneId", "555"] in s["properties"] and ["unity_script", "Door"] in s["properties"] for s in screens), "...including ones the prefab didn't set")
+        check([s["color"][:3] for s in screens] == [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.8, 0.1, 0.1]], "a material override on one instance changes that instance's color only")
+        look = screens[0]
+        check(look.get("texture") == "assets/Textures/concrete.png" and look.get("normal_texture") == "assets/Textures/concrete_n.png",
+              "a material's base texture and bump map become the entity's texture and normal_texture")
+        check(near(look.get("uv_scale", [0, 0]), [4, 2]) and abs(look.get("metallic", -1) - 0.8) < 1e-6 and abs(look.get("roughness", -1) - 0.75) < 1e-6,
+              "...with its tiling, metallic and roughness (1 - smoothness)")
+        check("texture" not in screens[1] and "metallic" not in screens[1], "a plain material adds none of those (it keeps the classic look)")
+        check(not (out / "assets" / "Textures" / "ao.psd").exists() and "ao.psd" in (out / "unity-import-report.md").read_text(encoding="utf-8"), "an occlusion map in a format Thistle can't load is left out of the entity and reported")
+        badge = by_name["Badge"][1]
+        check(badge["parent"] == next(i for i, e in enumerate(ents) if e["name"] == "Screen"), "an object parented to a stripped stand-in lands under the real object inside instance 1")
+
+        lamp = by_name["Lamp"][1]
+        check(abs(lamp["intensity"] - 1.68) < 1e-6, "a point light's intensity 6 is scaled by 0.28 (--light-scale)")
+        check(abs(scene["environment"]["ambient"] - 0.4) < 1e-6, "ambient 1.0 is scaled by 0.4 (--ambient-scale)")
+
+        ramp = by_name["Ramp Piece"][1]
+        check(ramp["model"] == "assets/Meshes/Ramp.obj" and near(ramp["color"][:3], [0.1, 0.8, 0.1]), "a converted mesh takes its material's color")
+        check((out / "assets" / "Meshes" / "Ramp.obj").exists(), "its .obj is written")
+        check(["collider", "box"] in ramp.get("properties", []), "a solid BoxCollider on a model asks for collider = box (one box around the model)")
+        wedge = by_name["Wedge"][1]
+        check(wedge["kind"] == "model" and wedge["model"] == "assets/meshes/Metro_Depot/Wedge_4300001.obj" and (out / wedge["model"]).exists(), "a mesh saved inside the scene file becomes an .obj too")
+
+        print("--scene leaves everything else out")
+        check(not (out / "assets" / "scenes" / "Other.scene.json").exists(), "the other scene isn't converted")
+        check(not (out / "assets" / "Meshes" / "Unused.obj").exists(), "a mesh nothing in the chosen scene uses isn't converted")
+        check((out / "assets" / "prefabs" / "Terminal.scene.json").exists(), "the prefab the scene instantiates is written")
+        mats = sorted(p.name for p in (out / "assets" / "materials").iterdir())
+        check(mats == ["Red.json", "Red_B.json"], f"two materials with the same name in different folders both survive ({mats})")
+        report = (out / "unity-import-report.md").read_text(encoding="utf-8")
+        check("Only the scene(s) metro depot" in report, "the report says it was filtered")
+
+        r = run("--scene", "nope")
+        check(r.returncode != 0 and "Metro Depot" in r.stdout and "Other" in r.stdout, "an unknown --scene name fails and lists the scenes there are")
+
+        shutil.rmtree(out)
+        out.mkdir()
+        r = run()
+        check(r.returncode == 0 and (out / "assets" / "scenes" / "Other.scene.json").exists() and (out / "assets" / "Meshes" / "Unused.obj").exists(),
+              "without --scene, everything is converted")
+        r = run("--scene", "Other", "--ambient-scale", "1.0")
+        check(r.returncode == 0, "--scene Other works too")
+
+
+
+MAKE_FBX = """
+import bpy, sys
+out = sys.argv[sys.argv.index('--') + 1]
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.object.armature_add(location=(0, 0, 0))
+arm = bpy.context.object
+bpy.ops.object.mode_set(mode='EDIT')
+b = arm.data.edit_bones[0]
+b.name = 'Hips'; b.head = (0, 0, 0); b.tail = (0, 0, 1)
+b2 = arm.data.edit_bones.new('Spine'); b2.head = (0, 0, 1); b2.tail = (0, 0, 2); b2.parent = b
+bpy.ops.object.mode_set(mode='OBJECT')
+bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, 1))
+cube = bpy.context.object
+cube.scale = (0.3, 0.3, 1.0)
+bpy.ops.object.select_all(action='DESELECT')
+cube.select_set(True); arm.select_set(True)
+bpy.context.view_layer.objects.active = arm
+bpy.ops.object.parent_set(type='ARMATURE_AUTO')
+arm.animation_data_create()
+for name, ang in (('Idle', 0.1), ('Run', 0.8)):
+    act = bpy.data.actions.new(name)
+    arm.animation_data.action = act
+    pb = arm.pose.bones['Spine']
+    pb.rotation_mode = 'XYZ'
+    pb.rotation_euler = (0, 0, 0); pb.keyframe_insert('rotation_euler', frame=1)
+    pb.rotation_euler = (ang, 0, 0); pb.keyframe_insert('rotation_euler', frame=12)
+    arm.animation_data.nla_tracks.new().strips.new(name, 1, act)
+arm.animation_data.action = None
+bpy.ops.export_scene.fbx(filepath=out, bake_anim=True, bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False)
+"""
+
+
+def test_fbx(scene_dump) -> None:
+    """An .fbx with a skeleton and two clips, made by Blender, converted by import-unity (which runs Blender) and read by the engine."""
+    print("converting an .fbx (needs Blender, and numpy for its FBX add-on)")
+    blender = shutil.which("blender")
+    if not blender:
+        print("  skipped: no blender on PATH")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        unity, out = root / "U", root / "Out"
+        (unity / "Assets" / "Models").mkdir(parents=True)
+        (unity / "Assets" / "Scenes").mkdir()
+        out.mkdir()
+        fbx = unity / "Assets" / "Models" / "robot.fbx"
+        made = subprocess.run([blender, "--background", "--factory-startup", "--python-expr", MAKE_FBX, "--", str(fbx)], capture_output=True, text=True, timeout=300)
+        if not fbx.exists():
+            print("  skipped: Blender couldn't write an .fbx here (its FBX add-on needs numpy): " + " | ".join((made.stdout + made.stderr).strip().splitlines()[-2:]))
+            return
+        meta(fbx, "5" * 32)
+        (unity / "Assets" / "Scenes" / "S.unity").write_text(HEADER + """--- !u!1001 &100
+PrefabInstance:
+  m_Modification:
+    m_TransformParent: {fileID: 0}
+    m_Modifications:
+    - target: {fileID: 400000, guid: 55555555555555555555555555555555, type: 3}
+      propertyPath: m_LocalPosition.x
+      value: 3
+      objectReference: {fileID: 0}
+    m_RemovedComponents: []
+  m_SourcePrefab: {fileID: 100100000, guid: 55555555555555555555555555555555, type: 3}
+""", encoding="utf-8")
+
+        def run(*extra: str, env=None) -> subprocess.CompletedProcess:
+            return subprocess.run([sys.executable, str(CLI), "import-unity", str(unity), "--out", str(out), "--force", *extra], capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", env=env, timeout=600)
+
+        r = run()
+        glb = out / "assets" / "Models" / "robot.glb"
+        check(r.returncode == 0 and glb.exists(), "the .fbx is converted to a .glb next to where the scene points")
+        scene = json.loads((out / "assets" / "scenes" / "S.scene.json").read_text(encoding="utf-8"))
+        ent = scene["entities"][0]
+        check(ent["kind"] == "model" and ent["model"] == "assets/Models/robot.glb" and ent["position"][0] == 3.0, "the scene's model entity points at it, placed by its override")
+        report = (out / "unity-import-report.md").read_text(encoding="utf-8")
+        check("converted to .glb with Blender" in report and "Models Thistle can't read yet" not in report, "the report says it was converted, and lists nothing left to do by hand")
+        if scene_dump:
+            d = subprocess.run([scene_dump, "--model", str(glb)], capture_output=True, text=True)
+            check(d.returncode == 0 and "tris=12" in d.stdout, "the engine loads the model (the cube's 12 triangles)")
+            check("joints=" in d.stdout and int(d.stdout.split("joints=")[1].split()[0]) >= 2, "...with its skeleton")
+            clips = d.stdout.split("animations=")[1].strip().strip(",").split(",") if "animations=" in d.stdout else []
+            check(sorted(clips) == ["Idle", "Run"], f"...and both animation clips, named plainly {clips}")
+
+        shutil.rmtree(out)
+        out.mkdir()
+        r = run("--no-fbx")
+        report = (out / "unity-import-report.md").read_text(encoding="utf-8")
+        check(not (out / "assets" / "Models" / "robot.glb").exists() and "Models Thistle can't read yet" in report and "robot.fbx" in report, "--no-fbx leaves it for you and says so")
+        env = dict(os.environ, PATH=os.devnull)
+        env.pop("BLENDER", None)
+        r = run(env=env)
+        check(r.returncode == 0 and "Blender or FBX2glTF wasn't found" in (out / "unity-import-report.md").read_text(encoding="utf-8"),
+              "with no Blender anywhere it still imports, and says what to install")
+
+
 def main() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from unity_import import parse_unity_yaml, _flow
+
+    test_depot()
+    test_fbx(sys.argv[1] if len(sys.argv) > 1 else None)
 
     print("the YAML subset")
     check(_flow("{fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}") == {"fileID": 10202, "guid": "0000000000000000e000000000000000", "type": 0},
@@ -377,7 +802,7 @@ def main() -> None:
         meta(a / "Textures" / "t.png", G_TEX)
 
         print("importing")
-        r = subprocess.run([sys.executable, str(CLI), "import-unity", str(unity), "--out", str(out)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        r = subprocess.run([sys.executable, str(CLI), "import-unity", str(unity), "--out", str(out), "--no-fbx"], capture_output=True, text=True, encoding="utf-8", errors="replace")
         check(r.returncode == 0, "thistle import-unity exits 0")
         if r.returncode != 0:
             print(r.stdout + r.stderr)
@@ -411,7 +836,7 @@ def main() -> None:
         lamp = ents["Lid Lamp"][1]
         check(lamp["kind"] == "spot_light" and lamp["parent"] == ents["Crate A"][0], "the prefab's child light came along, under the crate")
         check(abs(lamp["spot_angle"] - math.radians(30)) < 1e-5 and lamp["range"] == 8, "Unity's full spot angle becomes Thistle's half angle")
-        check(near(lamp["position"], [0, 1, 0]), "an override aimed at a nested object (fileID 9003) did not move the lamp")
+        check(near(lamp["position"], [0, 99, 0]), "an override aimed at an object inside the prefab (fileID 9003, not its root) moves that object")
         ship = next(e for e in scene["entities"] if e["kind"] == "model")
         check(ship["model"] == "assets/Models/ship.glb" and near(ship["position"], [0, 4, 0]), "a prefab instance of a .glb is a model entity, with its override")
         check("Directional Light" not in ents and "Sun" not in ents, "a directional light is the sun, not an entity")
@@ -421,7 +846,7 @@ def main() -> None:
         check(near(sun["direction"], [0.0, -0.8660254, -0.5]), "the sun's direction comes from the light's rotation, mirrored")
         fog = scene["environment"]["fog"]
         check(fog["enabled"] and fog["start"] == 20 and fog["end"] == 120 and fog["match_sky"] is False, "linear fog settings")
-        check(near(scene["environment"]["sky"]["top"], [0.2, 0.3, 0.4, 1.0]) and scene["environment"]["ambient"] == 0.8, "flat ambient color and intensity")
+        check(near(scene["environment"]["sky"]["top"], [0.2, 0.3, 0.4, 1.0]) and abs(scene["environment"]["ambient"] - 0.32) < 1e-6, "flat ambient color, and intensity 0.8 scaled by 0.4")
 
         print("mesh .asset files (MapForge and other tools bake meshes this way)")
         ramp = ents["Ramp Piece"][1]
@@ -456,7 +881,7 @@ def main() -> None:
         report = (out / "unity-import-report.md").read_text(encoding="utf-8")
         check("C# script Door" in report, "the report lists the script it didn't translate")
         check("rock.fbx" in report, "the report lists the .fbx to convert")
-        check("overrides on objects inside" in report, "the report mentions the override it couldn't apply")
+        check("couldn't find in the prefab" in report and "m_Foo" in report, "the report lists the override whose target isn't in the prefab, by property")
 
         print("re-running")
         before = scene_path.read_text(encoding="utf-8")

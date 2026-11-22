@@ -24,6 +24,8 @@ ma_engine* audio_engine();
 ma_sound* sfx_group();
 int frame_width();
 int frame_height();
+// The frame just drawn, as top-down RGBA bytes (alpha as the screen has it), or false with the reason. screenshot.cpp.
+bool read_framebuffer(int w, int h, std::vector<unsigned char>& rgba, std::string& why);
 
 // --- implemented in debug_ui.cpp (or debug_ui_off.cpp), called from thistle.cpp ---
 void debug_ui_setup();

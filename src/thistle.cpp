@@ -7,6 +7,7 @@
 #include "sokol_gl.h"
 
 #include "stb_image.h"
+#include "stb_image_write.h"
 #include "miniaudio.h"
 #include "fontstash.h"
 #include "sokol_fontstash.h"
@@ -803,6 +804,31 @@ void draw_debug(Frame& f) {
 }
 #endif
 
+// THISTLE_SCREENSHOT=out.png: after frame THISTLE_SCREENSHOT_FRAME (default 5), write the screen to that
+// file and quit, exit code 0, or 3 with a message if it couldn't. For checking rendering and layout from a
+// test or by an AI agent, without anyone looking at a window. Nothing to add to a game.
+void maybe_screenshot(int w, int h) {
+    static const char* path = std::getenv("THISTLE_SCREENSHOT");
+    if (!path || !*path) return;
+    static const char* frame_env = std::getenv("THISTLE_SCREENSHOT_FRAME");
+    static const uint64_t frame = frame_env ? static_cast<uint64_t>(std::max(1, std::atoi(frame_env))) : 5;
+    if (g_state->frame_index + 1 < frame) return;
+    std::vector<unsigned char> rgba;
+    std::string why;
+    if (!detail::read_framebuffer(w, h, rgba, why)) {
+        log_error(std::string("screenshot: ") + why);
+        std::exit(3);
+    }
+    for (size_t i = 3; i < rgba.size(); i += 4) rgba[i] = 255; // a screenshot isn't see-through, whatever the window's alpha was
+    if (!stbi_write_png(path, w, h, 4, rgba.data(), w * 4)) {
+        log_error(std::string("screenshot: couldn't write ") + path);
+        std::exit(3);
+    }
+    log_info(std::string("screenshot: wrote ") + path + " (" + std::to_string(w) + "x" + std::to_string(h) + ", frame " + std::to_string(g_state->frame_index + 1) + ")");
+    std::fflush(stdout);
+    std::exit(0);
+}
+
 void frame_cb() {
     const int w = sapp_width();
     const int h = sapp_height();
@@ -903,6 +929,7 @@ void frame_cb() {
         sg_draw(0, 3, 1);
         detail::debug_ui_render();
         sg_end_pass();
+        maybe_screenshot(w, h);
         sg_commit();
     } else {
         sg_pass pass = {};
@@ -913,6 +940,7 @@ void frame_cb() {
         detail::three_draw_layers();
         detail::debug_ui_render();
         sg_end_pass();
+        maybe_screenshot(w, h);
         sg_commit();
     }
     detail::three_end_frame();

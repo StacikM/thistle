@@ -269,6 +269,7 @@ add_library(thistle STATIC
     src/three_camera.cpp
     src/three_mesh.cpp
     src/three_render.cpp
+    src/screenshot.cpp
     src/three_models.cpp
     src/three_occlusion.cpp
     src/three_model.cpp
@@ -677,6 +678,10 @@ if(THISTLE_BUILD_SMOKETEST)
     add_executable(thistle_post_demo examples/post_demo.cpp)
     target_link_libraries(thistle_post_demo PRIVATE thistle)
 
+    # Draws a known picture; tools/test_screenshot.py runs it with THISTLE_SCREENSHOT set and reads the PNG back.
+    add_executable(thistle_screenshot_smoketest examples/screenshot_smoketest.cpp)
+    target_link_libraries(thistle_screenshot_smoketest PRIVATE thistle)
+
     # Prints a .scene.json as Scene3D loads it; the Unity importer's test uses it.
     add_executable(thistle_scene_dump examples/scene_dump.cpp)
     target_link_libraries(thistle_scene_dump PRIVATE thistle)
@@ -754,6 +759,15 @@ if(THISTLE_BUILD_SMOKETEST)
     if(Python3_Interpreter_FOUND)
         add_test(NAME cli_smoketest COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/thistle-cli/test_cli.py")
         set_tests_properties(cli_smoketest PROPERTIES TIMEOUT 60)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            find_program(THISTLE_XVFB_RUN xvfb-run)
+            if(THISTLE_XVFB_RUN)
+                # THISTLE_SCREENSHOT end to end, on a virtual display with software OpenGL. Not registered on Windows
+                # or macOS: a runner's desktop isn't a given there, and the Windows read-back is checked by hand.
+                add_test(NAME screenshot_smoketest COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_screenshot.py" "$<TARGET_FILE:thistle_screenshot_smoketest>")
+                set_tests_properties(screenshot_smoketest PROPERTIES TIMEOUT 120)
+            endif()
+        endif()
         add_test(NAME unity_import_smoketest COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/thistle-cli/test_unity_import.py" "$<TARGET_FILE:thistle_scene_dump>")
         set_tests_properties(unity_import_smoketest PROPERTIES TIMEOUT 60)
     endif()

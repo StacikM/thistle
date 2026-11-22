@@ -40,7 +40,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev
+          sudo apt-get install -y libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev xvfb libgl1-mesa-dri
 
       # sokol/stb/miniaudio/fontstash are fetched from `master` (only box2d
       # is pinned — see CMakeLists.txt), so this cache can go stale if
