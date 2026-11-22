@@ -182,6 +182,7 @@ BUILTIN_MESHES = {10202: "box", 10206: "cylinder", 10207: "sphere", 10208: "caps
 MODEL_EXT = {".glb", ".gltf", ".obj"}
 # A Unity Mesh saved as an .asset (MapForge and other tools bake their geometry this way).
 MESH_ASSET_EXT = ".asset"
+TEXTURE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tga"}
 CONVERT_MODEL_EXT = {".fbx", ".dae", ".blend", ".3ds", ".dxf", ".max", ".ma", ".mb"}
 COPY_EXT = MODEL_EXT | {".mtl", ".bin", ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".wav", ".ogg", ".mp3", ".flac", ".ttf", ".otf"}
 VEC_KEYS = {"position": ("m_LocalPosition", 3), "rotation": ("m_LocalRotation", 4), "scale": ("m_LocalScale", 3)}
@@ -337,6 +338,7 @@ class Node:
         self.children = []
         self.sun_only = False  # a directional light's object: it only sets the scene's sun
         self.tintable = False  # a shape or a converted mesh: Unity's material color can be its color (a glTF model has its own)
+        self.look = {}         # texture, normal_texture, metallic, roughness, uv_scale: what a tintable node's material adds to its color
 
 
 class Importer:
@@ -543,6 +545,11 @@ class Importer:
                     t.scale = _vec(c.data.get("m_Size"), "xyz", (1, 1, 1))
                     extras.append(t)
                     self.count("trigger volumes")
+                elif node.kind == "model":
+                    # A model is solid by its triangles; a dense one is slow to walk on. Unity's collider is the
+                    # usual answer to that, so ask for one box around the model (its size, not the collider's own).
+                    self.set_property(node, "collider", "box")
+                    self.count("solid BoxColliders on models (collider=box: one box around the whole model)")
                 else:
                     self.skipped_types["BoxCollider (solid: shapes and models are solid already)"] = self.skipped_types.get("BoxCollider (solid: shapes and models are solid already)", 0) + 1
             elif c.class_id == 20:
@@ -601,6 +608,7 @@ class Importer:
             info = self.read_material(rel)
             if info and node.tintable:
                 node.color = info["color"]
+                node.look = {k: info[k] for k in ("texture", "normal_texture", "metallic", "roughness", "uv_scale", "metallic_set") if info.get(k) is not None}
 
     def light_node(self, node: Node, c) -> "Node | None":
         kind = c.data.get("m_Type", 2)
@@ -770,12 +778,17 @@ class Importer:
             if isinstance(entry, dict):
                 floats.update(entry)
         textures = {}
+        scales = {}
         for entry in saved.get("m_TexEnvs") or []:
             if isinstance(entry, dict):
                 for key, tex in entry.items():
                     path = self.asset_of((tex or {}).get("m_Texture"))
                     if path:
+                        if Path(path).suffix.lower() not in TEXTURE_EXT:
+                            self.warn(f"{rel}: texture {path} is a {Path(path).suffix} file, which Thistle can't load; convert it to PNG.")
+                            continue
                         textures[key] = "assets/" + path
+                        scales[key] = _vec((tex or {}).get("m_Scale"), "xy", (1, 1))
                         self.use(path)
         base = colors.get("_BaseColor") or colors.get("_Color")
         smooth = floats.get("_Smoothness", floats.get("_Glossiness", 0.5))
@@ -796,6 +809,10 @@ class Importer:
             "metallic_roughness_texture": textures.get("_MetallicGlossMap"),
             "occlusion_texture": textures.get("_OcclusionMap"),
             "emissive_texture": textures.get("_EmissionMap"),
+            # What an entity can carry: a base texture, a bump map, tiling, and metallic/roughness
+            # (only when the material is actually metallic or bumpy, so plain materials keep the classic look).
+            "uv_scale": (scales.get("_BaseMap") or scales.get("_MainTex") or [1.0, 1.0]) if (textures.get("_BaseMap") or textures.get("_MainTex")) else None,
+            **({"metallic_set": True} if float(floats.get("_Metallic", 0.0)) >= 0.05 or textures.get("_BumpMap") else {}),
         }
 
     # -- flattening and writing --
@@ -821,6 +838,16 @@ class Importer:
              "rotation": _round(_mirror_rot(node.rot)), "scale": _round(scale), "color": _round(node.color)}
         if node.kind == "model":
             e["model"] = node.model
+        look = node.look
+        if look.get("texture"):
+            e["texture"] = look["texture"]
+        if look.get("normal_texture"):
+            e["normal_texture"] = look["normal_texture"]
+        if look.get("metallic_set"):
+            e["metallic"] = round(float(look["metallic"]), 4)
+            e["roughness"] = round(float(look["roughness"]), 4)
+        if look.get("uv_scale") and look["uv_scale"] != [1.0, 1.0]:
+            e["uv_scale"] = _round(look["uv_scale"], 4)
         if node.kind in ("point_light", "spot_light"):
             e["intensity"] = round(node.intensity, 6)
             e["range"] = round(node.range, 6)

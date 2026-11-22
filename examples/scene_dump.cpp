@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
         std::printf("load failed\n");
         return 1;
     }
-    const char* kinds[] = {"empty", "model", "box", "sphere", "cylinder", "cone", "plane", "point_light", "spot_light", "trigger", "spawn", "voxels"};
+    const char* kinds[] = {"empty", "model", "box", "sphere", "cylinder", "cone", "plane", "point_light", "spot_light", "trigger", "spawn", "voxels", "wedge"};
     for (size_t i = 0; i < scene.entities.size(); ++i) {
         const SceneEntity& e = scene.entities[i];
         const Transform t = scene.world_transform(static_cast<int>(i));

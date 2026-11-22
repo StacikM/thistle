@@ -464,6 +464,7 @@ GameObject:
   - component: {fileID: 71}
   - component: {fileID: 72}
   - component: {fileID: 73}
+  - component: {fileID: 74}
   m_Layer: 0
   m_Name: Ramp Piece
   m_TagString: Untagged
@@ -485,6 +486,12 @@ MeshRenderer:
   m_GameObject: {fileID: 70}
   m_Materials:
   - {fileID: 2100000, guid: bbbbbbbb11111111bbbbbbbb11111111, type: 2}
+--- !u!65 &74
+BoxCollider:
+  m_GameObject: {fileID: 70}
+  m_IsTrigger: 0
+  m_Size: {x: 1, y: 1, z: 1}
+  m_Center: {x: 0, y: 0, z: 0}
 --- !u!1 &80
 GameObject:
   m_Component:
@@ -530,14 +537,29 @@ Transform:
 """ + instance(1) + instance(2, "bbbbbbbb11111111bbbbbbbb11111111") + instance(3) + embedded
 
 
-def mat_doc(name: str, r: float, g: float, b: float) -> str:
+def mat_doc(name: str, r: float, g: float, b: float, textured: bool = False) -> str:
+    tex = """    m_TexEnvs:
+    - _MainTex:
+        m_Texture: {fileID: 2800000, guid: cccccccc33333333cccccccc33333333, type: 3}
+        m_Scale: {x: 4, y: 2}
+        m_Offset: {x: 0, y: 0}
+    - _BumpMap:
+        m_Texture: {fileID: 2800000, guid: cccccccc44444444cccccccc44444444, type: 3}
+        m_Scale: {x: 4, y: 2}
+        m_Offset: {x: 0, y: 0}
+    - _OcclusionMap:
+        m_Texture: {fileID: 2800000, guid: cccccccc55555555cccccccc55555555, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+""" if textured else ""
     return HEADER + f"""--- !u!21 &2100000
 Material:
   m_Name: {name}
   m_Shader: {{fileID: 46, guid: 0000000000000000f000000000000000, type: 0}}
   m_SavedProperties:
-    m_Floats:
-    - _Glossiness: 0.5
+{tex}    m_Floats:
+    - _Glossiness: {0.25 if textured else 0.5}
+    - _Metallic: {0.8 if textured else 0.0}
     m_Colors:
     - _Color: {{r: {r}, g: {g}, b: {b}, a: 1}}
 """
@@ -562,7 +584,11 @@ def test_depot() -> None:
                                                    "--- !u!33 &3\nMeshFilter:\n  m_GameObject: {fileID: 1}\n  m_Mesh: {fileID: 4300000, guid: " + "8" * 32 + ", type: 3}\n", encoding="utf-8")
         (a / "Prefabs" / "Terminal.prefab").write_text(DEPOT_PREFAB, encoding="utf-8")
         meta(a / "Prefabs" / "Terminal.prefab", "7" * 32)
-        (a / "Materials" / "A" / "Red.mat").write_text(mat_doc("Red", 0.8, 0.1, 0.1), encoding="utf-8")
+        (a / "Materials" / "A" / "Red.mat").write_text(mat_doc("Red", 0.8, 0.1, 0.1, textured=True), encoding="utf-8")
+        (a / "Textures").mkdir()
+        for name, guid in (("concrete.png", "3"), ("concrete_n.png", "4"), ("ao.psd", "5")):
+            (a / "Textures" / name).write_bytes(b"\x89PNG")
+            meta(a / "Textures" / name, "cccccccc" + guid * 8 + "cccccccc" + guid * 8)
         (a / "Materials" / "B" / "Red.mat").write_text(mat_doc("Red", 0.1, 0.8, 0.1), encoding="utf-8")
         meta(a / "Materials" / "A" / "Red.mat", "aaaaaaaa11111111aaaaaaaa11111111")
         meta(a / "Materials" / "B" / "Red.mat", "bbbbbbbb11111111bbbbbbbb11111111")
@@ -594,6 +620,13 @@ def test_depot() -> None:
         check([next(p[1] for p in s["properties"] if p[0] == "Door.terminalNumber") for s in screens] == ["1", "2", "3"], "script field overrides (terminalNumber) become properties, per instance")
         check(all(["Door.sceneId", "555"] in s["properties"] and ["unity_script", "Door"] in s["properties"] for s in screens), "...including ones the prefab didn't set")
         check([s["color"][:3] for s in screens] == [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.8, 0.1, 0.1]], "a material override on one instance changes that instance's color only")
+        look = screens[0]
+        check(look.get("texture") == "assets/Textures/concrete.png" and look.get("normal_texture") == "assets/Textures/concrete_n.png",
+              "a material's base texture and bump map become the entity's texture and normal_texture")
+        check(near(look.get("uv_scale", [0, 0]), [4, 2]) and abs(look.get("metallic", -1) - 0.8) < 1e-6 and abs(look.get("roughness", -1) - 0.75) < 1e-6,
+              "...with its tiling, metallic and roughness (1 - smoothness)")
+        check("texture" not in screens[1] and "metallic" not in screens[1], "a plain material adds none of those (it keeps the classic look)")
+        check(not (out / "assets" / "Textures" / "ao.psd").exists() and "ao.psd" in (out / "unity-import-report.md").read_text(encoding="utf-8"), "an occlusion map in a format Thistle can't load is left out of the entity and reported")
         badge = by_name["Badge"][1]
         check(badge["parent"] == next(i for i, e in enumerate(ents) if e["name"] == "Screen"), "an object parented to a stripped stand-in lands under the real object inside instance 1")
 
@@ -604,6 +637,7 @@ def test_depot() -> None:
         ramp = by_name["Ramp Piece"][1]
         check(ramp["model"] == "assets/Meshes/Ramp.obj" and near(ramp["color"][:3], [0.1, 0.8, 0.1]), "a converted mesh takes its material's color")
         check((out / "assets" / "Meshes" / "Ramp.obj").exists(), "its .obj is written")
+        check(["collider", "box"] in ramp.get("properties", []), "a solid BoxCollider on a model asks for collider = box (one box around the model)")
         wedge = by_name["Wedge"][1]
         check(wedge["kind"] == "model" and wedge["model"] == "assets/meshes/Metro_Depot/Wedge_4300001.obj" and (out / wedge["model"]).exists(), "a mesh saved inside the scene file becomes an .obj too")
 

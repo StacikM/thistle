@@ -1742,6 +1742,10 @@ MeshData box_mesh(vec3 size = {1.0f, 1.0f, 1.0f});
 MeshData sphere_mesh(float radius = 0.5f, int rings = 16, int segments = 24);
 MeshData cylinder_mesh(float radius = 0.5f, float height = 1.0f, int segments = 24);
 MeshData cone_mesh(float radius = 0.5f, float height = 1.0f, int segments = 24);
+// A ramp: a triangular prism that is full height at its +Z end and comes to an
+// edge at -Z, so the sloped face looks up and toward -Z. `size` is the box it
+// fits in; like the other shapes it's centered on the origin.
+MeshData wedge_mesh(vec3 size = {1.0f, 1.0f, 1.0f});
 MeshData capsule_mesh(float radius = 0.5f, float height = 2.0f, int segments = 16); // height includes the caps
 // Flat on the ground (facing +Y). uv_repeat tiles the texture that many times.
 MeshData plane_mesh(float width = 1.0f, float depth = 1.0f, float uv_repeat = 1.0f);
@@ -2345,6 +2349,7 @@ public:
     void sphere(vec3 center, float radius, rgba color = white);
     void cylinder(vec3 center, float radius, float height, rgba color = white);
     void cone(vec3 center, float radius, float height, rgba color = white);
+    void wedge(vec3 center, vec3 size, rgba color = white); // a ramp, see wedge_mesh(): high end toward +Z
     void plane(vec3 center, vec2 size, rgba color = white);
     // Rotated, too: a 1 m cube / 1 m wide sphere, cylinder and cone, scaled
     // by transform.scale — so world.box(physics.transform(crate, size)).
@@ -2360,6 +2365,8 @@ public:
     void cone(const T& transform, rgba color = white) { shape(3, transform, color); }
     template <class T> requires std::is_same_v<T, Transform>
     void plane(const T& transform, rgba color = white) { shape(4, transform, color); } // 1x1 m, facing +Y
+    template <class T> requires std::is_same_v<T, Transform>
+    void wedge(const T& transform, rgba color = white) { shape(5, transform, color); } // a 1 m cube cut into a ramp
 
     // Debug lines: 1 pixel wide, unlit. on_top draws them through everything
     // (gizmos, selection outlines); otherwise they're hidden behind solid objects.
@@ -2373,7 +2380,7 @@ public:
     void render(const Frame& f, const Camera& camera, Rect viewport); // viewport in pixels, top-left origin
 
 private:
-    void shape(int kind, const Transform& transform, rgba color); // 0 box, 1 sphere, 2 cylinder, 3 cone, 4 plane
+    void shape(int kind, const Transform& transform, rgba color); // 0 box, 1 sphere, 2 cylinder, 3 cone, 4 plane, 5 wedge
     std::unique_ptr<struct WorldImpl> impl_;
 };
 
@@ -3105,13 +3112,21 @@ private:
 //   // every frame:
 //   level.draw(world);
 struct SceneEntity {
-    enum class Kind { Empty, Model, Box, Sphere, Cylinder, Cone, Plane, PointLight, SpotLight, Trigger, Spawn, Voxels };
+    enum class Kind { Empty, Model, Box, Sphere, Cylinder, Cone, Plane, PointLight, SpotLight, Trigger, Spawn, Voxels, Wedge };
     std::string name;
     Kind kind = Kind::Empty;
     int parent = -1;       // index into Scene3D::entities, -1 = at the top
     Transform transform;   // relative to the parent
     std::string model;     // Kind::Model: its file, as load_model() takes it
     rgba color = white;    // shapes: their color; models: a tint; lights: the light's color
+    // Models and shapes: a look beyond the flat color. Paths, like `model`; empty = none. Setting any
+    // of these (or a uv_scale other than 1) draws the entity with its own material: for a model, that
+    // replaces every part's material, so leave them alone on a model that has its own textures.
+    std::string texture;         // base color image
+    std::string normal_texture;  // a bump map; needs the physically based shading below, which it turns on
+    float metallic = -1.0f;      // -1 = not set; 0..1 turns on physically based shading (Material::pbr)
+    float roughness = -1.0f;     // -1 = not set; 0..1 likewise
+    vec2 uv_scale{1.0f, 1.0f};   // how many times the texture repeats across a face (tiling)
     float intensity = 1.0f; // lights
     float range = 10.0f;    // lights
     float spot_angle = radians(30.0f); // spot lights: half the cone's opening

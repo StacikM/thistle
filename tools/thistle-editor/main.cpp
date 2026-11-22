@@ -84,6 +84,7 @@ const char* kind_label(SceneEntity::Kind k) {
         case SceneEntity::Kind::Trigger: return "Trigger";
         case SceneEntity::Kind::Spawn: return "Spawn point";
         case SceneEntity::Kind::Voxels: return "Blocks";
+        case SceneEntity::Kind::Wedge: return "Wedge";
     }
     return "?";
 }
@@ -597,6 +598,7 @@ int main(int argc, char** argv) {
             case SceneEntity::Kind::Sphere: e.color = rgb(0.85f, 0.35f, 0.3f); break;
             case SceneEntity::Kind::Cylinder: e.color = rgb(0.4f, 0.6f, 0.85f); break;
             case SceneEntity::Kind::Cone: e.color = rgb(0.8f, 0.7f, 0.3f); break;
+            case SceneEntity::Kind::Wedge: e.color = rgb(0.6f, 0.65f, 0.55f); break;
             case SceneEntity::Kind::Plane: e.color = rgb(0.6f, 0.6f, 0.6f); e.transform.scale = {4, 1, 4}; break;
             case SceneEntity::Kind::PointLight: e.color = rgb(1.0f, 0.85f, 0.6f); e.intensity = 2.0f; break;
             case SceneEntity::Kind::SpotLight:

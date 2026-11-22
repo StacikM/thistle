@@ -53,6 +53,7 @@ player.update(solid, look.move_input(f), f.key_pressed(Key::Space), f.dt);
   - Shapes and models, by their triangles, turned and scaled as placed. Planes are one-sided floors.
   - Block objects, as their live voxel worlds. Breaking a block opens the gap at once. They collide as if unturned: the built-in collision treats grids as axis-aligned, and a turned one logs a warning.
   - Not lights, triggers, spawn points or empties, and not anything with the property `solid` = `false` (decoration, pickups, a sea you should fall into).
+  - The property **`collider`** picks how a model collides: `mesh` (the default: its triangles, exactly), `box` (one box around the whole model: far cheaper to walk on than a dense mesh, but a statue's arms stick out of it) or `none` (the same as `solid` = `false`). Anything else logs and uses the mesh.
 
   It returns the collision ids it added. The level's voxel worlds must outlive the `CollisionWorld`. The `fps`, `third-person` and `voxel` templates (`thistle new --template ...`) are complete games built this way.
 - **Physics**: a level doesn't make rigid bodies by itself, because only your game knows what should fall and what's decoration. With `Physics3D` (see [physics3d.md](physics3d.md)), the usual start is to make the shapes solid:
@@ -84,7 +85,7 @@ It's all plain data, so games can make levels too, or change one after loading i
 
 ## Shapes and sizes
 
-Shapes are unit-sized and scaled by the transform, the same as `World::box()` and friends: a box is 1×1×1, a sphere is 1 across, a cylinder and a cone are 1 across and 1 tall, and a plane is 1×1. All are centered on their position. So a `scale` of (4, 1, 2) on a box makes a 4×1×2 box, and on a plane a 4×2 floor.
+Shapes are unit-sized and scaled by the transform, the same as `World::box()` and friends: a box is 1×1×1, a sphere is 1 across, a cylinder and a cone are 1 across and 1 tall, a plane is 1×1, and a **wedge** is a 1 m cube cut into a ramp. All are centered on their position. A wedge is full height at its +Z end and comes to an edge at -Z (the sloped face looks up and toward -Z); turn it to point the ramp where you want. A `scale` of (4, 2, 6) makes a ramp 4 wide, 2 high at the top and 6 long. It's also `World::wedge()` and `wedge_mesh()`. So a `scale` of (4, 1, 2) on a box makes a 4×1×2 box, and on a plane a 4×2 floor.
 
 ## The file
 
@@ -107,7 +108,8 @@ JSON, written with sorted keys and two-space indents so it diffs well in git:
 }
 ```
 
-- `kind` is one of `empty`, `model`, `box`, `sphere`, `cylinder`, `cone`, `plane`, `point_light`, `spot_light`, `trigger`, `spawn`, `voxels`. Anything else reads as `empty`.
+- `kind` is one of `empty`, `model`, `box`, `sphere`, `cylinder`, `cone`, `plane`, `point_light`, `spot_light`, `trigger`, `spawn`, `voxels`, `wedge`. Anything else reads as `empty`.
+- Models and shapes can add `"texture"` and `"normal_texture"` (image paths, like `model`), `"metallic"` and `"roughness"` (0 to 1: they turn on physically based shading, see [3d.md](3d.md#pbr-materials-post-processing-lod-occlusion-culling)) and `"uv_scale"` (`[x, y]`: how many times the texture repeats across a face). None of them is written unless it's set, so a file that doesn't use them is unchanged. Any of them draws the entity with its own material: on a model that replaces every part's material, so leave them off a model that has textures of its own.
 - Block objects add `"blocks"`: `VoxelWorld::serialize()` (block types, blocks, block size; run-length compressed) in base64. Measured: the editor's 75-block example with 13 block types is 1.2 KB of text, and a 448-block MagicaVoxel tree is 1.1 KB. Size grows with how varied the blocks are more than with how many there are. With a texture atlas, they also add `"atlas"` (an image path) and `"atlas_tile"` (its tile size in pixels). Damaged block data loads as an empty object, with a warning, and the rest of the scene still loads.
 - `rotation` is a quaternion (x, y, z, w). `spot_angle` is in radians, half the cone's opening.
 - Models add `"model": "assets/ship.glb"`, lights add `intensity` and `range`, spot lights add `spot_angle`. Properties are a list of pairs, so their order is kept.
@@ -122,6 +124,9 @@ JSON, written with sorted keys and two-space indents so it diffs well in git:
 - **`world_transform` walks up the parents each call.** Levels have hundreds of things, not millions, so that's cheap, but cache it for anything that doesn't move.
 
 ## What's been verified
+
+- **Per-entity materials, wedges and the `collider` property** (`scene3d_smoketest`, `mesh3d_smoketest`): the new fields and the wedge kind round-trip byte for byte, and an entity that sets none of them writes none of the keys; the wedge mesh is a closed, outward-wound mesh with the right volume and slope normal; a character walks up a wedge ramp onto a platform and stands at the right height; `collider = box` makes a ray that misses a dense sphere's curve land on its bounding box, and `none` adds nothing. **Not checked:** how a textured entity *looks* (the test draws it without error; nobody has looked at it), and the Thistle Editor has no controls for any of it (it loads and draws them, and a wedge has a name and color there).
+- **A known gap in the character controller, found while testing the wedge:** a character that walks up a ramp whose high end is a bare vertical wall (nothing to step onto) and keeps pushing into that wall can sink through the slope. Ramps that lead onto something, which is what ramps are for, work. It's old code this change didn't touch; it needs its own look.
 
 - **`scene3d_smoketest`** (ctest, headless) checks:
   - world transforms through a rotated, scaled parent, against hand-computed positions

@@ -29,11 +29,11 @@ The Unity project has to be **text-serialized** (Edit > Project Settings > Edito
 | Light: Point, Spot | `point_light`, `spot_light` (Unity's full spot angle becomes Thistle's half angle) |
 | Light: Directional | the scene's sun: direction, color, intensity, shadows on/off |
 | RenderSettings | linear fog (exponential fog is approximated), flat and trilight ambient colors |
-| Trigger BoxCollider | a `trigger` child with the collider's size and center. Solid colliders are dropped: shapes and models are solid already (`add_colliders`) |
+| Trigger BoxCollider | a `trigger` child with the collider's size and center. A solid BoxCollider on a *model* becomes the property `collider` = `box` (one box around the whole model, not the collider's own size; see [scene3d.md](scene3d.md)); on a shape it's dropped, since shapes are solid already |
 | Camera | an `empty` with a `camera_fov` property |
 | MonoBehaviour | the object gets `unity_script` and each simple field (numbers, strings, bools) as a property, `ScriptName.field`. **The C# isn't translated.** Object references aren't kept |
 | Inactive object, tag, layer | properties `active`=`false`, `tag`, `layer`. Thistle has no active flag; check the property |
-| `.mat` | `assets/materials/<name>.json`: color, metallic, roughness (1 - smoothness), emissive, alpha mode and texture paths. **Nothing loads these on its own**; build a `Material` from one in code. A built-in shape's, or a converted mesh's, first material color also becomes the entity's color (a glTF/FBX model keeps its own materials, so its color isn't touched). Two materials with the same name in different folders get different file names (`Red.json`, `Red_Walls.json`) |
+| `.mat` | `assets/materials/<name>.json`: color, metallic, roughness (1 - smoothness), emissive, alpha mode and texture paths. A built-in shape or converted mesh that uses one also gets its base texture, bump map and tiling as `texture`, `normal_texture` and `uv_scale` on the entity, and `metallic`/`roughness` when the material is metallic (0.05+) or bumpy; a plain material adds none of that and keeps the classic look. Only PNG, JPG, BMP and TGA load: a texture in another format (PSD, TIF) is left out and reported. A glTF/FBX model's own materials aren't replaced. A built-in shape's, or a converted mesh's, first material color also becomes the entity's color (a glTF/FBX model keeps its own materials, so its color isn't touched). Two materials with the same name in different folders get different file names (`Red.json`, `Red_Walls.json`) |
 | Models, textures (png/jpg/bmp/tga), sounds (wav/ogg/mp3/flac), fonts | copied to the same path under `assets/` |
 
 Existing files are kept unless you pass `--force`.

@@ -240,7 +240,7 @@ struct RenderState {
     RenderStats stats_this_frame;
     RenderStats stats_last_frame;
 
-    Model unit_box, unit_sphere, unit_cylinder, unit_cone, unit_plane;
+    Model unit_box, unit_sphere, unit_cylinder, unit_cone, unit_plane, unit_wedge;
 };
 
 RenderState g_three;
@@ -1183,8 +1183,13 @@ void World::shape(int kind, const Transform& transform, rgba color) {
         case 1: draw(unit_model(g_three.unit_sphere, [] { return sphere_mesh(); }), transform, color); break;
         case 2: draw(unit_model(g_three.unit_cylinder, [] { return cylinder_mesh(); }), transform, color); break;
         case 3: draw(unit_model(g_three.unit_cone, [] { return cone_mesh(); }), transform, color); break;
-        default: draw(unit_model(g_three.unit_plane, [] { return plane_mesh(); }), transform, color); break;
+        case 4: draw(unit_model(g_three.unit_plane, [] { return plane_mesh(); }), transform, color); break;
+        default: draw(unit_model(g_three.unit_wedge, [] { return wedge_mesh(); }), transform, color); break;
     }
+}
+
+void World::wedge(vec3 center, vec3 size, rgba color) {
+    draw(unit_model(g_three.unit_wedge, [] { return wedge_mesh(); }), Transform{center, {}, size}, color);
 }
 
 namespace {

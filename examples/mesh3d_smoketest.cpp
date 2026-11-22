@@ -108,6 +108,31 @@ int main() {
               "Bounds::transformed grows to fit a rotated box");
     }
 
+    {
+        // The ramp: not centered on the origin's plane test above (its slope passes through the middle),
+        // so check it by volume and normals: a closed mesh wound outward has positive signed volume.
+        const vec3 size{2, 1, 4};
+        const MeshData w = wedge_mesh(size);
+        double volume = 0.0;
+        int bad_normal = 0;
+        for (size_t i = 0; i + 2 < w.indices.size(); i += 3) {
+            const Vertex& a = w.vertices[w.indices[i]];
+            const Vertex& b = w.vertices[w.indices[i + 1]];
+            const Vertex& c = w.vertices[w.indices[i + 2]];
+            volume += dot(a.position, cross(b.position, c.position)) / 6.0;
+            if (dot(cross(b.position - a.position, c.position - a.position), a.normal) <= 0.0f) ++bad_normal;
+            if (!near(length(a.normal), 1.0f)) ++bad_normal;
+        }
+        check(near(static_cast<float>(volume), size.x * size.y * size.z / 2.0f, 1e-3f), "wedge: its volume is half the box (a closed mesh, wound outward)");
+        check(bad_normal == 0, "wedge: every triangle is counter-clockwise seen from along its normal, and normals are unit");
+        check(near(w.bounds().size(), size, 1e-3f), "wedge: bounds match the requested size");
+        bool slope_ok = false;
+        for (const Vertex& v : w.vertices) {
+            if (v.normal.y > 0.1f && v.normal.z < -0.1f) slope_ok = near(v.normal, normalize(vec3{0, size.z, -size.y}), 1e-3f);
+        }
+        check(slope_ok, "wedge: the sloped face looks up and toward -Z");
+    }
+
     if (g_failures) { std::printf("%d check(s) failed\n", g_failures); return 1; }
     std::printf("all mesh3d checks passed\n");
     return 0;

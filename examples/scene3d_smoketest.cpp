@@ -7,6 +7,8 @@
 // (voxels: saved in the file, placed through their parents, copy(),
 // set_block_type()), and draw() running. Headless.
 #include <thistle.hpp>
+#include <filesystem>
+#include <fstream>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -292,6 +294,105 @@ int main() {
         who.position = {8, 3, 2};
         for (int k = 0; k < 120; ++k) who.update(cw, {}, false, 1.0f / 60.0f);
         check(who.on_ground() && near(who.position.y, 2.0f, 1e-2f), "a character dropped over the blocks lands on top of them");
+    }
+    std::printf("materials, wedges, collider overrides\n");
+    {
+        Scene3D m;
+        SceneEntity plain;
+        plain.name = "plain";
+        plain.kind = SceneEntity::Kind::Box;
+        m.add(plain);
+        SceneEntity fancy;
+        fancy.name = "fancy";
+        fancy.kind = SceneEntity::Kind::Wedge;
+        fancy.texture = "assets/concrete.png";
+        fancy.normal_texture = "assets/concrete_n.png";
+        fancy.metallic = 0.25f;
+        fancy.roughness = 0.75f;
+        fancy.uv_scale = {4.0f, 2.0f};
+        m.add(fancy);
+        const std::string text = m.to_json();
+        Scene3D back;
+        check(back.from_json(text) && back.to_json() == text, "a scene with textures, metallic/roughness, tiling and a wedge round-trips byte for byte");
+        const SceneEntity& f = back.entities[1];
+        check(f.kind == SceneEntity::Kind::Wedge && f.texture == "assets/concrete.png" && f.normal_texture == "assets/concrete_n.png" &&
+                  near(f.metallic, 0.25f) && near(f.roughness, 0.75f) && near(f.uv_scale.x, 4.0f) && near(f.uv_scale.y, 2.0f),
+              "...with every field intact");
+        const SceneEntity& p = back.entities[0];
+        check(p.texture.empty() && p.metallic < 0.0f && p.roughness < 0.0f && near(p.uv_scale.x, 1.0f), "an entity that sets none of them keeps the defaults");
+        const nlohmann::json j = nlohmann::json::parse(text);
+        check(!j["entities"][0].contains("texture") && !j["entities"][0].contains("metallic") && !j["entities"][0].contains("uv_scale"),
+              "...and writes none of those keys (old files stay byte-identical)");
+        World world;
+        back.draw(world); // textures that don't exist just draw without one
+        check(true, "an entity with its own material draws without trouble");
+    }
+    {
+        // A ramp you can walk up: rises from z = -3 (nothing) to z = +3 (2 m).
+        Scene3D r;
+        SceneEntity floor;
+        floor.kind = SceneEntity::Kind::Plane;
+        floor.transform.scale = {30, 1, 30};
+        r.add(floor);
+        SceneEntity ramp;
+        ramp.kind = SceneEntity::Kind::Wedge;
+        ramp.transform = Transform{{0, 1, 0}, quat{}, {4, 2, 6}};
+        r.add(ramp);
+        CollisionWorld cw;
+        const std::vector<int> ids = r.add_colliders(cw);
+        check(ids.size() == 2, "a wedge is solid like the other shapes");
+        const RaycastHit mid = cw.raycast(Ray{{0, 5, 0}, {0, -1, 0}});
+        check(mid && near(mid.point.y, 1.0f, 1e-3f), "halfway along the ramp it is 1 m high");
+        const RaycastHit low = cw.raycast(Ray{{0, 5, -2.0f}, {0, -1, 0}});
+        check(low && near(low.point.y, 1.0f / 3.0f, 1e-3f), "...and a third as high a sixth of the way along (z = -2)");
+        // ...and a ramp leads somewhere: a platform 2 m up, where the high end stops.
+        SceneEntity platform;
+        platform.kind = SceneEntity::Kind::Box;
+        platform.transform = Transform{{0, 1, 6}, quat{}, {4, 2, 6}};
+        r.add(platform);
+        CollisionWorld walk;
+        r.add_colliders(walk);
+        CharacterController who;
+        who.position = {0, 0.1f, -5};
+        for (int k = 0; k < 60; ++k) who.update(walk, {0, 0, 1}, false, 1.0f / 60.0f);
+        check(who.on_ground() && who.position.y > 0.6f && who.position.y < 1.3f && who.position.z > -1.0f && who.position.z < 1.0f,
+              "a character walking toward +Z is on the slope a second later (y = " + std::to_string(who.position.y) + ", z = " + std::to_string(who.position.z) + ")");
+        for (int k = 0; k < 90; ++k) who.update(walk, {0, 0, 1}, false, 1.0f / 60.0f);
+        check(who.on_ground() && near(who.position.y, 2.0f, 0.05f) && who.position.z > 3.5f && who.position.z < 9.0f,
+              "and has walked up onto the platform (y = " + std::to_string(who.position.y) + ", z = " + std::to_string(who.position.z) + ")");
+        Scene3D back;
+        check(back.from_json(r.to_json()) && back.entities[1].kind == SceneEntity::Kind::Wedge, "the wedge kind survives saving and loading");
+    }
+    {
+        // A dense model that a character shouldn't have to walk on triangle by triangle.
+        const MeshData ball = sphere_mesh(1.0f, 32, 48);
+        const std::string path = (std::filesystem::temp_directory_path() / "thistle_scene3d_ball.obj").string();
+        {
+            std::ofstream obj(path);
+            for (const Vertex& v : ball.vertices) obj << "v " << v.position.x << " " << v.position.y << " " << v.position.z << "\n";
+            for (size_t i = 0; i + 2 < ball.indices.size(); i += 3) obj << "f " << ball.indices[i] + 1 << " " << ball.indices[i + 1] + 1 << " " << ball.indices[i + 2] + 1 << "\n";
+        }
+        auto build = [&](const std::string& collider) {
+            Scene3D sc;
+            SceneEntity e;
+            e.kind = SceneEntity::Kind::Model;
+            e.model = path;
+            if (!collider.empty()) e.set_property("collider", collider);
+            sc.add(e);
+            return sc;
+        };
+        const Ray corner{{0.9f, 5, 0.9f}, {0, -1, 0}}; // inside the ball's bounding box, outside the ball
+        { CollisionWorld cw; build("").add_colliders(cw); check(!cw.raycast(corner), "a model collides by its triangles by default (a ray past the sphere's curve misses)"); }
+        { CollisionWorld cw; build("mesh").add_colliders(cw); check(!cw.raycast(corner), "collider = mesh says the same"); }
+        {
+            CollisionWorld cw;
+            const std::vector<int> ids = build("box").add_colliders(cw);
+            const RaycastHit h = cw.raycast(corner);
+            check(ids.size() == 1 && h && near(h.point.y, 1.0f, 1e-3f), "collider = box: one box around the whole model, so the same ray lands on its top");
+        }
+        { CollisionWorld cw; check(build("none").add_colliders(cw).empty(), "collider = none adds nothing"); }
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
     }
     s.remove(g); // the group and the crate under it
     check(s.entities.size() == 3 && s.find("crate") == -1 && s.find("lamp") == 0 && s.find("player_start") == 1,
