@@ -1,6 +1,6 @@
 # 3D physics — `three::Physics3D` (Jolt) and Teardown-style destruction
 
-Rigid bodies that fall, stack, tumble, bounce and get knocked over, on [Jolt Physics](https://github.com/jrouwe/JoltPhysics) `v5.6.0`. Meters, kilograms, seconds, +Y up, the same as the rest of `thistle::three`.
+Rigid bodies that fall, stack, tumble, bounce and get knocked over, on [Jolt Physics](https://github.com/jrouwe/JoltPhysics) `v5.7.0`. Meters, kilograms, seconds, +Y up, the same as the rest of `thistle::three`.
 
 It's **opt-in**. Jolt is a big library (about a minute of extra first build on a fast machine, more on a laptop), and most games don't need it. A walking character doesn't: `CharacterController` + `CollisionWorld` handle walls, floors, stairs and jumping with no physics library at all. Reach for this when things in your game should move *on their own* once pushed.
 

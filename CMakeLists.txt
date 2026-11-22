@@ -164,7 +164,7 @@ if(THISTLE_PHYSICS3D AND NOT THISTLE_SERVER_ONLY)
     FetchContent_Declare(
         JoltPhysics
         GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
-        GIT_TAG        v5.6.0
+        GIT_TAG        v5.7.0
         SOURCE_SUBDIR  Build
     )
     FetchContent_MakeAvailable(JoltPhysics)
