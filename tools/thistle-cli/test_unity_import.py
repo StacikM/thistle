@@ -7,6 +7,7 @@ the result with the engine's own three::Scene3D. Run by ctest as
 unity_import_smoketest; standard library only."""
 import json
 import math
+import struct
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,46 @@ def meta(path: Path, guid: str) -> None:
 HEADER = "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n"
 
 G_SHIP, G_ROCK, G_CRATE, G_RED, G_DOOR, G_TEX = ("a" * 32, "b" * 32, "c" * 32, "d" * 32, "e" * 32, "f" * 32)
+G_RAMP = "9" * 32
+
+
+def ramp_asset() -> str:
+    """A Unity Mesh asset in the layout Unity 2019+ writes: one interleaved stream of
+    position(3 floats) + normal(3) + tangent(4) + uv(2), 16-bit indices. A wedge, low
+    at z = -2 and high at z = +2, so a mirrored Z or a wrong winding shows."""
+    corners = [(-1, 0, -2), (1, 0, -2), (1, 1, 2), (-1, 1, 2)]
+    norm = (0.0, 0.894427, -0.447214)  # tilted toward -Z, like a slope that rises toward +Z
+    verts = b"".join(struct.pack("<3f3f4f2f", x, y, z, *norm, 1, 0, 0, 1, (x + 1) / 2, (z + 2) / 4) for x, y, z in corners)
+    indices = struct.pack("<6H", 0, 2, 1, 0, 3, 2)  # Unity winds clockwise: this faces up, toward the +Y side
+    channels = [(0, 3), (12, 3), (24, 4), (0, 0), (40, 2)] + [(0, 0)] * 9
+    ch = "".join(f"    - stream: 0\n      offset: {o}\n      format: 0\n      dimension: {d}\n" for o, d in channels)
+    return HEADER + f"""--- !u!43 &4300000
+Mesh:
+  m_Name: Ramp
+  serializedVersion: 12
+  m_SubMeshes:
+  - serializedVersion: 2
+    firstByte: 0
+    indexCount: 6
+    topology: 0
+    baseVertex: 0
+    firstVertex: 0
+    vertexCount: 4
+  m_MeshCompression: 0
+  m_IndexFormat: 0
+  m_IndexBuffer: {indices.hex()}
+  m_VertexData:
+    serializedVersion: 3
+    m_VertexCount: 4
+    m_Channels:
+{ch}    m_DataSize: {len(verts)}
+    _typelessdata: {verts.hex()}
+  m_StreamData:
+    serializedVersion: 2
+    offset: 0
+    size: 0
+    path: 
+"""
 
 SCENE = HEADER + """--- !u!104 &2
 RenderSettings:
@@ -163,6 +204,28 @@ BoxCollider:
   m_IsTrigger: 1
   m_Size: {x: 2, y: 3, z: 4}
   m_Center: {x: 0, y: 1.5, z: 0}
+--- !u!1 &50
+GameObject:
+  m_Component:
+  - component: {fileID: 51}
+  - component: {fileID: 52}
+  m_Layer: 0
+  m_Name: Ramp Piece
+  m_TagString: Untagged
+  m_IsActive: 1
+--- !u!4 &51
+Transform:
+  m_GameObject: {fileID: 50}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 20}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_RootOrder: 3
+--- !u!33 &52
+MeshFilter:
+  m_GameObject: {fileID: 50}
+  m_Mesh: {fileID: 4300000, guid: 99999999999999999999999999999999, type: 3}
 --- !u!1001 &100
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -302,6 +365,9 @@ def main() -> None:
         (a / "Models" / "ship.glb").write_bytes(b"glTF")
         (a / "Models" / "rock.fbx").write_bytes(b"Kaydara FBX Binary")
         (a / "Textures" / "t.png").write_bytes(b"\x89PNG")
+        (a / "Meshes").mkdir()
+        (a / "Meshes" / "Ramp.asset").write_text(ramp_asset(), encoding="utf-8")
+        meta(a / "Meshes" / "Ramp.asset", G_RAMP)
         (a / "Scripts" / "Door.cs").write_text("public class Door : MonoBehaviour {}", encoding="utf-8")
         meta(a / "Models" / "ship.glb", G_SHIP)
         meta(a / "Models" / "rock.fbx", G_ROCK)
@@ -357,6 +423,28 @@ def main() -> None:
         check(fog["enabled"] and fog["start"] == 20 and fog["end"] == 120 and fog["match_sky"] is False, "linear fog settings")
         check(near(scene["environment"]["sky"]["top"], [0.2, 0.3, 0.4, 1.0]) and scene["environment"]["ambient"] == 0.8, "flat ambient color and intensity")
 
+        print("mesh .asset files (MapForge and other tools bake meshes this way)")
+        ramp = ents["Ramp Piece"][1]
+        check(ramp["kind"] == "model" and ramp["model"] == "assets/Meshes/Ramp.obj", "an object using a mesh .asset becomes a model entity pointing at the converted .obj")
+        obj_path = out / "assets" / "Meshes" / "Ramp.obj"
+        check(obj_path.exists() and not (out / "assets" / "Meshes" / "Ramp.asset").exists(), "the mesh is written as .obj and the .asset isn't copied")
+        obj_lines = obj_path.read_text(encoding="utf-8").splitlines()
+        vs = [tuple(map(float, l.split()[1:])) for l in obj_lines if l.startswith("v ")]
+        ns = [tuple(map(float, l.split()[1:])) for l in obj_lines if l.startswith("vn ")]
+        faces = [[int(c.split("/")[0]) - 1 for c in l.split()[1:]] for l in obj_lines if l.startswith("f ")]
+        check(len(vs) == 4 and len(ns) == 4 and len(faces) == 2, "4 vertices, 4 normals, 2 triangles decoded from the interleaved stream")
+        check(vs[0] == (-1.0, 0.0, 2.0) and vs[2] == (1.0, 1.0, -2.0), "positions are mirrored across Z")
+        check(abs(ns[0][2] - 0.447214) < 1e-5 and ns[0][1] > 0.89, "normals are mirrored across Z too")
+        agree = 0
+        for f in faces:
+            a, b, c = (vs[i] for i in f)
+            e1, e2 = [b[k] - a[k] for k in range(3)], [c[k] - a[k] for k in range(3)]
+            face = (e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0])
+            n = ns[f[0]]
+            agree += face[0] * n[0] + face[1] * n[1] + face[2] * n[2] > 0
+        check(agree == 2, "every triangle's winding agrees with its normal after the mirror (counter-clockwise from outside)")
+        check(any(l.startswith("vt 0.5 0.5") or l.startswith("vt 1 0") or l.startswith("vt 0 0") for l in obj_lines), "UVs come along")
+
         print("prefabs, materials, assets, report")
         check((out / "assets" / "prefabs" / "Crate.scene.json").exists(), "the prefab itself is written as a scene fragment")
         pre = json.loads((out / "assets" / "prefabs" / "Crate.scene.json").read_text(encoding="utf-8"))
@@ -389,6 +477,8 @@ def main() -> None:
             lines = r.stdout.strip().splitlines()
             check(any(l.startswith("Floor Cube|box|-1|1.000 2.000 -3.000") for l in lines), "...and puts the floor where the importer says")
             check(any(l.startswith("Child Ball|sphere|") for l in lines) and len(lines) == len(scene["entities"]) + 1, "...with every entity")
+            r = subprocess.run([sys.argv[1], "--model", str(obj_path)], capture_output=True, text=True)
+            check(r.returncode == 0 and "tris=2" in r.stdout and "bounds=-1.000 0.000 -2.000 / 1.000 1.000 2.000" in r.stdout, "...and load_model() reads the converted .obj: 2 triangles, the right bounds")
             r = subprocess.run([sys.argv[1], str(out / "assets" / "prefabs" / "Crate.scene.json")], capture_output=True, text=True)
             check(r.returncode == 0 and "Lid Lamp|spot_light|0|" in r.stdout, "...and the prefab fragment too")
 
