@@ -17,6 +17,33 @@ app.update([&](Frame f) {
 });
 ```
 
+## An animated character from Unity (FBX): idle, run, and the rest
+
+`thistle import-unity` turns an `.fbx` into a `.glb` for you when Blender (or FBX2glTF) is installed, and **keeps every animation take as its own clip**: a character FBX with "Idle" and "Run" comes out as a model with two clips. Then it's the same as any glTF:
+
+```cpp
+Model soldier = load_model("assets/Models/Soldier.glb");
+for (int i = 0; i < model_animation_count(soldier); ++i)      // what's in there?
+    log_info(model_animation(soldier, i)->name);
+Animator anim(soldier);
+
+app.update([&](Frame f) {
+    anim.play(speed > 0.1f ? "Run" : "Idle");   // a change crossfades; the same clip does nothing
+    anim.update(f.dt);
+    world.draw(soldier, where, anim);
+});
+```
+
+Things that trip people up:
+
+- **A scene's model entities draw in their rest pose.** `Scene3D::draw()` has no animator to give them. To animate a character that's in a level, read what you need from its entity and take it out of the scene before drawing: `Transform t = level.world_transform(i); Model m = level.model(i); level.remove(i);` (do it once, after loading), then draw it with your own `Animator` as above.
+- **Clips have to be in the same file as the model.** One character FBX with several takes works. The Mixamo way, a character plus one FBX per clip, doesn't: the engine plays a model's own clips only, and it doesn't copy clips between files. Merge them in Blender first (import each, then export one `.glb`).
+- **Unity's own animation (`.anim` clips, Animator Controllers, state machines) isn't imported.** Only the takes inside the FBX are, and what plays when is your code's job.
+- Clip names lose Blender's `Armature|` prefix. A Mixamo take keeps its odd name (`mixamo.com`); `play(index)` works without knowing it.
+- Needs Blender with its FBX add-on, which needs `numpy` in the Python Blender uses (on Linux, `apt install python3-numpy`). The import report says when a conversion didn't happen.
+
+Verified: a rigged cube with two takes, made in Blender, converted by `import-unity`, and loaded by the engine with its skeleton and both clips (`unity_import_smoketest`, skipped where Blender isn't installed). **Not verified:** a real character (Mixamo or otherwise), or how the converted animation *looks* in motion.
+
 ## What's loaded
 
 `load_model()` / `load_model_data()` read, from a `.gltf`/`.glb`:

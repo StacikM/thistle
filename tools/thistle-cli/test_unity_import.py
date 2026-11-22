@@ -6,6 +6,7 @@ reads every real project). Then, if given the path to thistle_scene_dump, loads
 the result with the engine's own three::Scene3D. Run by ctest as
 unity_import_smoketest; standard library only."""
 import json
+import os
 import math
 import shutil
 import struct
@@ -663,11 +664,107 @@ def test_depot() -> None:
 
 
 
+MAKE_FBX = """
+import bpy, sys
+out = sys.argv[sys.argv.index('--') + 1]
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.object.armature_add(location=(0, 0, 0))
+arm = bpy.context.object
+bpy.ops.object.mode_set(mode='EDIT')
+b = arm.data.edit_bones[0]
+b.name = 'Hips'; b.head = (0, 0, 0); b.tail = (0, 0, 1)
+b2 = arm.data.edit_bones.new('Spine'); b2.head = (0, 0, 1); b2.tail = (0, 0, 2); b2.parent = b
+bpy.ops.object.mode_set(mode='OBJECT')
+bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, 1))
+cube = bpy.context.object
+cube.scale = (0.3, 0.3, 1.0)
+bpy.ops.object.select_all(action='DESELECT')
+cube.select_set(True); arm.select_set(True)
+bpy.context.view_layer.objects.active = arm
+bpy.ops.object.parent_set(type='ARMATURE_AUTO')
+arm.animation_data_create()
+for name, ang in (('Idle', 0.1), ('Run', 0.8)):
+    act = bpy.data.actions.new(name)
+    arm.animation_data.action = act
+    pb = arm.pose.bones['Spine']
+    pb.rotation_mode = 'XYZ'
+    pb.rotation_euler = (0, 0, 0); pb.keyframe_insert('rotation_euler', frame=1)
+    pb.rotation_euler = (ang, 0, 0); pb.keyframe_insert('rotation_euler', frame=12)
+    arm.animation_data.nla_tracks.new().strips.new(name, 1, act)
+arm.animation_data.action = None
+bpy.ops.export_scene.fbx(filepath=out, bake_anim=True, bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False)
+"""
+
+
+def test_fbx(scene_dump) -> None:
+    """An .fbx with a skeleton and two clips, made by Blender, converted by import-unity (which runs Blender) and read by the engine."""
+    print("converting an .fbx (needs Blender, and numpy for its FBX add-on)")
+    blender = shutil.which("blender")
+    if not blender:
+        print("  skipped: no blender on PATH")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        unity, out = root / "U", root / "Out"
+        (unity / "Assets" / "Models").mkdir(parents=True)
+        (unity / "Assets" / "Scenes").mkdir()
+        out.mkdir()
+        fbx = unity / "Assets" / "Models" / "robot.fbx"
+        made = subprocess.run([blender, "--background", "--factory-startup", "--python-expr", MAKE_FBX, "--", str(fbx)], capture_output=True, text=True, timeout=300)
+        if not fbx.exists():
+            print("  skipped: Blender couldn't write an .fbx here (its FBX add-on needs numpy): " + " | ".join((made.stdout + made.stderr).strip().splitlines()[-2:]))
+            return
+        meta(fbx, "5" * 32)
+        (unity / "Assets" / "Scenes" / "S.unity").write_text(HEADER + """--- !u!1001 &100
+PrefabInstance:
+  m_Modification:
+    m_TransformParent: {fileID: 0}
+    m_Modifications:
+    - target: {fileID: 400000, guid: 55555555555555555555555555555555, type: 3}
+      propertyPath: m_LocalPosition.x
+      value: 3
+      objectReference: {fileID: 0}
+    m_RemovedComponents: []
+  m_SourcePrefab: {fileID: 100100000, guid: 55555555555555555555555555555555, type: 3}
+""", encoding="utf-8")
+
+        def run(*extra: str, env=None) -> subprocess.CompletedProcess:
+            return subprocess.run([sys.executable, str(CLI), "import-unity", str(unity), "--out", str(out), "--force", *extra], capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", env=env, timeout=600)
+
+        r = run()
+        glb = out / "assets" / "Models" / "robot.glb"
+        check(r.returncode == 0 and glb.exists(), "the .fbx is converted to a .glb next to where the scene points")
+        scene = json.loads((out / "assets" / "scenes" / "S.scene.json").read_text(encoding="utf-8"))
+        ent = scene["entities"][0]
+        check(ent["kind"] == "model" and ent["model"] == "assets/Models/robot.glb" and ent["position"][0] == 3.0, "the scene's model entity points at it, placed by its override")
+        report = (out / "unity-import-report.md").read_text(encoding="utf-8")
+        check("converted to .glb with Blender" in report and "Models Thistle can't read yet" not in report, "the report says it was converted, and lists nothing left to do by hand")
+        if scene_dump:
+            d = subprocess.run([scene_dump, "--model", str(glb)], capture_output=True, text=True)
+            check(d.returncode == 0 and "tris=12" in d.stdout, "the engine loads the model (the cube's 12 triangles)")
+            check("joints=" in d.stdout and int(d.stdout.split("joints=")[1].split()[0]) >= 2, "...with its skeleton")
+            clips = d.stdout.split("animations=")[1].strip().strip(",").split(",") if "animations=" in d.stdout else []
+            check(sorted(clips) == ["Idle", "Run"], f"...and both animation clips, named plainly {clips}")
+
+        shutil.rmtree(out)
+        out.mkdir()
+        r = run("--no-fbx")
+        report = (out / "unity-import-report.md").read_text(encoding="utf-8")
+        check(not (out / "assets" / "Models" / "robot.glb").exists() and "Models Thistle can't read yet" in report and "robot.fbx" in report, "--no-fbx leaves it for you and says so")
+        env = dict(os.environ, PATH=os.devnull)
+        env.pop("BLENDER", None)
+        r = run(env=env)
+        check(r.returncode == 0 and "Blender or FBX2glTF wasn't found" in (out / "unity-import-report.md").read_text(encoding="utf-8"),
+              "with no Blender anywhere it still imports, and says what to install")
+
+
 def main() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from unity_import import parse_unity_yaml, _flow
 
     test_depot()
+    test_fbx(sys.argv[1] if len(sys.argv) > 1 else None)
 
     print("the YAML subset")
     check(_flow("{fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}") == {"fileID": 10202, "guid": "0000000000000000e000000000000000", "type": 0},
@@ -705,7 +802,7 @@ def main() -> None:
         meta(a / "Textures" / "t.png", G_TEX)
 
         print("importing")
-        r = subprocess.run([sys.executable, str(CLI), "import-unity", str(unity), "--out", str(out)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        r = subprocess.run([sys.executable, str(CLI), "import-unity", str(unity), "--out", str(out), "--no-fbx"], capture_output=True, text=True, encoding="utf-8", errors="replace")
         check(r.returncode == 0, "thistle import-unity exits 0")
         if r.returncode != 0:
             print(r.stdout + r.stderr)

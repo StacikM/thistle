@@ -18,8 +18,10 @@ int main(int argc, char** argv) {
             tris += part.mesh.indices.size() / 3;
             for (const Vertex& v : part.mesh.vertices) box.add(v.position);
         }
-        std::printf("model parts=%zu verts=%zu tris=%zu bounds=%.3f %.3f %.3f / %.3f %.3f %.3f\n", data.parts.size(), verts, tris, box.min.x,
-                    box.min.y, box.min.z, box.max.x, box.max.y, box.max.z);
+        std::printf("model parts=%zu verts=%zu tris=%zu bounds=%.3f %.3f %.3f / %.3f %.3f %.3f joints=%zu animations=", data.parts.size(), verts, tris,
+                    box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z, data.skeleton.joints.size());
+        for (const AnimationClip& clip : data.animations) std::printf("%s,", clip.name.c_str());
+        std::printf("\n");
         return verts > 0 ? 0 : 1;
     }
     App app{{.title = "scene_dump", .width = 64, .height = 64}};

@@ -2077,6 +2077,14 @@ struct MouseLook {
     bool invert_y = false;
     bool capture_mouse = true;
 
+    // A kick on top of where the player is aiming, for gunfire and impacts. It is added to the camera only:
+    // `pitch` and `yaw` stay exactly where the player's hand put them, so there is nothing to fight (or to undo
+    // when it settles), and move_input() and forward_flat() ignore it. It eases back to zero by itself.
+    float recoil_pitch = 0.0f;        // radians, positive = looking up; read it, or set it yourself
+    float recoil_yaw = 0.0f;          // radians, positive = turned left
+    float recoil_recovery = 10.0f;    // how fast it settles: the fraction left after 1 s is e^-recovery; 10 is about 0.1 s
+    void kick(float pitch_up, float yaw_left = 0.0f) { recoil_pitch += pitch_up; recoil_yaw += yaw_left; }
+
     void update(Camera& camera, const Frame& f);
     // WASD / arrow keys / left stick as a flat (y = 0) world-space direction
     // relative to where you're facing, length 0..1 — feed it to your

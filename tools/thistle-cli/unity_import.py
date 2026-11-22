@@ -11,11 +11,15 @@ Unity is left-handed (+Z forward); Thistle is right-handed like glTF (-Z forward
 so positions and rotations are mirrored across Z on the way through. See docs/unity-import.md
 for what's approximate and what has and hasn't been verified.
 """
+import glob
 import json
 import math
+import os
 import re
 import shutil
 import struct
+import subprocess
+import sys
 from pathlib import Path
 
 # --- Unity's YAML ----------------------------------------------------------
@@ -320,6 +324,36 @@ def mesh_asset_to_obj(mesh: dict):
     return "\n".join(lines) + "\n", name
 
 
+# Run inside Blender: FBX in, GLB out. An FBX's takes come in as separate actions but only the active one would be
+# exported, so every action is attached to the armature as its own track and the tracks are what's exported: one
+# clip each, named without the "Armature|" prefix Blender's FBX importer gives them.
+BLENDER_FBX_TO_GLB = """
+import bpy, sys
+src, dst = sys.argv[sys.argv.index('--') + 1:][:2]
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.import_scene.fbx(filepath=src)
+armatures = [o for o in bpy.data.objects if o.type == 'ARMATURE']
+mode = 'ACTIVE_ACTIONS'
+if armatures and bpy.data.actions:
+    arm = armatures[0]
+    data = arm.animation_data_create()
+    data.action = None
+    for track in list(data.nla_tracks):
+        data.nla_tracks.remove(track)
+    for action in bpy.data.actions:
+        parts = action.name.split('|')
+        while len(parts) > 1 and parts[0] == arm.name:
+            parts = parts[1:]
+        name = '|'.join(parts)
+        track = data.nla_tracks.new()
+        track.name = name
+        strip = track.strips.new(name, int(action.frame_range[0]), action)
+        strip.name = name
+    mode = 'NLA_TRACKS'
+bpy.ops.export_scene.gltf(filepath=dst, export_format='GLB', export_animation_mode=mode)
+"""
+
+
 class Node:
     """One thing in the scene, still in Unity's space, before the tree is flattened."""
 
@@ -342,8 +376,10 @@ class Node:
 
 
 class Importer:
-    def __init__(self, project: Path, out: Path, force: bool, scenes=None, ambient_scale: float = 0.4, light_scale: float = 0.28, sun_scale: float = 1.0):
+    def __init__(self, project: Path, out: Path, force: bool, scenes=None, ambient_scale: float = 0.4, light_scale: float = 0.28, sun_scale: float = 1.0,
+                 blender: str = "", convert_fbx: bool = True):
         self.project, self.out, self.force = project, out, force
+        self.blender_arg, self.convert_fbx = blender, convert_fbx
         self.only_scenes = list(scenes or [])
         # Unity's lights and ambient are far hotter than Thistle's for the same numbers: a scene lit
         # "1.0 ambient, point lights at 6" comes out white. These are the factors one game's scenes
@@ -1002,6 +1038,57 @@ class Importer:
             elif wanted is None and ext not in (".asmdef", ".asmref", ".dll", ".cginc", ".hlsl", ".asset", ".json", ".txt", ".md"):
                 self.skipped_types[f"{ext or 'no extension'} files"] = self.skipped_types.get(f"{ext or 'no extension'} files", 0) + 1
 
+    def find_converter(self):
+        """('fbx2gltf' | 'blender', path) for something that can turn an .fbx into a .glb, or None."""
+        if self.blender_arg:
+            exe = shutil.which(self.blender_arg) or (self.blender_arg if Path(self.blender_arg).exists() else None)
+            if exe is None:
+                self.warn(f"--blender {self.blender_arg!r} isn't a program or a file.")
+                return None
+            return ("fbx2gltf" if "fbx2gltf" in Path(exe).name.lower() else "blender", exe)
+        found = shutil.which("FBX2glTF") or shutil.which("fbx2gltf")
+        if found:
+            return ("fbx2gltf", found)
+        found = os.environ.get("BLENDER") or shutil.which("blender")
+        if not found:
+            candidates = sorted(glob.glob(r"C:\Program Files\Blender Foundation\Blender *\blender.exe")) + ["/Applications/Blender.app/Contents/MacOS/Blender"]
+            found = next((c for c in reversed(candidates) if Path(c).exists()), None)
+        return ("blender", found) if found else None
+
+    def convert_models(self) -> None:
+        """Run each needed .fbx through Blender (or FBX2glTF) into the .glb the scenes already point at."""
+        todo = sorted({rel for rel in self.to_convert if rel.lower().endswith(".fbx")})
+        if not todo or not self.convert_fbx:
+            return
+        tool = self.find_converter()
+        if tool is None:
+            self.warn("Blender or FBX2glTF wasn't found, so the .fbx models below were not converted (install Blender, or pass --blender PATH).")
+            return
+        kind, exe = tool
+        script = BLENDER_FBX_TO_GLB
+        for rel in todo:
+            src = self.assets / rel
+            dest = self.out / "assets" / Path(rel).with_suffix(".glb")
+            if dest.exists() and not self.force:
+                self.to_convert.remove(rel)
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if kind == "fbx2gltf":
+                cmd = [exe, "--binary", "--input", str(src), "--output", str(dest.with_suffix(""))]
+            else:
+                cmd = [exe, "--background", "--factory-startup", "--python-expr", script, "--", str(src), str(dest)]
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+            except (OSError, subprocess.TimeoutExpired) as why:
+                self.warn(f"{rel}: couldn't run {Path(exe).name}: {why}")
+                continue
+            if r.returncode != 0 or not dest.exists():
+                tail = " | ".join((r.stdout + r.stderr).strip().splitlines()[-3:])
+                self.warn(f"{rel}: {Path(exe).name} didn't produce a .glb ({tail[:300]})")
+                continue
+            self.to_convert.remove(rel)
+            self.count(f"FBX models converted to .glb with {'FBX2glTF' if kind == 'fbx2gltf' else 'Blender'} (animations kept)")
+
     def pick_scenes(self, scenes: list) -> list:
         if not self.only_scenes:
             return scenes
@@ -1044,6 +1131,7 @@ class Importer:
                 self.count("materials")
         self.convert_mesh_assets()
         self.copy_assets()
+        self.convert_models()
         self.write_report()
         return 0
 

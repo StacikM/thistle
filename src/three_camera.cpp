@@ -85,7 +85,13 @@ void MouseLook::update(Camera& camera, const Frame& f) {
     }
     pitch = std::clamp(pitch, -max_pitch, max_pitch);
     yaw = std::remainder(yaw, 2.0f * pi);
-    camera.rotation = quat::euler(pitch, yaw);
+    const float settle = std::exp(-std::max(recoil_recovery, 0.0f) * std::max(f.dt, 0.0f));
+    recoil_pitch *= settle;
+    recoil_yaw *= settle;
+    if (std::fabs(recoil_pitch) < 1e-5f) recoil_pitch = 0.0f;
+    if (std::fabs(recoil_yaw) < 1e-5f) recoil_yaw = 0.0f;
+    // The kick can't push the view past straight up or down: it would flip the camera over.
+    camera.rotation = quat::euler(std::clamp(pitch + recoil_pitch, -max_pitch, max_pitch), yaw + recoil_yaw);
 }
 
 vec3 MouseLook::forward_flat() const { return {-std::sin(yaw), 0.0f, -std::cos(yaw)}; }
