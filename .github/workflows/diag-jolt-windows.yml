@@ -40,7 +40,7 @@ jobs:
           $rc = 0
           foreach ($t in 'thistle_physics3d_smoketest','thistle_destruction_smoketest') {
             "=== $t"
-            & ".\build\Release\$t.exe" 2>&1 | Select-String -Pattern 'FAIL|FAILED|passed|rests|lands' | ForEach-Object { $_.Line }
+            & ".\build\${{ matrix.config }}\$t.exe" 2>&1 | Select-String -Pattern 'FAIL|FAILED|passed|rests|lands' | ForEach-Object { $_.Line }
             if ($LASTEXITCODE -ne 0) { $rc = 1 }
           }
           exit $rc
