@@ -3,11 +3,25 @@
 // prove the engine itself (not just a JSON reader) accepts what was written.
 #include <thistle.hpp>
 #include <cstdio>
+#include <string>
 using namespace thistle;
 using namespace thistle::three;
 
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
+    if (argc >= 3 && std::string(argv[1]) == "--model") {
+        const ModelData data = load_model_data(argv[2]);
+        size_t verts = 0, tris = 0;
+        Bounds box;
+        for (const ModelData::Part& part : data.parts) {
+            verts += part.mesh.vertices.size();
+            tris += part.mesh.indices.size() / 3;
+            for (const Vertex& v : part.mesh.vertices) box.add(v.position);
+        }
+        std::printf("model parts=%zu verts=%zu tris=%zu bounds=%.3f %.3f %.3f / %.3f %.3f %.3f\n", data.parts.size(), verts, tris, box.min.x,
+                    box.min.y, box.min.z, box.max.x, box.max.y, box.max.z);
+        return verts > 0 ? 0 : 1;
+    }
     App app{{.title = "scene_dump", .width = 64, .height = 64}};
     Scene3D scene;
     if (!scene.load(argv[1])) {

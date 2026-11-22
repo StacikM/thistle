@@ -90,7 +90,7 @@ Turns on an in-app draggable log overlay (a button that expands into the capture
 
 `CMakeLists.txt` pulls these via `FetchContent`:
 
-- **Pinned:** sokol (to a commit, because the 3D renderer's pre-compiled shaders in `src/shaders/*.glsl.h` must match that exact `sokol_gfx.h`; bump it together with `tools/shaders/build_shaders.py`, see AGENTS.md), box2d `v2.4.1` (its API isn't stable across versions), cgltf `v1.15` (glTF loading), and, only when their modules are on, Jolt Physics `v5.6.0` (`THISTLE_PHYSICS3D`) and Dear ImGui `v1.92.9b` (`THISTLE_DEBUG_UI`).
+- **Pinned:** sokol (to a commit, because the 3D renderer's pre-compiled shaders in `src/shaders/*.glsl.h` must match that exact `sokol_gfx.h`; bump it together with `tools/shaders/build_shaders.py`, see AGENTS.md), box2d `v2.4.1` (its API isn't stable across versions), cgltf `v1.15` (glTF loading), and, only when their modules are on, Jolt Physics `v5.7.0` (`THISTLE_PHYSICS3D`) and Dear ImGui `v1.92.9b` (`THISTLE_DEBUG_UI`).
 - **Tracking `master`:** stb, miniaudio, fontstash. Yes, that's inconsistent: they're stable-enough header libraries that master has been fine.
 
 `third_party/nlohmann/json.hpp` is vendored directly as a single header because fetching the whole repo for one header is a waste of everyone's bandwidth.

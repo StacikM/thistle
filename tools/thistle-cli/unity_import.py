@@ -15,6 +15,7 @@ import json
 import math
 import re
 import shutil
+import struct
 from pathlib import Path
 
 # --- Unity's YAML ----------------------------------------------------------
@@ -23,6 +24,7 @@ from pathlib import Path
 # `[]`, and plain or quoted scalars. That's all this reads. A general YAML
 # library would be another install for every user of the CLI.
 
+_STRING_KEYS = {"guid", "_typelessdata", "m_IndexBuffer"}
 _INT = re.compile(r"^-?\d+$")
 _FLOAT = re.compile(r"^-?(\d+\.\d*|\.\d+|\d+)([eE][-+]?\d+)?$")
 
@@ -36,7 +38,7 @@ def _scalar(text: str, key: str = ""):
             return json.loads(text)
         except ValueError:
             return text[1:-1]
-    if key == "guid":  # 32 hex digits: "0000000000000000e000000000000000" would read as a float
+    if key in _STRING_KEYS:  # hex dumps: "0000000000000000e000000000000000", or 0001000200030004, would read as numbers
         return text
     if _INT.match(text):
         return int(text)
@@ -178,6 +180,8 @@ def parse_unity_yaml(text: str) -> dict:
 BUILTIN_GUID = "0000000000000000e000000000000000"
 BUILTIN_MESHES = {10202: "box", 10206: "cylinder", 10207: "sphere", 10208: "capsule", 10209: "plane", 10210: "quad"}
 MODEL_EXT = {".glb", ".gltf", ".obj"}
+# A Unity Mesh saved as an .asset (MapForge and other tools bake their geometry this way).
+MESH_ASSET_EXT = ".asset"
 CONVERT_MODEL_EXT = {".fbx", ".dae", ".blend", ".3ds", ".dxf", ".max", ".ma", ".mb"}
 COPY_EXT = MODEL_EXT | {".mtl", ".bin", ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".wav", ".ogg", ".mp3", ".flac", ".ttf", ".otf"}
 VEC_KEYS = {"position": ("m_LocalPosition", 3), "rotation": ("m_LocalRotation", 4), "scale": ("m_LocalScale", 3)}
@@ -218,6 +222,101 @@ def _mirror_rot(q):
 
 def _round(values, digits=6):
     return [round(v, digits) + 0.0 for v in values]
+
+
+# --- Mesh .asset files ------------------------------------------------------------
+
+_FORMAT_SIZE = {0: 4, 1: 2, 2: 1, 3: 1, 4: 2, 5: 2, 6: 1, 7: 1, 8: 2, 9: 2, 10: 4, 11: 4}
+
+
+def _decode(raw: bytes, at: int, fmt: int, dim: int):
+    """One vertex attribute, as floats. Only the formats Unity meshes use for positions, normals and UVs."""
+    if fmt == 0:
+        return list(struct.unpack_from(f"<{dim}f", raw, at))
+    if fmt == 1:
+        return list(struct.unpack_from(f"<{dim}e", raw, at))
+    if fmt == 2:
+        return [v / 255.0 for v in struct.unpack_from(f"<{dim}B", raw, at)]
+    if fmt == 3:
+        return [max(v / 127.0, -1.0) for v in struct.unpack_from(f"<{dim}b", raw, at)]
+    if fmt == 4:
+        return [v / 65535.0 for v in struct.unpack_from(f"<{dim}H", raw, at)]
+    if fmt == 5:
+        return [max(v / 32767.0, -1.0) for v in struct.unpack_from(f"<{dim}h", raw, at)]
+    raise ValueError(f"vertex format {fmt} isn't supported")
+
+
+def mesh_asset_to_obj(mesh: dict):
+    """(obj text, name) for a Unity Mesh's data, or raises ValueError saying what isn't supported.
+
+    Z is mirrored (and every triangle's winding reversed with it) so the mesh sits in
+    Thistle's right-handed space the way the scene around it does."""
+    if mesh.get("m_MeshCompression"):
+        raise ValueError("it uses Unity's mesh compression")
+    if (mesh.get("m_StreamData") or {}).get("size"):
+        raise ValueError("its vertex data is stored in a separate .resS file")
+    vd = mesh.get("m_VertexData") or {}
+    count = int(vd.get("m_VertexCount", 0))
+    channels = vd.get("m_Channels") or []
+    raw = bytes.fromhex(vd.get("_typelessdata") or "")
+    if count <= 0 or not raw:
+        raise ValueError("it has no vertices")
+    # Each stream holds some channels back to back; streams follow each other, padded to 16 bytes.
+    stride = {}
+    for ch in channels:
+        dim = int(ch.get("dimension", 0)) & 0xF
+        if dim:
+            stream = int(ch.get("stream", 0))
+            stride[stream] = max(stride.get(stream, 0), int(ch.get("offset", 0)) + dim * _FORMAT_SIZE[int(ch.get("format", 0))])
+    start, at = {}, 0
+    for stream in sorted(stride):
+        start[stream] = at
+        at += (count * stride[stream] + 15) // 16 * 16
+
+    def attribute(index: int, want: int):
+        if index >= len(channels):
+            return None
+        ch = channels[index]
+        dim = int(ch.get("dimension", 0)) & 0xF
+        if dim < want:
+            return None
+        stream, fmt = int(ch.get("stream", 0)), int(ch.get("format", 0))
+        base, step = start[stream] + int(ch.get("offset", 0)), stride[stream]
+        return [_decode(raw, base + i * step, fmt, dim)[:want] for i in range(count)]
+
+    positions = attribute(0, 3)
+    if positions is None:
+        raise ValueError("it has no vertex positions")
+    normals, uvs = attribute(1, 3), attribute(4, 2)
+
+    index_hex = mesh.get("m_IndexBuffer") or ""
+    indices_raw = bytes.fromhex(index_hex)
+    wide = int(mesh.get("m_IndexFormat", 0)) == 1
+    unit = 4 if wide else 2
+    triangles = []
+    for sub in mesh.get("m_SubMeshes") or []:
+        if int(sub.get("topology", 0)) != 0:
+            raise ValueError("it has a submesh that isn't made of triangles")
+        first, n, base = int(sub.get("firstByte", 0)), int(sub.get("indexCount", 0)), int(sub.get("baseVertex", 0))
+        values = struct.unpack_from(f"<{n}{'I' if wide else 'H'}", indices_raw, first)
+        triangles += [(values[i] + base, values[i + 1] + base, values[i + 2] + base) for i in range(0, n - n % 3, 3)]
+    if not triangles or max(max(t) for t in triangles) >= count:
+        raise ValueError("its indices don't match its vertices")
+
+    name = str(mesh.get("m_Name") or "mesh")
+    lines = [f"# from Unity mesh {name} by thistle import-unity (Z mirrored, winding reversed)", f"o {name}"]
+    lines += [f"v {x + 0.0:.7g} {y + 0.0:.7g} {-z + 0.0:.7g}" for x, y, z in positions]
+    if normals:
+        lines += [f"vn {x + 0.0:.7g} {y + 0.0:.7g} {-z + 0.0:.7g}" for x, y, z in normals]
+    if uvs:
+        lines += [f"vt {u:.7g} {v:.7g}" for u, v in uvs]
+
+    def corner(i: int) -> str:
+        n = i + 1
+        return f"{n}/{n if uvs else ''}/{n}" if normals else (f"{n}/{n}" if uvs else f"{n}")
+
+    lines += [f"f {corner(a)} {corner(c)} {corner(b)}" for a, b, c in triangles]
+    return "\n".join(lines) + "\n", name
 
 
 class Node:
@@ -292,6 +391,8 @@ class Importer:
 
     def model_path(self, rel: str) -> str:
         ext = Path(rel).suffix.lower()
+        if ext == MESH_ASSET_EXT:
+            return "assets/" + str(Path(rel).with_suffix(".obj").as_posix())
         if ext in CONVERT_MODEL_EXT:
             glb = str(Path(rel).with_suffix(".glb").as_posix())
             if rel not in self.to_convert:
@@ -687,9 +788,31 @@ class Importer:
             return False
         walk(roots, [0.0, 0.0, 0.0, 1.0])
 
+    def convert_mesh_assets(self) -> None:
+        for path in sorted(self.assets.rglob("*" + MESH_ASSET_EXT)):
+            rel = path.relative_to(self.assets)
+            text = path.read_text(encoding="utf-8", errors="replace") if path.stat().st_size < 200_000_000 else ""
+            if not text.startswith("%YAML") or "--- !u!43 " not in text:
+                continue
+            for obj in parse_unity_yaml(text).values():
+                if obj.class_id != 43:
+                    continue
+                try:
+                    obj_text, _name = mesh_asset_to_obj(obj.data)
+                except (ValueError, KeyError, struct.error) as why:
+                    self.warn(f"Mesh {rel.as_posix()} was not converted: {why}.")
+                    continue
+                dest = self.out / "assets" / rel.with_suffix(".obj")
+                if dest.exists() and not self.force:
+                    self.warn(f"{dest.relative_to(self.out).as_posix()} already exists; kept it (use --force to overwrite).")
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(obj_text, encoding="utf-8")
+                self.count("mesh .asset files converted to .obj")
+
     def copy_assets(self) -> None:
         for path in sorted(self.assets.rglob("*")):
-            if not path.is_file() or path.suffix == ".meta" or path.suffix.lower() in (".unity", ".prefab", ".mat"):
+            if not path.is_file() or path.suffix == ".meta" or path.suffix.lower() in (".unity", ".prefab", ".mat", MESH_ASSET_EXT):
                 continue
             ext = path.suffix.lower()
             rel = path.relative_to(self.assets)
@@ -722,6 +845,7 @@ class Importer:
             info = self.read_material(mat.relative_to(self.assets).as_posix())
             if info and self.write_json(self.out / "assets" / "materials" / (re.sub(r"[^A-Za-z0-9_.-]+", "_", mat.stem) + ".json"), info):
                 self.count("materials")
+        self.convert_mesh_assets()
         self.copy_assets()
         self.write_report()
         return 0
