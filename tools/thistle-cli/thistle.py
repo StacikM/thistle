@@ -424,7 +424,48 @@ def cmd_editor(args) -> None:
 
 # --- version ---------------------------------------------------------------
 
+def _rust_importer() -> "Path | None":
+    """The built thistle-import program (tools/thistle-import), if there is one: THISTLE_IMPORT_BIN, then the cargo output
+    folder in the engine checkout, then PATH. It's an optional accelerator; the Python importer is always there."""
+    env = os.environ.get("THISTLE_IMPORT_BIN")
+    if env and Path(env).is_file():
+        return Path(env)
+    exe = "thistle-import.exe" if os.name == "nt" else "thistle-import"
+    built = ENGINE_ROOT / "tools" / "thistle-import" / "target" / "release" / exe
+    if built.is_file():
+        return built
+    found = shutil.which("thistle-import")
+    return Path(found) if found else None
+
+
+def cmd_build_importer(args) -> None:
+    cargo = shutil.which("cargo")
+    if not cargo:
+        die("cargo (Rust) isn't installed: get it from https://rustup.rs, or just keep using the Python importer, which needs nothing")
+    manifest = ENGINE_ROOT / "tools" / "thistle-import" / "Cargo.toml"
+    print("$ cargo build --release --manifest-path " + str(manifest))
+    sys.exit(subprocess.run([cargo, "build", "--release", "--manifest-path", str(manifest)]).returncode)
+
+
 def cmd_import_unity(args) -> None:
+    rust = None if args.python else _rust_importer()
+    if rust:
+        # The same arguments, the same files and report, about ten times faster on big projects.
+        cmd = [str(rust), str(Path(args.unity_project).resolve())]
+        if args.out:
+            cmd += ["--out", str(Path(args.out).resolve())]
+        if args.force:
+            cmd.append("--force")
+        for scene in args.scene:
+            cmd += ["--scene", scene]
+        cmd += ["--ambient-scale", str(args.ambient_scale), "--light-scale", str(args.light_scale), "--sun-scale", str(args.sun_scale)]
+        if args.blender:
+            cmd += ["--blender", args.blender]
+        if args.no_fbx:
+            cmd.append("--no-fbx")
+        print("(using the Rust importer, " + str(rust) + ")")
+        sys.stdout.flush()
+        sys.exit(subprocess.run(cmd).returncode)
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from unity_import import import_unity
     out = Path(args.out).resolve() if args.out else Path.cwd()
@@ -557,7 +598,10 @@ def main() -> None:
     p_unity.add_argument("--sun-scale", type=float, default=1.0, help="multiply the directional light's intensity by this (default 1.0)")
     p_unity.add_argument("--blender", metavar="PATH", help="the Blender (or FBX2glTF) to convert .fbx models with; default: FBX2glTF or blender on PATH, or a standard Blender install")
     p_unity.add_argument("--no-fbx", action="store_true", help="don't convert .fbx models (just list them)")
+    p_unity.add_argument("--python", action="store_true", help="use the Python importer even if the faster Rust one (thistle build-importer) is built")
     p_unity.set_defaults(func=cmd_import_unity)
+
+    sub.add_parser("build-importer", help="build the Rust importer (needs cargo): thistle import-unity then uses it, about ten times faster").set_defaults(func=cmd_build_importer)
 
     p_build = sub.add_parser("build", help="configure + build the project in the current directory")
     p_build.add_argument("--release", action="store_true")

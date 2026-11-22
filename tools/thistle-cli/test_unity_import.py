@@ -16,6 +16,17 @@ import tempfile
 from pathlib import Path
 
 CLI = Path(__file__).resolve().parent / "thistle.py"
+# THISTLE_IMPORT_BIN=<path to thistle-import>: run the same checks against the Rust implementation instead of the Python one.
+RUST_BIN = os.environ.get("THISTLE_IMPORT_BIN", "")
+if "--rust" in sys.argv:  # build it (cargo) and test that
+    sys.argv.remove("--rust")
+    manifest = Path(__file__).resolve().parents[1] / "thistle-import" / "Cargo.toml"
+    built = subprocess.run(["cargo", "build", "--release", "--manifest-path", str(manifest)], capture_output=True, text=True)
+    if built.returncode != 0:
+        print(built.stdout + built.stderr)
+        sys.exit(1)
+    RUST_BIN = str(manifest.parent / "target" / "release" / ("thistle-import.exe" if os.name == "nt" else "thistle-import"))
+IMPORT_PREFIX = [RUST_BIN] if RUST_BIN else [sys.executable, str(CLI), "import-unity", "--python"]
 failures = 0
 
 
@@ -602,7 +613,7 @@ def test_depot() -> None:
         meta(a / "Scripts" / "Door.cs", "dddddddd22222222dddddddd22222222")
 
         def run(*extra: str) -> subprocess.CompletedProcess:
-            return subprocess.run([sys.executable, str(CLI), "import-unity", str(unity), "--out", str(out), "--force", *extra], capture_output=True, text=True, encoding="utf-8", errors="replace")
+            return subprocess.run([*IMPORT_PREFIX, str(unity), "--out", str(out), "--force", *extra], capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         r = run("--scene", "metro depot")
         check(r.returncode == 0, "import-unity --scene 'metro depot' (any case) exits 0")
@@ -646,6 +657,9 @@ def test_depot() -> None:
         check(not (out / "assets" / "scenes" / "Other.scene.json").exists(), "the other scene isn't converted")
         check(not (out / "assets" / "Meshes" / "Unused.obj").exists(), "a mesh nothing in the chosen scene uses isn't converted")
         check((out / "assets" / "prefabs" / "Terminal.scene.json").exists(), "the prefab the scene instantiates is written")
+        red = json.loads((out / "assets" / "materials" / "Red.json").read_text(encoding="utf-8"))
+        check(red["emissive"] == [0, 0, 0] and "metallic_set" not in red and red["uv_scale"] == [4, 2] and red["texture"] == "assets/Textures/concrete.png",
+              "a material's sidecar: black emissive when it has none, tiling kept, no internal flags (both importers must agree on this)")
         mats = sorted(p.name for p in (out / "assets" / "materials").iterdir())
         check(mats == ["Red.json", "Red_B.json"], f"two materials with the same name in different folders both survive ({mats})")
         report = (out / "unity-import-report.md").read_text(encoding="utf-8")
@@ -729,7 +743,7 @@ PrefabInstance:
 """, encoding="utf-8")
 
         def run(*extra: str, env=None) -> subprocess.CompletedProcess:
-            return subprocess.run([sys.executable, str(CLI), "import-unity", str(unity), "--out", str(out), "--force", *extra], capture_output=True, text=True,
+            return subprocess.run([*IMPORT_PREFIX, str(unity), "--out", str(out), "--force", *extra], capture_output=True, text=True,
                                   encoding="utf-8", errors="replace", env=env, timeout=600)
 
         r = run()
@@ -762,20 +776,22 @@ PrefabInstance:
 def main() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from unity_import import parse_unity_yaml, _flow
+    print("implementation: " + ("Rust (" + RUST_BIN + ")" if RUST_BIN else "Python"))
 
     test_depot()
     test_fbx(sys.argv[1] if len(sys.argv) > 1 else None)
 
-    print("the YAML subset")
-    check(_flow("{fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}") == {"fileID": 10202, "guid": "0000000000000000e000000000000000", "type": 0},
-          "a guid made only of digits and one 'e' stays a string")
-    check(_flow("{x: -1.5e-05, y: 2, z: 0}") == {"x": -1.5e-05, "y": 2, "z": 0}, "flow mappings with floats and ints")
-    check(_flow("[]") == [] and _flow("{}") == {}, "empty flow collections")
-    objs = parse_unity_yaml(SCENE)
-    check({1, 4, 33, 23, 108, 114, 65, 1001, 104} <= {o.class_id for o in objs.values()}, "every document of the sample scene is found")
-    check(objs[12].data["m_Shadows"]["m_Type"] == 2, "a nested block mapping")
-    check(objs[10].data["m_Component"] == [{"component": {"fileID": 11}}, {"component": {"fileID": 12}}], "a sequence at its key's own indent")
-    check(objs[100].data["m_Modification"]["m_Modifications"][2]["value"] == "Crate A", "a block sequence of mappings, with a string value with a space")
+    if not RUST_BIN:  # the Python parser's own internals; the Rust one has cargo tests
+        print("the YAML subset")
+        check(_flow("{fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}") == {"fileID": 10202, "guid": "0000000000000000e000000000000000", "type": 0},
+              "a guid made only of digits and one 'e' stays a string")
+        check(_flow("{x: -1.5e-05, y: 2, z: 0}") == {"x": -1.5e-05, "y": 2, "z": 0}, "flow mappings with floats and ints")
+        check(_flow("[]") == [] and _flow("{}") == {}, "empty flow collections")
+        objs = parse_unity_yaml(SCENE)
+        check({1, 4, 33, 23, 108, 114, 65, 1001, 104} <= {o.class_id for o in objs.values()}, "every document of the sample scene is found")
+        check(objs[12].data["m_Shadows"]["m_Type"] == 2, "a nested block mapping")
+        check(objs[10].data["m_Component"] == [{"component": {"fileID": 11}}, {"component": {"fileID": 12}}], "a sequence at its key's own indent")
+        check(objs[100].data["m_Modification"]["m_Modifications"][2]["value"] == "Crate A", "a block sequence of mappings, with a string value with a space")
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -802,7 +818,7 @@ def main() -> None:
         meta(a / "Textures" / "t.png", G_TEX)
 
         print("importing")
-        r = subprocess.run([sys.executable, str(CLI), "import-unity", str(unity), "--out", str(out), "--no-fbx"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        r = subprocess.run([*IMPORT_PREFIX, str(unity), "--out", str(out), "--no-fbx"], capture_output=True, text=True, encoding="utf-8", errors="replace")
         check(r.returncode == 0, "thistle import-unity exits 0")
         if r.returncode != 0:
             print(r.stdout + r.stderr)
@@ -886,13 +902,13 @@ def main() -> None:
         print("re-running")
         before = scene_path.read_text(encoding="utf-8")
         scene_path.write_text("edited", encoding="utf-8")
-        subprocess.run([sys.executable, str(CLI), "import-unity", str(unity), "--out", str(out)], capture_output=True)
+        subprocess.run([*IMPORT_PREFIX, str(unity), "--out", str(out)], capture_output=True)
         check(scene_path.read_text(encoding="utf-8") == "edited", "an existing file is kept without --force")
-        subprocess.run([sys.executable, str(CLI), "import-unity", str(unity), "--out", str(out), "--force"], capture_output=True)
+        subprocess.run([*IMPORT_PREFIX, str(unity), "--out", str(out), "--force"], capture_output=True)
         check(scene_path.read_text(encoding="utf-8") == before, "--force overwrites it, and the output is the same as the first time")
 
         print("not a Unity project")
-        r = subprocess.run([sys.executable, str(CLI), "import-unity", str(root), "--out", str(out)], capture_output=True, text=True)
+        r = subprocess.run([*IMPORT_PREFIX, str(root), "--out", str(out)], capture_output=True, text=True)
         check(r.returncode != 0 and "Assets" in r.stdout, "a folder without Assets/ is refused, clearly")
 
         if len(sys.argv) > 1:
