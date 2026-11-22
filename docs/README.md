@@ -19,6 +19,7 @@ You want to make a game, not read a novel. Here's the map:
 - [networking.md](networking.md) — realtime client/server (Mirror-flavored `NetVar`/Command/ClientRpc over TCP), multiplayer block worlds (`VoxelSync`) and smoothing remote movement. Read the scope section before you plan a game around it.
 - [iap.md](iap.md) — in-app purchases via StoreKit (iOS/macOS only). Read the "what's actually been verified" section before you assume a purchase has ever succeeded.
 - [cli.md](cli.md) — the `thistle` CLI: scaffold a project (blank, or a playable fps, third-person, voxel or multiplayer game), build/run it (and its dedicated server), manage its version, turn optional modules on, run the editor. No dependencies to install, on purpose.
+- [unity-import.md](unity-import.md) — `thistle import-unity`: bring a Unity project's scenes, prefabs, materials and assets over. Read what it doesn't do.
 - [crash-handler.md](crash-handler.md) — local-only crash reporting: a report file plus a native popup, automatically, on every crash. No telemetry, ever.
 - [android.md](android.md) — building, packaging (no Gradle needed), and what is and isn't verified on Android yet. Read the "what's not verified" section before you assume rendering works.
 
@@ -28,7 +29,7 @@ A small immediate-mode game engine, 2D and 3D, glued together from other people'
 
 In 2D it draws rectangles, circles, sprites, and text through one function call each, every frame, and gets out of your way. In 3D (`thistle::three`, see [3d.md](3d.md)) it's the same idea: draw models, shapes, block worlds and lights every frame, then `render()`. There's a level editor for the 3D side ([tools/thistle-editor](../tools/thistle-editor/README.md)), and `thistle new --template fps|third-person|voxel|multiplayer` gives you a playable game to start from (the last one with a dedicated server, see [dedicated-servers.md](dedicated-servers.md)).
 
-It is not Unreal. It is not even close to Unreal. The lighting is classic (a sun with shadows, point and spot lights, sky-colored ambient), not physically-based: no normal maps, no reflections, no global illumination, no material editor. The level editor places things and paints blocks; it doesn't script, animate or build a game for you. And the 3D renderer has been run on Windows with a real GPU (D3D11) and on a software renderer under Linux, but not yet on a Mac (Metal), a phone or the web — [3d.md](3d.md#whats-been-verified) says exactly what's been checked where. Know all that before you invest a week in it.
+It is not Unreal. It is not even close to Unreal. The lighting is classic (a sun with shadows, point and spot lights, sky-colored ambient), physically based only for materials that ask for it (`Material::pbr`, and glTF models): no environment reflections, no global illumination, no material editor. The level editor places things and paints blocks; it doesn't script, animate or build a game for you. And the 3D renderer has been run on Windows with a real GPU (D3D11) and on a software renderer under Linux, but not yet on a Mac (Metal), a phone or the web — [3d.md](3d.md#whats-been-verified) says exactly what's been checked where. Know all that before you invest a week in it.
 
 ## The one idea that matters
 

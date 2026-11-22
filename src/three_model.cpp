@@ -310,11 +310,24 @@ struct GltfLoader {
                     out.uv_scale = {pbr.base_color_texture.transform.scale[0], pbr.base_color_texture.transform.scale[1]};
                 }
             }
-            // No PBR here: map roughness onto the Blinn-Phong highlight so a
-            // glossy Blender material still reads as glossy.
+            // glTF materials are metallic-roughness already. The Blinn-Phong
+            // numbers stay filled in too, so turning `pbr` off on a loaded
+            // model still gives a glossy Blender material a highlight.
             const float r = std::clamp(pbr.roughness_factor, 0.05f, 1.0f);
             out.specular = 0.5f * (1.0f - r);
             out.shininess = std::clamp(2.0f / (r * r * r * r) - 2.0f, 2.0f, 256.0f);
+            out.pbr = true;
+            out.metallic = std::clamp(pbr.metallic_factor, 0.0f, 1.0f);
+            out.roughness = std::clamp(pbr.roughness_factor, 0.0f, 1.0f);
+            if (pbr.metallic_roughness_texture.texture) out.metallic_roughness_texture = texture_for(pbr.metallic_roughness_texture.texture->image);
+        }
+        if (m->normal_texture.texture) {
+            out.normal_texture = texture_for(m->normal_texture.texture->image);
+            out.normal_scale = m->normal_texture.scale;
+        }
+        if (m->occlusion_texture.texture) {
+            out.occlusion_texture = texture_for(m->occlusion_texture.texture->image);
+            out.occlusion_strength = m->occlusion_texture.scale;
         }
         const float strength = m->has_emissive_strength ? m->emissive_strength.emissive_strength : 1.0f;
         out.emissive = linear_to_srgb(rgba{m->emissive_factor[0] * strength, m->emissive_factor[1] * strength,

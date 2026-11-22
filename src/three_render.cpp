@@ -3,11 +3,13 @@
 
 #include "sokol_gfx.h"
 #include "sokol_gl.h"
+#include "sokol_glue.h"
 
 #include "shaders/background.glsl.h"
 #include "shaders/billboard.glsl.h"
 #include "shaders/lines.glsl.h"
 #include "shaders/lit.glsl.h"
+#include "shaders/post3d.glsl.h"
 #include "shaders/shadow.glsl.h"
 
 #include <algorithm>
@@ -137,9 +139,28 @@ struct PassRecord {
     std::vector<WorldImpl::LineVertex> lines_on_top;
     int line_first = 0; // vertex offsets into this frame's shared line buffer
     int on_top_first = 0;
+    PostSettings post;
+    float lod_bias = 1.0f;
+    bool occlusion_culling = false;
+    int occlusion = -1;  // index into RenderState::occlusion_buffers, -1 = nothing to test against
+    int hdr_target = -1; // index into RenderState::hdr_targets, -1 = drawn straight to the window
+    // What the main pass draws from `many`: split by level of detail and
+    // culled copy by copy where that matters (shadows use `many` as it is,
+    // since a copy off-screen can still shadow one on-screen).
+    std::vector<WorldImpl::ManyCmd> view_many;
 };
 
 enum PipelineKind { PipOpaque, PipOpaqueDouble, PipBlend, PipBlendDouble, PipCount };
+
+// Every pipeline that draws into the scene. Two sets exist: one for the
+// window and one for the half-float image World::post draws into.
+struct PipelineSet {
+    sg_pipeline pipelines[PipCount] = {};
+    sg_pipeline instanced_pipelines[PipCount] = {};
+    sg_pipeline sky = {}, depth_reset = {};
+    sg_pipeline line = {}, line_on_top = {};
+    sg_pipeline billboard = {}, billboard_additive = {};
+};
 
 struct RenderState {
     bool ready = false;
@@ -190,6 +211,29 @@ struct RenderState {
     sg_pipeline line_on_top_pipeline = {};
     sg_buffer line_buffer = {};
     size_t line_capacity = 0; // in vertices
+
+    // The scene as high dynamic range, for World::post: one target per
+    // render() that uses it this frame, and the bloom chain that goes with it.
+    struct HdrTarget {
+        struct Level {
+            int w = 0, h = 0;
+            sg_image image = {};
+            sg_view attachment = {};
+            sg_view texture = {};
+        };
+        int w = 0, h = 0;
+        Level scene;
+        sg_image depth = {};
+        sg_view depth_attachment = {};
+        std::vector<Level> bloom; // [0] is half the size of the scene, each next one half again
+    };
+    std::vector<HdrTarget> hdr_targets;
+    PipelineSet hdr;
+    sg_shader prefilter_shader = {}, down_shader = {}, up_shader = {}, composite_shader = {};
+    sg_pipeline prefilter_pipeline = {}, down_pipeline = {}, up_pipeline = {}, composite_pipeline = {};
+    bool hdr_supported = false;
+    bool hdr_warned = false;
+    std::vector<OcclusionBuffer> occlusion_buffers;
 
     std::vector<PassRecord> passes;
     int current_layer = 0;
@@ -274,6 +318,18 @@ void add_instance_layout(sg_pipeline_desc& pd, int first_attr) {
     }
 }
 
+// Pipelines are made for the window's pixel format; the ones for the HDR
+// image differ in that and nothing else. A pipeline has to match the pass
+// it's used in, so building both sets is the only way to draw the same scene
+// to either. (A flag, not a parameter on every maker, because it only
+// matters in three_setup.)
+bool g_making_hdr = false;
+void apply_target(sg_pipeline_desc& pd) {
+    if (!g_making_hdr) return;
+    pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA16F;
+    pd.sample_count = 1;
+}
+
 sg_pipeline make_lit_pipeline(bool blend, bool double_sided, bool instanced) {
     sg_pipeline_desc pd = {};
     pd.shader = instanced ? g_three.lit_instanced_shader : g_three.lit_shader;
@@ -299,6 +355,7 @@ sg_pipeline make_lit_pipeline(bool blend, bool double_sided, bool instanced) {
         pd.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
     }
     pd.label = instanced ? "three-lit-instanced" : "three-lit";
+    apply_target(pd);
     return sg_make_pipeline(&pd);
 }
 
@@ -316,6 +373,7 @@ sg_pipeline make_line_pipeline(bool on_top) {
     pd.colors[0].blend.src_factor_alpha = SG_BLENDFACTOR_ONE;
     pd.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
     pd.label = on_top ? "three-lines-on-top" : "three-lines";
+    apply_target(pd);
     return sg_make_pipeline(&pd);
 }
 
@@ -350,6 +408,7 @@ sg_pipeline make_billboard_pipeline(bool additive) {
     pd.colors[0].blend.src_factor_alpha = additive ? SG_BLENDFACTOR_ZERO : SG_BLENDFACTOR_ONE;
     pd.colors[0].blend.dst_factor_alpha = additive ? SG_BLENDFACTOR_ONE : SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
     pd.label = additive ? "three-billboard-additive" : "three-billboard";
+    apply_target(pd);
     return sg_make_pipeline(&pd);
 }
 
@@ -361,6 +420,7 @@ sg_pipeline make_background_pipeline(bool write_color) {
     pd.cull_mode = SG_CULLMODE_NONE;
     if (!write_color) pd.colors[0].write_mask = SG_COLORMASK_NONE;
     pd.label = write_color ? "three-sky" : "three-depth-reset";
+    apply_target(pd);
     return sg_make_pipeline(&pd);
 }
 
@@ -641,12 +701,40 @@ struct DrawItem {
     int64_t skin_first = -1; // posed items: first vertex in the frame's skinned-vertex buffer
 };
 
-void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
+struct ViewRect {
+    int x = 0, y = 0, w = 0, h = 0;
+};
+
+ViewRect pass_rect(const PassRecord& pass, int fb_w, int fb_h) {
     const bool full = pass.viewport.size.x <= 0.0f || pass.viewport.size.y <= 0.0f;
-    const int vx = full ? 0 : static_cast<int>(pass.viewport.pos.x);
-    const int vy = full ? 0 : static_cast<int>(pass.viewport.pos.y);
-    const int vw = full ? fb_w : static_cast<int>(pass.viewport.size.x);
-    const int vh = full ? fb_h : static_cast<int>(pass.viewport.size.y);
+    if (full) return {0, 0, fb_w, fb_h};
+    return {static_cast<int>(pass.viewport.pos.x), static_cast<int>(pass.viewport.pos.y), static_cast<int>(pass.viewport.size.x),
+            static_cast<int>(pass.viewport.size.y)};
+}
+
+mat4 pass_view_proj_gl(const PassRecord& pass, const ViewRect& r) {
+    return pass.camera.projection(static_cast<float>(r.w) / static_cast<float>(r.h)) * pass.camera.view();
+}
+
+PipelineSet window_pipelines() {
+    PipelineSet set;
+    std::copy(std::begin(g_three.pipelines), std::end(g_three.pipelines), set.pipelines);
+    std::copy(std::begin(g_three.instanced_pipelines), std::end(g_three.instanced_pipelines), set.instanced_pipelines);
+    set.sky = g_three.sky_pipeline;
+    set.depth_reset = g_three.depth_reset_pipeline;
+    set.line = g_three.line_pipeline;
+    set.line_on_top = g_three.line_on_top_pipeline;
+    set.billboard = g_three.billboard_pipeline;
+    set.billboard_additive = g_three.billboard_additive_pipeline;
+    return set;
+}
+
+// Draws one World::render() into whatever pass is open. Offscreen (the HDR
+// image): the viewport is the whole image, and nothing is restored after.
+void render_scene(const PassRecord& pass, int fb_w, int fb_h, const PipelineSet& P, bool offscreen) {
+    const ViewRect rect = pass_rect(pass, fb_w, fb_h);
+    const int vx = offscreen ? 0 : rect.x, vy = offscreen ? 0 : rect.y;
+    const int vw = rect.w, vh = rect.h;
     if (vw <= 0 || vh <= 0) return;
     sg_apply_viewport(vx, vy, vw, vh, true);
     sg_apply_scissor_rect(vx, vy, vw, vh, true);
@@ -655,6 +743,7 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
     const mat4 proj_gl = pass.camera.projection(static_cast<float>(vw) / static_cast<float>(vh));
     const mat4 view_proj_gl = proj_gl * view;
     const mat4 view_proj = clip_fix(proj_gl) * view;
+    const OcclusionBuffer* occlusion = pass.occlusion >= 0 ? &g_three.occlusion_buffers[static_cast<size_t>(pass.occlusion)] : nullptr;
     RenderStats& stats = g_three.stats_this_frame;
 
     SkyboxRecord* skybox = skybox_record(pass.sky.skybox);
@@ -668,7 +757,7 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
     const vec3 sun_dir = normalize(pass.sun.direction);
 
     // Background: sky (or nothing) plus a depth reset for this pass.
-    sg_apply_pipeline(pass.sky.visible ? g_three.sky_pipeline : g_three.depth_reset_pipeline);
+    sg_apply_pipeline(pass.sky.visible ? P.sky : P.depth_reset);
     sg_bindings bg_bind = {};
     bg_bind.views[VIEW_sky_tex] = use_skybox ? skybox->view : g_three.black_cube_view;
     bg_bind.samplers[SMP_sky_smp] = g_three.sky_sampler;
@@ -692,6 +781,17 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
     for (const WorldImpl::DrawCmd& cmd : pass.draws) {
         ModelRecord* rec = model_record(Model{cmd.model});
         if (!rec) continue;
+        // Posed models always draw level 0: the pose belongs to its skeleton.
+        if (!rec->lods.empty() && cmd.skin_first < 0) {
+            const float dist = distance(rec->bounds.transformed(cmd.world).center(), pass.camera.position);
+            const Model pick = pick_model_lod(Model{cmd.model}, dist, pass.lod_bias);
+            if (pick.id != cmd.model) {
+                if (ModelRecord* lod_rec = model_record(pick)) {
+                    rec = lod_rec;
+                    stats.lod_swaps += static_cast<int>(lod_rec->parts.size());
+                }
+            }
+        }
         int64_t skin_at = cmd.skin_first;
         for (const PartRecord& part : rec->parts) {
             MeshRecord& mesh = rec->meshes[part.mesh];
@@ -711,12 +811,16 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
                 ++stats.culled;
                 continue;
             }
+            if (occlusion && skin_first < 0 && !occlusion->is_visible(box)) {
+                ++stats.occluded;
+                continue;
+            }
             DrawItem item{&mesh, mat, world, cmd.tint, dot(box.center() - pass.camera.position, pass.camera.forward()), kind};
             if (skin_first >= 0) item.skin_first = pass.skin_base + skin_first;
             items.push_back(item);
         }
     }
-    for (const WorldImpl::ManyCmd& cmd : pass.many) {
+    for (const WorldImpl::ManyCmd& cmd : pass.view_many) {
         ModelRecord* rec = model_record(Model{cmd.model});
         if (!rec || cmd.count == 0) continue;
         if (!frustum.intersects(cmd.bounds)) {
@@ -782,14 +886,14 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
     bool lines_drawn = false;
     for (const DrawItem& item : items) {
         if (item.pipeline >= PipBlend && !lines_drawn) {
-            draw_lines(g_three.line_pipeline, pass.line_first, static_cast<int>(pass.lines.size()), view_proj);
+            draw_lines(P.line, pass.line_first, static_cast<int>(pass.lines.size()), view_proj);
             lines_drawn = true;
             bound_pipeline = -1;
         }
         const bool instanced = item.inst_count > 0;
         const int want_pipeline = item.pipeline + (instanced ? PipCount : 0);
         if (want_pipeline != bound_pipeline) {
-            sg_apply_pipeline(instanced ? g_three.instanced_pipelines[item.pipeline] : g_three.pipelines[item.pipeline]);
+            sg_apply_pipeline(instanced ? P.instanced_pipelines[item.pipeline] : P.pipelines[item.pipeline]);
             sg_apply_uniforms(UB_lit_scene_params, SG_RANGE(scene));
             bound_pipeline = want_pipeline;
         }
@@ -809,6 +913,17 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
         bind.views[VIEW_base_tex] = tex_view.id != SG_INVALID_ID ? tex_view : g_three.white_view;
         const sg_view glow_view = mat.emissive_texture.valid() ? detail::texture_view(mat.emissive_texture) : sg_view{};
         bind.views[VIEW_emissive_tex] = glow_view.id != SG_INVALID_ID ? glow_view : g_three.white_view;
+        // A map whose texture didn't load counts as absent: a white normal
+        // map would tilt every normal, not leave them alone.
+        bool has_map[3] = {false, false, false};
+        auto map_view = [&](const Texture& t, int slot) {
+            const sg_view v = mat.pbr && t.valid() ? detail::texture_view(t) : sg_view{};
+            has_map[slot] = v.id != SG_INVALID_ID;
+            return has_map[slot] ? v : g_three.white_view;
+        };
+        bind.views[VIEW_normal_tex] = map_view(mat.normal_texture, 0);
+        bind.views[VIEW_metal_rough_tex] = map_view(mat.metallic_roughness_texture, 1);
+        bind.views[VIEW_occlusion_tex] = map_view(mat.occlusion_texture, 2);
         bind.views[VIEW_shadow_map] = shadow_view;
         bind.samplers[SMP_shadow_smp] = g_three.shadow_sampler;
         bind.samplers[SMP_base_smp] = mat.filter == TextureFilter::Nearest ? g_three.sampler_nearest : g_three.sampler_linear;
@@ -828,6 +943,10 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
         mp.emissive = {mat.emissive.r, mat.emissive.g, mat.emissive.b, opaque ? 1.0f : 0.0f};
         mp.surface = {mat.specular, std::max(mat.shininess, 1.0f), mat.unlit ? 1.0f : 0.0f,
                       mat.alpha == AlphaMode::Cutout ? mat.alpha_cutoff : -1.0f};
+        if (mat.pbr) {
+            mp.pbr = {1.0f, mat.metallic, mat.roughness, mat.normal_scale};
+            mp.pbr_maps = {has_map[0] ? 1.0f : 0.0f, has_map[1] ? 1.0f : 0.0f, has_map[2] ? 1.0f : 0.0f, mat.occlusion_strength};
+        }
         sg_apply_uniforms(UB_lit_material_params, SG_RANGE(mp));
 
         const int copies = instanced ? static_cast<int>(item.inst_count) : 1;
@@ -836,7 +955,7 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
         stats.triangles += item.mesh->index_count / 3 * copies;
     }
 
-    if (!lines_drawn) draw_lines(g_three.line_pipeline, pass.line_first, static_cast<int>(pass.lines.size()), view_proj);
+    if (!lines_drawn) draw_lines(P.line, pass.line_first, static_cast<int>(pass.lines.size()), view_proj);
 
     if (!pass.billboard_batches.empty()) {
         billboard_vs_params_t bvs2 = {};
@@ -848,7 +967,7 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
         int bound = -1;
         for (const PassRecord::BillboardBatch& batch : pass.billboard_batches) {
             if (static_cast<int>(batch.additive) != bound) {
-                sg_apply_pipeline(batch.additive ? g_three.billboard_additive_pipeline : g_three.billboard_pipeline);
+                sg_apply_pipeline(batch.additive ? P.billboard_additive : P.billboard);
                 sg_apply_uniforms(UB_billboard_vs_params, SG_RANGE(bvs2));
                 billboard_fs_params_t bfs2 = {};
                 bfs2.fog_color = scene.fog_color;
@@ -869,8 +988,9 @@ void render_pass(const PassRecord& pass, int fb_w, int fb_h) {
             stats.triangles += static_cast<int>(batch.count) * 2;
         }
     }
-    draw_lines(g_three.line_on_top_pipeline, pass.on_top_first, static_cast<int>(pass.lines_on_top.size()), view_proj);
+    draw_lines(P.line_on_top, pass.on_top_first, static_cast<int>(pass.lines_on_top.size()), view_proj);
 
+    if (offscreen) return;
     // Back to the full framebuffer for the 2D layers drawn after this pass.
     sg_apply_viewport(0, 0, fb_w, fb_h, true);
     sg_apply_scissor_rect(0, 0, fb_w, fb_h, true);
@@ -1140,6 +1260,9 @@ void World::render(const Frame&, const Camera& camera, Rect viewport) {
     pass.sky = sky;
     pass.fog = fog;
     pass.ambient = ambient;
+    pass.post = post;
+    pass.lod_bias = lod_bias;
+    pass.occlusion_culling = occlusion_culling;
     pass.lights = impl.lights;
     pass.draws = impl.draws;
     pass.billboards = impl.billboards;
@@ -1209,6 +1332,295 @@ namespace thistle::detail {
 
 using namespace thistle::three;
 
+namespace {
+
+using HdrTarget = RenderState::HdrTarget;
+
+void set4(float (&dst)[4], float x, float y, float z, float w) {
+    dst[0] = x; dst[1] = y; dst[2] = z; dst[3] = w;
+}
+
+void build_occlusion(PassRecord& pass, size_t index, int fb_w, int fb_h) {
+    pass.occlusion = -1;
+    const ViewRect rect = pass_rect(pass, fb_w, fb_h);
+    if (!pass.occlusion_culling || rect.w <= 0 || rect.h <= 0) return;
+    std::vector<OcclusionBuffer>& buffers = g_three.occlusion_buffers;
+    while (buffers.size() <= index) buffers.emplace_back();
+    OcclusionBuffer& buffer = buffers[index];
+    const mat4 view_proj_gl = pass_view_proj_gl(pass, rect);
+    const Frustum frustum = Frustum::from_matrix(view_proj_gl);
+    buffer.begin(view_proj_gl);
+    for (const WorldImpl::DrawCmd& cmd : pass.draws) {
+        if (cmd.skin_first >= 0) continue;
+        const ModelRecord* rec = model_record(Model{cmd.model});
+        if (!rec || !rec->occluder || !frustum.intersects(rec->bounds.transformed(cmd.world))) continue;
+        // The cheapest level stands in for the model, so a hilltop made of
+        // thousands of triangles costs the CPU a few hundred.
+        const ModelRecord* source = rec->lods.empty() ? rec : model_record(rec->lods.back().model);
+        if (!source) source = rec;
+        for (const PartRecord& part : source->parts) {
+            const Material& mat = cmd.override_material ? cmd.material : part.material;
+            if (mat.alpha != AlphaMode::Opaque || mat.color.a < 0.999f) continue;
+            const MeshRecord& mesh = source->meshes[part.mesh];
+            buffer.add_occluder(mesh.positions, mesh.triangles, cmd.world * part.local);
+        }
+    }
+    if (buffer.triangles_drawn() > 0) pass.occlusion = static_cast<int>(index);
+}
+
+// Decides, per copy, which level of detail each draw_many() copy uses and
+// drops the ones nobody can see. Copies are appended to pass.instances (the
+// originals stay where they are for the shadow pass).
+void build_view_many(PassRecord& pass, int fb_w, int fb_h) {
+    pass.view_many.clear();
+    const ViewRect rect = pass_rect(pass, fb_w, fb_h);
+    const bool can_cull = rect.w > 0 && rect.h > 0;
+    Frustum frustum;
+    if (can_cull) frustum = Frustum::from_matrix(pass_view_proj_gl(pass, rect));
+    const OcclusionBuffer* occlusion = pass.occlusion >= 0 ? &g_three.occlusion_buffers[static_cast<size_t>(pass.occlusion)] : nullptr;
+    RenderStats& stats = g_three.stats_this_frame;
+    const size_t original_cmds = pass.many.size();
+    for (size_t c = 0; c < original_cmds; ++c) {
+        const WorldImpl::ManyCmd cmd = pass.many[c];
+        const ModelRecord* rec = model_record(Model{cmd.model});
+        if (!rec || cmd.count == 0) continue;
+        if (!can_cull || (rec->lods.empty() && !occlusion)) {
+            pass.view_many.push_back(cmd);
+            continue;
+        }
+        const size_t parts = rec->parts.size();
+        std::vector<std::vector<WorldImpl::Instance>> buckets(rec->lods.size() + 1);
+        for (uint32_t i = 0; i < cmd.count; ++i) {
+            const WorldImpl::Instance inst = pass.instances[cmd.first + i];
+            const Bounds box = rec->bounds.transformed(inst.matrix);
+            if (!frustum.intersects(box)) {
+                stats.culled += static_cast<int>(parts);
+                continue;
+            }
+            if (occlusion && !occlusion->is_visible(box)) {
+                stats.occluded += static_cast<int>(parts);
+                continue;
+            }
+            size_t level = 0;
+            if (!rec->lods.empty()) {
+                const Model pick = pick_model_lod(Model{cmd.model}, distance(box.center(), pass.camera.position), pass.lod_bias);
+                for (size_t l = 0; l < rec->lods.size(); ++l) {
+                    if (rec->lods[l].model.id == pick.id) level = l + 1;
+                }
+            }
+            buckets[level].push_back(inst);
+        }
+        for (size_t level = 0; level < buckets.size(); ++level) {
+            if (buckets[level].empty()) continue;
+            const Model model = level == 0 ? Model{cmd.model} : rec->lods[level - 1].model;
+            const ModelRecord* level_rec = model_record(model);
+            if (!level_rec) continue;
+            WorldImpl::ManyCmd out;
+            out.model = model.id;
+            out.first = static_cast<uint32_t>(pass.instances.size());
+            out.count = static_cast<uint32_t>(buckets[level].size());
+            for (const WorldImpl::Instance& inst : buckets[level]) {
+                const Bounds b = level_rec->bounds.transformed(inst.matrix);
+                if (b.valid()) { out.bounds.add(b.min); out.bounds.add(b.max); }
+            }
+            pass.instances.insert(pass.instances.end(), buckets[level].begin(), buckets[level].end());
+            if (level > 0) stats.lod_swaps += static_cast<int>(buckets[level].size() * level_rec->parts.size());
+            pass.view_many.push_back(out);
+        }
+    }
+}
+
+void destroy_hdr_level(HdrTarget::Level& l) {
+    if (l.texture.id != SG_INVALID_ID) sg_destroy_view(l.texture);
+    if (l.attachment.id != SG_INVALID_ID) sg_destroy_view(l.attachment);
+    if (l.image.id != SG_INVALID_ID) sg_destroy_image(l.image);
+    l = HdrTarget::Level{};
+}
+
+void destroy_hdr_target(HdrTarget& t) {
+    destroy_hdr_level(t.scene);
+    for (HdrTarget::Level& l : t.bloom) destroy_hdr_level(l);
+    if (t.depth_attachment.id != SG_INVALID_ID) sg_destroy_view(t.depth_attachment);
+    if (t.depth.id != SG_INVALID_ID) sg_destroy_image(t.depth);
+    t = HdrTarget{};
+}
+
+HdrTarget::Level make_hdr_level(int w, int h, const char* label) {
+    HdrTarget::Level l;
+    l.w = w;
+    l.h = h;
+    sg_image_desc d = {};
+    d.usage.color_attachment = true;
+    d.width = w;
+    d.height = h;
+    d.pixel_format = SG_PIXELFORMAT_RGBA16F;
+    d.sample_count = 1;
+    d.label = label;
+    l.image = sg_make_image(&d);
+    sg_view_desc a = {};
+    a.color_attachment.image = l.image;
+    l.attachment = sg_make_view(&a);
+    sg_view_desc v = {};
+    v.texture.image = l.image;
+    l.texture = sg_make_view(&v);
+    return l;
+}
+
+// (Re)creates the scene image, and the bloom chain when it's wanted, at the
+// size this render() needs.
+HdrTarget& ensure_hdr_target(size_t index, int w, int h, bool bloom) {
+    std::vector<HdrTarget>& targets = g_three.hdr_targets;
+    while (targets.size() <= index) targets.emplace_back();
+    HdrTarget& t = targets[index];
+    if (t.w != w || t.h != h) {
+        destroy_hdr_target(t);
+        t.w = w;
+        t.h = h;
+        t.scene = make_hdr_level(w, h, "three-hdr-scene");
+        sg_image_desc dd = {};
+        dd.usage.depth_stencil_attachment = true;
+        dd.width = w;
+        dd.height = h;
+        dd.pixel_format = sglue_environment().defaults.depth_format;
+        dd.sample_count = 1;
+        dd.label = "three-hdr-depth";
+        t.depth = sg_make_image(&dd);
+        sg_view_desc dv = {};
+        dv.depth_stencil_attachment.image = t.depth;
+        t.depth_attachment = sg_make_view(&dv);
+    }
+    if (bloom && t.bloom.empty()) {
+        int lw = std::max(w / 2, 1), lh = std::max(h / 2, 1);
+        for (int i = 0; i < 6; ++i) {
+            t.bloom.push_back(make_hdr_level(lw, lh, "three-bloom"));
+            if (lw <= 8 || lh <= 8) break;
+            lw = std::max(lw / 2, 1);
+            lh = std::max(lh / 2, 1);
+        }
+    } else if (!bloom && !t.bloom.empty()) {
+        for (HdrTarget::Level& l : t.bloom) destroy_hdr_level(l);
+        t.bloom.clear();
+    }
+    return t;
+}
+
+void fullscreen_pass(sg_pipeline pip, const HdrTarget::Level& target, bool load, sg_view source, const void* params, size_t params_size) {
+    sg_pass pass = {};
+    pass.action.colors[0].load_action = load ? SG_LOADACTION_LOAD : SG_LOADACTION_DONTCARE;
+    pass.attachments.colors[0] = target.attachment;
+    sg_begin_pass(&pass);
+    sg_apply_pipeline(pip);
+    sg_bindings bind = {};
+    bind.views[0] = source;
+    bind.samplers[0] = g_three.sprite_sampler;
+    sg_apply_bindings(&bind);
+    post_vs_params_t vs = {};
+    set4(vs.flags, sg_query_features().origin_top_left ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    sg_apply_uniforms(UB_post_vs_params, SG_RANGE(vs));
+    sg_apply_uniforms(1, sg_range{params, params_size});
+    sg_draw(0, 3, 1);
+    sg_end_pass();
+    ++g_three.stats_this_frame.draw_calls;
+}
+
+// Draws this render() into its HDR image, then builds the bloom from it.
+void render_hdr(PassRecord& pass, size_t target_index, int fb_w, int fb_h) {
+    const ViewRect rect = pass_rect(pass, fb_w, fb_h);
+    HdrTarget& t = ensure_hdr_target(target_index, rect.w, rect.h, pass.post.bloom);
+    pass.hdr_target = static_cast<int>(target_index);
+
+    sg_pass scene = {};
+    scene.action.colors[0].load_action = SG_LOADACTION_CLEAR;
+    scene.action.colors[0].clear_value = {0.0f, 0.0f, 0.0f, 0.0f};
+    scene.attachments.colors[0] = t.scene.attachment;
+    scene.attachments.depth_stencil = t.depth_attachment;
+    sg_begin_pass(&scene);
+    render_scene(pass, fb_w, fb_h, g_three.hdr, true);
+    sg_end_pass();
+
+    if (!pass.post.bloom || t.bloom.empty()) return;
+    const float radius = std::max(pass.post.bloom_radius, 0.05f);
+    {
+        bloom_prefilter_params_t p = {};
+        set4(p.texel, 1.0f / static_cast<float>(t.scene.w), 1.0f / static_cast<float>(t.scene.h), 0.0f, 0.0f);
+        set4(p.bloom, std::max(pass.post.bloom_threshold, 0.0f), 0.5f, 0.0f, 0.0f);
+        fullscreen_pass(g_three.prefilter_pipeline, t.bloom[0], false, t.scene.texture, &p, sizeof(p));
+    }
+    for (size_t i = 1; i < t.bloom.size(); ++i) {
+        const HdrTarget::Level& src = t.bloom[i - 1];
+        bloom_down_params_t p = {};
+        set4(p.texel, 1.0f / static_cast<float>(src.w), 1.0f / static_cast<float>(src.h), 0.0f, 0.0f);
+        fullscreen_pass(g_three.down_pipeline, t.bloom[i], false, src.texture, &p, sizeof(p));
+    }
+    for (size_t i = t.bloom.size() - 1; i-- > 0;) {
+        const HdrTarget::Level& src = t.bloom[i + 1];
+        bloom_up_params_t p = {};
+        set4(p.texel, radius / static_cast<float>(src.w), radius / static_cast<float>(src.h), 0.0f, 0.0f);
+        fullscreen_pass(g_three.up_pipeline, t.bloom[i], true, src.texture, &p, sizeof(p));
+    }
+}
+
+// Inside the window's pass: the HDR image and its bloom, tonemapped, over
+// whatever the 2D layers drew before.
+void composite_hdr(const PassRecord& pass, int fb_w, int fb_h) {
+    const ViewRect rect = pass_rect(pass, fb_w, fb_h);
+    if (rect.w <= 0 || rect.h <= 0) return;
+    const HdrTarget& t = g_three.hdr_targets[static_cast<size_t>(pass.hdr_target)];
+    sg_apply_viewport(rect.x, rect.y, rect.w, rect.h, true);
+    sg_apply_scissor_rect(rect.x, rect.y, rect.w, rect.h, true);
+    sg_apply_pipeline(g_three.composite_pipeline);
+    sg_bindings bind = {};
+    bind.views[VIEW_scene_tex] = t.scene.texture;
+    const bool bloom = pass.post.bloom && !t.bloom.empty();
+    bind.views[VIEW_bloom_tex] = bloom ? t.bloom[0].texture : g_three.white_view;
+    bind.samplers[SMP_post_smp] = g_three.sprite_sampler;
+    sg_apply_bindings(&bind);
+    post_vs_params_t vs = {};
+    set4(vs.flags, sg_query_features().origin_top_left ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    sg_apply_uniforms(UB_post_vs_params, SG_RANGE(vs));
+    post_composite_params_t p = {};
+    set4(p.grade, std::max(pass.post.exposure, 0.0f), static_cast<float>(static_cast<int>(pass.post.tonemap)),
+         std::max(pass.post.bloom_intensity, 0.0f), bloom ? 1.0f : 0.0f);
+    sg_apply_uniforms(UB_post_composite_params, SG_RANGE(p));
+    sg_draw(0, 3, 1);
+    ++g_three.stats_this_frame.draw_calls;
+    sg_apply_viewport(0, 0, fb_w, fb_h, true);
+    sg_apply_scissor_rect(0, 0, fb_w, fb_h, true);
+}
+
+sg_pipeline make_post_pipeline(sg_shader shader, bool to_window, bool additive, const char* label) {
+    sg_pipeline_desc pd = {};
+    pd.shader = shader;
+    pd.cull_mode = SG_CULLMODE_NONE;
+    pd.colors[0].pixel_format = to_window ? sglue_environment().defaults.color_format : SG_PIXELFORMAT_RGBA16F;
+    pd.sample_count = to_window ? sglue_environment().defaults.sample_count : 1;
+    if (to_window) {
+        pd.depth.pixel_format = sglue_environment().defaults.depth_format;
+    } else {
+        pd.depth.pixel_format = SG_PIXELFORMAT_NONE;
+    }
+    pd.depth.write_enabled = false;
+    if (to_window) {
+        // The scene's colors are already multiplied by its alpha (it was
+        // drawn over transparent black), so empty pixels stay see-through.
+        pd.colors[0].blend.enabled = true;
+        pd.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_ONE;
+        pd.colors[0].blend.dst_factor_rgb = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        pd.colors[0].blend.src_factor_alpha = SG_BLENDFACTOR_ONE;
+        pd.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    } else if (additive) {
+        pd.colors[0].blend.enabled = true;
+        pd.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_ONE;
+        pd.colors[0].blend.dst_factor_rgb = SG_BLENDFACTOR_ONE;
+        pd.colors[0].blend.src_factor_alpha = SG_BLENDFACTOR_ZERO;
+        pd.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ONE;
+    }
+    pd.label = label;
+    return sg_make_pipeline(&pd);
+}
+
+} // namespace
+
 void three_setup() {
     RenderState& s = g_three;
     set_mesh_release(release_mesh);
@@ -1274,6 +1686,36 @@ void three_setup() {
     s.lines_shader = sg_make_shader(lines_shader_desc(sg_query_backend()));
     s.line_pipeline = make_line_pipeline(false);
     s.line_on_top_pipeline = make_line_pipeline(true);
+
+    {
+        const sg_pixelformat_info hdr_format = sg_query_pixelformat(SG_PIXELFORMAT_RGBA16F);
+        s.hdr_supported = hdr_format.render && hdr_format.blend && hdr_format.filter;
+        if (s.hdr_supported) {
+            g_making_hdr = true;
+            for (int instanced = 0; instanced < 2; ++instanced) {
+                sg_pipeline* p = instanced ? s.hdr.instanced_pipelines : s.hdr.pipelines;
+                p[PipOpaque] = make_lit_pipeline(false, false, instanced);
+                p[PipOpaqueDouble] = make_lit_pipeline(false, true, instanced);
+                p[PipBlend] = make_lit_pipeline(true, false, instanced);
+                p[PipBlendDouble] = make_lit_pipeline(true, true, instanced);
+            }
+            s.hdr.sky = make_background_pipeline(true);
+            s.hdr.depth_reset = make_background_pipeline(false);
+            s.hdr.line = make_line_pipeline(false);
+            s.hdr.line_on_top = make_line_pipeline(true);
+            s.hdr.billboard = make_billboard_pipeline(false);
+            s.hdr.billboard_additive = make_billboard_pipeline(true);
+            g_making_hdr = false;
+            s.prefilter_shader = sg_make_shader(bloom_prefilter_shader_desc(sg_query_backend()));
+            s.down_shader = sg_make_shader(bloom_down_shader_desc(sg_query_backend()));
+            s.up_shader = sg_make_shader(bloom_up_shader_desc(sg_query_backend()));
+            s.composite_shader = sg_make_shader(post_composite_shader_desc(sg_query_backend()));
+            s.prefilter_pipeline = make_post_pipeline(s.prefilter_shader, false, false, "three-bloom-prefilter");
+            s.down_pipeline = make_post_pipeline(s.down_shader, false, false, "three-bloom-down");
+            s.up_pipeline = make_post_pipeline(s.up_shader, false, true, "three-bloom-up");
+            s.composite_pipeline = make_post_pipeline(s.composite_shader, true, false, "three-post-composite");
+        }
+    }
 
     sg_sampler_desc lin = {};
     lin.min_filter = SG_FILTER_LINEAR;
@@ -1369,6 +1811,16 @@ void three_shutdown() {
     sg_destroy_sampler(s.sampler_nearest);
     sg_destroy_view(s.white_view);
     sg_destroy_image(s.white_image);
+    for (RenderState::HdrTarget& t : s.hdr_targets) destroy_hdr_target(t);
+    if (s.hdr_supported) {
+        for (sg_pipeline p : s.hdr.pipelines) sg_destroy_pipeline(p);
+        for (sg_pipeline p : s.hdr.instanced_pipelines) sg_destroy_pipeline(p);
+        for (sg_pipeline p : {s.hdr.sky, s.hdr.depth_reset, s.hdr.line, s.hdr.line_on_top, s.hdr.billboard, s.hdr.billboard_additive,
+                              s.prefilter_pipeline, s.down_pipeline, s.up_pipeline, s.composite_pipeline}) {
+            sg_destroy_pipeline(p);
+        }
+        for (sg_shader sh : {s.prefilter_shader, s.down_shader, s.up_shader, s.composite_shader}) sg_destroy_shader(sh);
+    }
     s = RenderState{};
 }
 
@@ -1381,7 +1833,11 @@ void three_before_passes() {
     std::vector<WorldImpl::SkinVertex> all_skinned;
     std::vector<WorldImpl::LineVertex> all_lines;
     std::vector<WorldImpl::Quad> all_quads;
+    const int frame_w = frame_width(), frame_h = frame_height();
+    size_t pass_index = 0;
     for (PassRecord& pass : s.passes) {
+        build_occlusion(pass, pass_index++, frame_w, frame_h);
+        build_view_many(pass, frame_w, frame_h);
         // See-through billboards far to near (so nearer ones blend over
         // farther ones), then glowing ones, which don't care about order.
         // Consecutive runs with the same texture become one instanced draw.
@@ -1456,6 +1912,19 @@ void three_before_passes() {
             render_shadow_map(pass, shadow_index++, frame_width(), frame_height());
         }
     }
+    size_t hdr_index = 0;
+    for (PassRecord& pass : s.passes) {
+        pass.hdr_target = -1;
+        if (!pass.post.enabled) continue;
+        const ViewRect rect = pass_rect(pass, frame_w, frame_h);
+        if (rect.w <= 0 || rect.h <= 0) continue;
+        if (!s.hdr_supported) {
+            if (!s.hdr_warned) log_warn("3D post-processing needs 16-bit float render targets, which this GPU doesn't offer - drawing without it");
+            s.hdr_warned = true;
+            continue;
+        }
+        render_hdr(pass, hdr_index++, frame_w, frame_h);
+    }
 }
 
 void three_draw_layers() {
@@ -1463,7 +1932,10 @@ void three_draw_layers() {
     const int fb_w = frame_width(), fb_h = frame_height();
     for (int layer = 0; layer <= pass_count; ++layer) {
         sgl_draw_layer(layer);
-        if (layer < pass_count) render_pass(g_three.passes[layer], fb_w, fb_h);
+        if (layer >= pass_count) continue;
+        const PassRecord& pass = g_three.passes[layer];
+        if (pass.hdr_target >= 0) composite_hdr(pass, fb_w, fb_h);
+        else render_scene(pass, fb_w, fb_h, window_pipelines(), false);
     }
 }
 

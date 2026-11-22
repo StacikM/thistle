@@ -1,6 +1,8 @@
 // The main 3D surface shader: hemisphere ambient (sky above, ground below),
 // one directional sun and up to 16 point/spot lights, each with a
-// Blinn-Phong highlight, then distance fog. All lighting math
+// Blinn-Phong highlight (or, for materials with `pbr` on, a GGX
+// metallic-roughness BRDF, normal/AO maps and reflected ambient), then
+// distance fog. All lighting math
 // happens in linear space; colors come in as sRGB (what you'd pick in a
 // color picker, same as the 2D API) and go back out as sRGB.
 @ctype mat4 thistle::three::mat4
@@ -99,6 +101,8 @@ layout(binding=2) uniform lit_material_params {
     vec4 base_color; // sRGB rgb, a = alpha
     vec4 emissive;   // sRGB rgb
     vec4 surface;    // x = specular, y = shininess, z = unlit (0/1), w = alpha cutoff (<0 = none)
+    vec4 pbr;        // x = physically based (0/1), y = metallic, z = roughness, w = normal scale
+    vec4 pbr_maps;   // x = has normal map, y = has metallic-roughness map, z = has occlusion map, w = occlusion strength
 };
 
 layout(binding=0) uniform texture2D base_tex;
@@ -106,6 +110,9 @@ layout(binding=1) uniform texture2D emissive_tex;
 layout(binding=0) uniform sampler base_smp;
 layout(binding=2) uniform texture2D shadow_map;
 layout(binding=1) uniform samplerShadow shadow_smp;
+layout(binding=3) uniform texture2D normal_tex;
+layout(binding=4) uniform texture2D metal_rough_tex;
+layout(binding=5) uniform texture2D occlusion_tex;
 
 in vec3 v_world_pos;
 in vec3 v_normal;
@@ -143,6 +150,71 @@ float sun_visibility(vec3 n, float view_dist) {
     return mix(1.0, mix(1.0, lit, shadow_params.w), 1.0 - fade);
 }
 
+const float PI = 3.14159265;
+
+// Bends the surface normal by a tangent-space normal map. The tangent comes
+// from how the texture coordinates change across the screen, so models need
+// no stored tangents (glTF's own rule for files that have none).
+vec3 perturb_normal(vec3 n, vec3 world_pos, vec2 uv) {
+    vec3 uv_dx = vec3(dFdx(uv), 0.0);
+    vec3 uv_dy = vec3(dFdy(uv), 0.0);
+    float det = uv_dx.x * uv_dy.y - uv_dy.x * uv_dx.y;
+    if (abs(det) < 1e-12) {
+        return n;
+    }
+    vec3 t = (uv_dy.y * dFdx(world_pos) - uv_dx.y * dFdy(world_pos)) / det;
+    t = normalize(t - n * dot(n, t));
+    vec3 b = cross(n, t);
+    vec3 m = texture(sampler2D(normal_tex, base_smp), uv).xyz * 2.0 - 1.0;
+    m.xy *= pbr.w;
+    return normalize(mat3(t, b, n) * m);
+}
+
+float distribution_ggx(float nh, float a2) {
+    float d = nh * nh * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+// Smith visibility, height-correlated, with the 1 / (4 n.l n.v) already in it.
+float visibility_smith(float nl, float nv, float a2) {
+    float gv = nl * sqrt(nv * nv * (1.0 - a2) + a2);
+    float gl = nv * sqrt(nl * nl * (1.0 - a2) + a2);
+    return 0.5 / max(gv + gl, 1e-5);
+}
+
+vec3 fresnel_schlick(vec3 f0, float vh) {
+    return f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
+}
+
+// One light's contribution. `radiance` is the light's color already scaled by
+// its distance falloff, in this engine's units (a white surface facing a
+// light of 1 comes out 1, the same as the classic path). The specular lobe is
+// multiplied by pi to match: Lambert's 1/pi is folded into those units.
+vec3 pbr_light(vec3 n, vec3 v, vec3 l, vec3 radiance, vec3 diffuse_color, vec3 f0, float a2) {
+    float nl = max(dot(n, l), 0.0);
+    if (nl <= 0.0) {
+        return vec3(0.0);
+    }
+    vec3 h = normalize(l + v);
+    float nv = max(dot(n, v), 1e-4);
+    float nh = max(dot(n, h), 0.0);
+    float vh = max(dot(v, h), 0.0);
+    vec3 f = fresnel_schlick(f0, vh);
+    vec3 spec = f * (distribution_ggx(nh, a2) * visibility_smith(nl, nv, a2));
+    return ((1.0 - f) * diffuse_color + spec * PI) * radiance * nl;
+}
+
+// Karis' analytic fit to the split-sum environment BRDF: how much of the
+// reflected ambient light a surface of this roughness actually returns.
+vec3 env_brdf(vec3 f0, float roughness, float nv) {
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * nv)) * r.x + r.y;
+    vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
+    return f0 * ab.x + ab.y;
+}
+
 void main() {
     vec4 tex = texture(sampler2D(base_tex, base_smp), v_uv);
     vec4 srgb = base_color * v_color * tex;
@@ -158,6 +230,9 @@ void main() {
         if (!gl_FrontFacing) {
             n = -n; // double-sided materials light their back face as its own front
         }
+        if (pbr.x > 0.5 && pbr_maps.x > 0.5) {
+            n = perturb_normal(n, v_world_pos, v_uv);
+        }
         vec3 ambient = mix(ground_ambient.rgb, sky_ambient.rgb, n.y * 0.5 + 0.5);
         vec3 l = -sun_dir.xyz;
         float ndotl = max(dot(n, l), 0.0);
@@ -166,28 +241,68 @@ void main() {
         float sun_vis = sun_visibility(n, length(to_eye));
         ndotl *= sun_vis;
         vec3 h = normalize(l + v);
-        float spec = ndotl > 0.0 ? pow(max(dot(n, h), 0.0), surface.y) * surface.x : 0.0;
-        vec3 diffuse = ambient + sun_color.rgb * ndotl;
-        vec3 highlight = sun_color.rgb * spec;
-        int count = int(light_count.x);
-        for (int i = 0; i < count; i++) {
-            vec3 to_light = light_pos[i].xyz - v_world_pos;
-            float dist = length(to_light);
-            vec3 ll = to_light / max(dist, 1e-4);
-            // Reaches exactly zero at the range, so a light's influence ends
-            // where the game says it does instead of trailing off forever.
-            float fade = clamp(1.0 - dist / light_pos[i].w, 0.0, 1.0);
-            float atten = fade * fade;
-            if (light_color[i].w > -1.5) {
-                float cos_angle = dot(-ll, light_dir[i].xyz);
-                atten *= smoothstep(light_color[i].w, light_dir[i].w, cos_angle);
+        if (pbr.x > 0.5) {
+            float metallic = clamp(pbr.y, 0.0, 1.0);
+            float roughness = clamp(pbr.z, 0.04, 1.0);
+            float occlusion = 1.0;
+            if (pbr_maps.y > 0.5) {
+                vec3 mr = texture(sampler2D(metal_rough_tex, base_smp), v_uv).rgb;
+                roughness = clamp(roughness * mr.g, 0.04, 1.0);
+                metallic = clamp(metallic * mr.b, 0.0, 1.0);
             }
-            float nl = max(dot(n, ll), 0.0);
-            diffuse += light_color[i].rgb * (nl * atten);
-            vec3 hl = normalize(ll + v);
-            highlight += nl > 0.0 ? light_color[i].rgb * (pow(max(dot(n, hl), 0.0), surface.y) * surface.x * atten) : vec3(0.0);
+            if (pbr_maps.z > 0.5) {
+                occlusion = mix(1.0, texture(sampler2D(occlusion_tex, base_smp), v_uv).r, pbr_maps.w);
+            }
+            float a = roughness * roughness;
+            float a2 = max(a * a, 0.002);
+            vec3 diffuse_color = albedo * (1.0 - metallic);
+            vec3 f0 = mix(vec3(0.04), albedo, metallic);
+            float nv = max(dot(n, v), 1e-4);
+
+            vec3 lit = pbr_light(n, v, l, sun_color.rgb * sun_vis, diffuse_color, f0, a2);
+            int pcount = int(light_count.x);
+            for (int i = 0; i < pcount; i++) {
+                vec3 to_light = light_pos[i].xyz - v_world_pos;
+                float dist = length(to_light);
+                vec3 ll = to_light / max(dist, 1e-4);
+                float fade = clamp(1.0 - dist / light_pos[i].w, 0.0, 1.0);
+                float atten = fade * fade;
+                if (light_color[i].w > -1.5) {
+                    float cos_angle = dot(-ll, light_dir[i].xyz);
+                    atten *= smoothstep(light_color[i].w, light_dir[i].w, cos_angle);
+                }
+                lit += pbr_light(n, v, ll, light_color[i].rgb * atten, diffuse_color, f0, a2);
+            }
+            // Ambient: the sky/ground hemisphere lights the diffuse part, and
+            // is mirrored (blurrier as the surface gets rougher) in the specular part.
+            vec3 refl = reflect(-v, n);
+            vec3 env_sharp = mix(ground_ambient.rgb, sky_ambient.rgb, refl.y * 0.5 + 0.5);
+            vec3 env = mix(env_sharp, (ground_ambient.rgb + sky_ambient.rgb) * 0.5, roughness * roughness);
+            color = lit + (diffuse_color * ambient + env * env_brdf(f0, roughness, nv)) * occlusion;
+        } else {
+            float spec = ndotl > 0.0 ? pow(max(dot(n, h), 0.0), surface.y) * surface.x : 0.0;
+            vec3 diffuse = ambient + sun_color.rgb * ndotl;
+            vec3 highlight = sun_color.rgb * spec;
+            int count = int(light_count.x);
+            for (int i = 0; i < count; i++) {
+                vec3 to_light = light_pos[i].xyz - v_world_pos;
+                float dist = length(to_light);
+                vec3 ll = to_light / max(dist, 1e-4);
+                // Reaches exactly zero at the range, so a light's influence ends
+                // where the game says it does instead of trailing off forever.
+                float fade = clamp(1.0 - dist / light_pos[i].w, 0.0, 1.0);
+                float atten = fade * fade;
+                if (light_color[i].w > -1.5) {
+                    float cos_angle = dot(-ll, light_dir[i].xyz);
+                    atten *= smoothstep(light_color[i].w, light_dir[i].w, cos_angle);
+                }
+                float nl = max(dot(n, ll), 0.0);
+                diffuse += light_color[i].rgb * (nl * atten);
+                vec3 hl = normalize(ll + v);
+                highlight += nl > 0.0 ? light_color[i].rgb * (pow(max(dot(n, hl), 0.0), surface.y) * surface.x * atten) : vec3(0.0);
+            }
+            color = albedo * diffuse + highlight;
         }
-        color = albedo * diffuse + highlight;
     }
     color += to_linear(emissive.rgb * texture(sampler2D(emissive_tex, base_smp), v_uv).rgb);
     if (fog_params.z > 0.5) {

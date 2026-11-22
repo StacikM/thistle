@@ -1773,6 +1773,19 @@ struct Material {
     vec2 uv_scale{1.0f, 1.0f};  // texture tiling
     TextureFilter filter = TextureFilter::Linear;
     bool casts_shadow = true;   // AlphaMode::Blend surfaces never cast shadows, whatever this says
+
+    // Physically based shading (metallic-roughness, the glTF model). Off by
+    // default so existing materials look as they always did; models loaded
+    // from glTF/GLB turn it on. When on, `specular` and `shininess` are
+    // ignored and the surface is lit by a GGX microfacet model instead.
+    bool pbr = false;
+    float metallic = 0.0f;      // 0 = plastic/wood/stone, 1 = bare metal
+    float roughness = 0.5f;     // 0 = mirror-sharp highlights, 1 = fully rough
+    Texture metallic_roughness_texture; // glTF layout: green = roughness, blue = metallic; multiplied with the two numbers above
+    Texture normal_texture;     // tangent-space normal map (bumps without more triangles)
+    float normal_scale = 1.0f;  // 0 = flat, 1 = as authored, more = exaggerated
+    Texture occlusion_texture;  // red channel darkens ambient light in creases (baked AO)
+    float occlusion_strength = 1.0f;
 };
 
 // --- models ------------------------------------------------------------------
@@ -1847,6 +1860,67 @@ Bounds model_bounds(Model model);       // in the model's own space
 int model_part_count(Model model);
 Material model_material(Model model, int part = 0);
 void set_model_material(Model model, const Material& material, int part = -1); // -1 = every part
+
+// --- level of detail -------------------------------------------------------------
+// Cheaper stand-ins for a model that's far away. The model you draw is level
+// 0; each ModelLod after it takes over once the camera is `from_distance`
+// meters away (from the middle of the model's bounds, so it doesn't pop as
+// you walk past the edge of something big). Distances must increase.
+//
+//   set_model_lods(tree, {{tree_medium, 40.0f}, {tree_low, 120.0f}});
+//   world.draw(tree, at);   // draws tree up close, tree_medium past 40 m, tree_low past 120 m
+//
+// Works with draw(), draw_many() (each copy picks its own level) and the
+// quick shapes' models. An animated model (draw with an Animator) always
+// draws level 0: its pose belongs to level 0's skeleton. Shadows are always
+// cast by level 0, so a shadow doesn't change shape as the model swaps.
+struct ModelLod {
+    Model model;
+    float from_distance = 0.0f;
+};
+void set_model_lods(Model model, const std::vector<ModelLod>& levels);
+// The model that would draw at this distance: `model` itself, or one of its
+// levels. `bias` scales every distance (2 = switch twice as far away).
+Model pick_model_lod(Model model, float distance, float bias = 1.0f);
+
+// --- occlusion culling -----------------------------------------------------------
+// Skipping what a wall is hiding. A model marked as an occluder is drawn
+// into a small depth buffer on the CPU before the frame is drawn; anything
+// whose bounds are completely behind it is then not drawn at all. Mark big,
+// solid, simple things (buildings, hills, cliff walls) and nothing else:
+// every occluder's triangles cost CPU time, and a model with holes you
+// can see through (a fence, a tree) is not an occluder. It uses the model's
+// own triangles, or its lowest LOD if it has them, so a hole in an occluder
+// is a hole in the culling too.
+void set_model_occluder(Model model, bool occluder);
+bool is_model_occluder(Model model);
+
+// The software depth buffer behind that, on its own: for culling things the
+// renderer doesn't know about, and so it can be tested without a GPU.
+class OcclusionBuffer {
+public:
+    explicit OcclusionBuffer(int width = 256, int height = 128);
+    ~OcclusionBuffer();
+    OcclusionBuffer(OcclusionBuffer&&) noexcept;
+    OcclusionBuffer& operator=(OcclusionBuffer&&) noexcept;
+    OcclusionBuffer(const OcclusionBuffer&) = delete;
+    OcclusionBuffer& operator=(const OcclusionBuffer&) = delete;
+
+    // Empties the buffer and sets the camera it's seen from (view_proj in
+    // OpenGL-style clip space, like Frustum::from_matrix).
+    void begin(const mat4& view_proj);
+    // Draws one mesh's triangles as occluders. Rasterizing is conservative:
+    // a pixel only counts as covered if the whole pixel is inside the
+    // triangle, and it keeps the farthest depth the triangle has there.
+    void add_occluder(const std::vector<vec3>& positions, const std::vector<uint32_t>& triangles, const mat4& world);
+    // False only when every pixel the box covers has an occluder in front
+    // of the box's nearest point. Boxes that touch the camera or cross the
+    // near plane are always visible.
+    bool is_visible(const Bounds& box) const;
+    int triangles_drawn() const; // since begin()
+private:
+    std::unique_ptr<struct OcclusionImpl> impl_;
+};
 
 // --- skeletal animation ------------------------------------------------------------
 // Animated glTF characters: a model with a skeleton and animation clips
@@ -2118,6 +2192,8 @@ struct RenderStats {
     int draw_calls = 0;
     int triangles = 0;  // copies drawn by draw_many() count once each
     int culled = 0; // model parts skipped because they were off-screen
+    int occluded = 0; // model parts skipped because an occluder was in front of them
+    int lod_swaps = 0; // draws that used a lower level of detail than the model's own
 };
 
 class VoxelWorld;
@@ -2180,6 +2256,34 @@ private:
     uint32_t seed_ = 12345;
 };
 
+// Whole-image effects for one World::render(). Off by default: with it off
+// the scene is drawn straight to the window, exactly as before. On, it is
+// drawn in high dynamic range (so a sun, a lamp or a fire can be much
+// brighter than white) and then squeezed into what a screen can show.
+//
+//   world.post.enabled = true;     // ACES tonemapping, exposure 1
+//   world.post.bloom = true;       // bright things glow
+//   world.post.exposure = 0.8f;    // darker overall
+//
+// Needs a GPU that can draw into 16-bit float images (every desktop GPU can;
+// phones mostly can). Without that, post-processing turns itself off and logs
+// why. Not the same as thistle::set_post_effect(), which is the 2D screen
+// effect (vignette, grayscale...) and works on top of this.
+enum class Tonemap {
+    None,     // clip anything past white
+    Reinhard, // gentle, desaturates highlights
+    ACES,     // filmic contrast, the usual default
+};
+struct PostSettings {
+    bool enabled = false;
+    Tonemap tonemap = Tonemap::ACES;
+    float exposure = 1.0f;        // 2 = twice as bright going in
+    bool bloom = false;
+    float bloom_threshold = 1.0f; // only light brighter than this glows (1 = brighter than white)
+    float bloom_intensity = 0.3f; // how strong the glow is when added back
+    float bloom_radius = 1.0f;    // 0.5 = tight, 2 = wide
+};
+
 // A 3D scene. Settings (sun, sky, ambient) stay until you change them; draw
 // calls are per frame, exactly like the 2D API — call draw() for everything
 // visible every frame, then render() once:
@@ -2198,6 +2302,9 @@ public:
     Sky sky;
     Fog fog;
     float ambient = 0.55f; // how strongly the sky/ground colors light everything
+    PostSettings post;
+    float lod_bias = 1.0f; // scales every model's LOD distances: 0.5 = switch to cheaper levels sooner
+    bool occlusion_culling = false; // skip what set_model_occluder() models hide; see there
 
     // Up to 16 point/spot lights light each render(); past that, the ones
     // nearest the camera win (off-screen ones are dropped first). Per frame,

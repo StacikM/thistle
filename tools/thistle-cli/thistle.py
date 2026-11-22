@@ -419,6 +419,13 @@ def cmd_editor(args) -> None:
 
 # --- version ---------------------------------------------------------------
 
+def cmd_import_unity(args) -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from unity_import import import_unity
+    out = Path(args.out).resolve() if args.out else Path.cwd()
+    sys.exit(import_unity(Path(args.unity_project).resolve(), out, args.force))
+
+
 def cmd_version(args) -> None:
     root = find_project_root(Path.cwd())
     proj = read_project(root)
@@ -531,6 +538,12 @@ def main() -> None:
     p_init = sub.add_parser("init", help="make the current folder a Thistle project (adds what's missing, overwrites nothing)")
     p_init.add_argument("--name", help="the project's name (default: the folder's name)")
     p_init.set_defaults(func=cmd_init)
+
+    p_unity = sub.add_parser("import-unity", help="convert a Unity project's scenes, prefabs, materials and assets (see docs/unity-import.md)")
+    p_unity.add_argument("unity_project", help="the Unity project folder (the one with Assets/ in it)")
+    p_unity.add_argument("--out", help="the Thistle project to write into (default: the current folder)")
+    p_unity.add_argument("--force", action="store_true", help="overwrite files that already exist")
+    p_unity.set_defaults(func=cmd_import_unity)
 
     p_build = sub.add_parser("build", help="configure + build the project in the current directory")
     p_build.add_argument("--release", action="store_true")

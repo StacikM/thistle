@@ -151,6 +151,46 @@ void set_model_material(Model model, const Material& material, int part) {
     }
 }
 
+void set_model_lods(Model model, const std::vector<ModelLod>& levels) {
+    ModelRecord* rec = model_record(model);
+    if (!rec) return;
+    std::vector<ModelLod> kept;
+    float previous = 0.0f;
+    for (const ModelLod& level : levels) {
+        if (level.model.id == model.id || !model_record(level.model)) {
+            log_warn("set_model_lods: a level is the model itself or isn't a loaded model - skipped");
+            continue;
+        }
+        if (level.from_distance <= previous) {
+            log_warn("set_model_lods: distances must increase and be above 0 - level skipped");
+            continue;
+        }
+        previous = level.from_distance;
+        kept.push_back(level);
+    }
+    rec->lods = std::move(kept);
+}
+
+Model pick_model_lod(Model model, float distance, float bias) {
+    const ModelRecord* rec = model_record(model);
+    if (!rec || rec->lods.empty()) return model;
+    const float scale = std::max(bias, 1e-3f);
+    Model pick = model;
+    for (const ModelLod& level : rec->lods) {
+        if (distance >= level.from_distance * scale) pick = level.model;
+    }
+    return pick;
+}
+
+void set_model_occluder(Model model, bool occluder) {
+    if (ModelRecord* rec = model_record(model)) rec->occluder = occluder;
+}
+
+bool is_model_occluder(Model model) {
+    const ModelRecord* rec = model_record(model);
+    return rec && rec->occluder;
+}
+
 RaycastHit raycast(const Ray& ray, Model model, const Transform& transform, float max_distance) {
     RaycastHit best;
     const ModelRecord* rec = model_record(model);
