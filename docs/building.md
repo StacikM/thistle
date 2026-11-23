@@ -37,6 +37,32 @@ cmake --build build --target thistle_smoketest
 
 Compiling is not the same as working. `D3D11CreateDeviceAndSwapChain` link errors, missing runtime DLLs, and silent no-op HTTP calls all compiled fine before someone actually ran the thing. Run the smoketest on every platform you claim to support before you believe you support it.
 
+## Where a built game ends up: `thistle_stage()`
+
+A game's programs (the game, a dedicated server, your own test programs) used to land in one folder, with the server's `server.json`, `logs/` and save data written beside them. `thistle_stage(TARGET ROLE)` puts each where it belongs, in a folder you can zip and ship:
+
+```
+Builds/Windows/MyGame/        (Linux/ and macOS/ on those)
+  MyGame.exe
+  assets/
+  Server/                     the dedicated server, with its own assets/, and the server.json, logs/ and
+    MyGame-Server.exe         save data it writes: all relative to where it runs, so they stay in here
+  Dev/                        test programs: never shipped
+    mygame_tests.exe
+```
+
+`thistle new` projects do this already. In an existing project's `CMakeLists.txt`, add one line per program, after its `add_executable` (`ROLE` is `GAME`, `SERVER` or `DEV`):
+
+```cmake
+thistle_stage(mygame GAME)
+thistle_stage(mygame-server SERVER)
+thistle_stage(mygame_tests DEV)
+```
+
+Then reconfigure and rebuild. `thistle run` and `thistle run --server` look in `Builds/` first and fall back to `build/`, so old projects keep working untouched. `-DTHISTLE_STAGE_ROOT=<folder>` replaces the `MyGame` folder; `Builds/` is in the generated `.gitignore`. A Debug and a Release build write to the same folder, so the second overwrites the first. Only the engine's CMake and the CLI know about this: nothing at run time changed (the game still saves to your user folder, not here).
+
+**Not verified:** a Windows or macOS build (Linux only, by building a generated multiplayer project and looking at the result: see the verification note at the end of this section).
+
 ## Backend selection (automatic, don't touch it)
 
 `src/sokol_impl.c` and `src/text_impl.c` pick the graphics backend by preprocessor check:

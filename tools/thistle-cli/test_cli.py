@@ -66,6 +66,10 @@ with tempfile.TemporaryDirectory() as tmp:
     r = thistle("new", "plain", "--at", str(root / "plain"), cwd=root)
     project = json.loads((root / "plain" / "thistle.json").read_text(encoding="utf-8"))
     check(r.returncode == 0 and project.get("template") == "blank" and "modules" not in project, "a plain new is blank, with no modules")
+    cmake_text = (root / "plain" / "CMakeLists.txt").read_text(encoding="utf-8")
+    check("thistle_stage(plain GAME)" in cmake_text and "thistle_stage(plain-server SERVER)" in cmake_text,
+          "its CMakeLists.txt puts the game and the server in their staged folders (thistle_stage)")
+    check("Builds/" in (root / "plain" / ".gitignore").read_text(encoding="utf-8").splitlines(), "its .gitignore leaves out Builds/")
     check("THISTLE_SERVER_ONLY" in (root / "plain" / "CMakeLists.txt").read_text(encoding="utf-8"),
           "its CMakeLists.txt can build a dedicated server (src/server.cpp)")
     r = thistle("build", "--server", cwd=root / "plain")
