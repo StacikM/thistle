@@ -633,6 +633,16 @@ enum class PostEffect { None, Grayscale, Vignette, Chromatic, Flash, Fade };
 // hits and scene transitions; drive intensity yourself over time.
 void set_post_effect(PostEffect effect, float intensity = 1.0f);
 
+// Saves a screenshot without quitting. The file is written at the end of the frame this is called in, from the
+// finished picture (3D, 2D, the debug overlay and any post effect, all of it), so it shows what this frame's
+// update callback drew. Several calls in one frame are fine: each path gets that frame. `path` is a PNG; its
+// folders are made if they're missing. Returns false right away, and logs why once, if this graphics backend
+// can't be read back (it works with OpenGL on Linux and Direct3D 11 on Windows; Metal can't yet). A read that
+// fails later is logged and that request dropped, and the game goes on. If the OS isn't drawing the window at
+// all (minimized), no frame finishes and nothing is saved until it is. For one frame and then quit, see the
+// THISTLE_SCREENSHOT environment variable in docs/cli.md, which this doesn't change.
+bool save_screenshot(const std::string& path);
+
 // --- platform -----------------------------------------------------------
 
 enum class Platform { Windows, MacOS, Linux, iOS, Android, Web, Unknown };
