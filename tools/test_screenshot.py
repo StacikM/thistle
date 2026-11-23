@@ -81,6 +81,27 @@ def main() -> int:
         check(center[1] > 120 and center[1] > center[0] + 40 and center[1] > center[2] + 40, f"the lit 3D box is green at the middle of the screen {center}")
         corner = px[3][318]
         check(corner != (255, 0, 0) and corner != (0, 0, 255) and corner != center, f"the top-right corner is neither a rectangle nor the box {corner}")
+        print("save_screenshot: several pictures in one run")
+        shots = Path(tmp) / "several" / "nested"  # a folder that doesn't exist yet
+        env = dict(os.environ, SCREENSHOT_TEST_DIR=str(shots), LIBGL_ALWAYS_SOFTWARE="1")
+        env.pop("THISTLE_SCREENSHOT", None)
+        r = subprocess.run(runner + [exe], env=env, capture_output=True, text=True, timeout=90)
+        check(r.returncode == 0, f"the program saves three screenshots, keeps running, and quits itself with exit code 0 (exit code {r.returncode})")
+        if r.returncode != 0:
+            print(r.stdout + r.stderr)
+        files = {n: shots / f"shot_{n}.png" for n in (3, 6, 9)}
+        check(all(p.exists() for p in files.values()), "three PNGs exist, in a folder that was made for them")
+        out = r.stdout + r.stderr
+        check(all(f"frame {n})" in out for n in (3, 6, 9)), "each is logged with the frame it was taken on")
+        pics = {n: read_png(p) for n, p in files.items() if p.exists()}
+        check(all((w, h) == (320, 240) for w, h, _ in pics.values()), "each is the window's size")
+        check(len({str(px) for _, _, px in pics.values()}) == 3, "and the three differ from each other")
+        for n, (w, h, px) in pics.items():
+            red_x = 20 + 20 * n  # where that frame's callback drew the red rectangle
+            check(px[50][red_x + 30][0] > 240 and px[50][red_x + 30][1] < 15, f"frame {n}: the red rectangle is where frame {n}'s callback drew it ({px[50][red_x + 30]})")
+        # no THISTLE_SCREENSHOT set means no exit(0) from the env path: the program ended on its own at frame 10
+        check("frame 10" not in out, "it kept going until the program quit by itself (nothing exited at a screenshot)")
+
     print("all passed" if failures == 0 else f"{failures} FAILED")
     return 1 if failures else 0
 

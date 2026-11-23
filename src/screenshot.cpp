@@ -23,6 +23,14 @@
 
 namespace thistle::detail {
 
+bool framebuffer_readback_supported() {
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool read_framebuffer(int w, int h, std::vector<unsigned char>& rgba, std::string& why) {
     if (w <= 0 || h <= 0) {
         why = "the window has no size";
