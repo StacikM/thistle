@@ -61,7 +61,7 @@ thistle_stage(mygame_tests DEV)
 
 Then reconfigure and rebuild. `thistle run` and `thistle run --server` look in `Builds/` first and fall back to `build/`, so old projects keep working untouched. `-DTHISTLE_STAGE_ROOT=<folder>` replaces the `MyGame` folder; `Builds/` is in the generated `.gitignore`. A Debug and a Release build write to the same folder, so the second overwrites the first. Only the engine's CMake and the CLI know about this: nothing at run time changed (the game still saves to your user folder, not here).
 
-**Not verified:** a Windows or macOS build (Linux only, by building a generated multiplayer project and looking at the result: see the verification note at the end of this section).
+**Verified (Linux only):** a generated multiplayer project was built, and the result is exactly the tree above: the game and `assets/` in the root, the server and its own `assets/` in `Server/`, nothing but CMake files left in `build/`. `thistle run --screenshot` found and ran the staged game. The staged server, run from its folder, wrote its `server.json` and `logs/` into `Server/` and nothing next to the game. **Not verified:** a Windows or macOS build (the Visual Studio per-configuration output folders and the macOS `.app` bundle are written for but never seen), `Dev/` (no test program was staged), and a game that has other programs of its own, like Relayfall's.
 
 ## Backend selection (automatic, don't touch it)
 
