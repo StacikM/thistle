@@ -177,7 +177,7 @@ def cmd_new(args) -> None:
         editor_assets = ENGINE_ROOT / "tools" / "thistle-editor" / "editor_assets"
         for f in ("inter-regular.ttf", "inter-OFL-LICENSE.txt"):
             shutil.copy2(editor_assets / f, fonts / f)
-    (dest / ".gitignore").write_text("build/\nbuild-server/\n.DS_Store\n", encoding="utf-8")
+    (dest / ".gitignore").write_text("build/\nbuild-server/\nBuilds/\n.DS_Store\n", encoding="utf-8")
     project = {"name": name, "version": "1.0.0", "template": kind}
     if args.modules:
         project["modules"] = {m: True for m in args.modules}
@@ -225,7 +225,7 @@ def cmd_init(args) -> None:
     add("src/main.cpp", render("main.cpp.in", name=name))
     add("src/version.hpp.in", (TEMPLATES / "version.hpp.in").read_text(encoding="utf-8"))
     add("README.md", render("README.md.in", name=name, about=""))
-    add(".gitignore", "build/\nbuild-server/\n.DS_Store\n")
+    add(".gitignore", "build/\nbuild-server/\nBuilds/\n.DS_Store\n")
     if not (dest / "assets").exists():
         (dest / "assets").mkdir()
         added.append("assets/")
@@ -311,13 +311,28 @@ def _find_executable(build_dir: Path, name: str, config: str) -> "Path | None":
     return None
 
 
+def _staged_root(root: Path, proj: dict) -> Path:
+    """Where thistle_stage() (in the engine's CMake) puts a built game: Builds/<platform>/<name>/, with the
+    server in Server/ and test programs in Dev/. Projects made before that was added don't use it."""
+    platform = "Windows" if os.name == "nt" else "macOS" if sys.platform == "darwin" else "Linux"
+    return root / "Builds" / platform / proj["name"]
+
+
+def _newest(*found: "Path | None") -> "Path | None":
+    """Of the programs found, the one built most recently. A project that used thistle_stage and later stopped has an old
+    program left in Builds/; running it instead of the fresh one in build/ would silently run stale code."""
+    existing = [p for p in found if p]
+    return max(existing, key=lambda p: p.stat().st_mtime) if existing else None
+
+
 def cmd_run(args) -> None:
     cmd_build(args)
     root = find_project_root(Path.cwd())
     proj = read_project(root)
     rest = args.args[1:] if args.args[:1] == ["--"] else args.args
     if args.server:
-        exe = _find_executable(root / "build-server", proj["name"] + "-server", _config_name(args))
+        exe = _newest(_find_executable(_staged_root(root, proj) / "Server", proj["name"] + "-server", _config_name(args)),
+                      _find_executable(root / "build-server", proj["name"] + "-server", _config_name(args)))
         if not exe:
             die("built, but couldn't find the server's executable — check the build output above")
         print("$ " + " ".join([str(exe)] + rest))
@@ -325,7 +340,8 @@ def cmd_run(args) -> None:
         # server.json, logs/ and its save data.
         os.chdir(exe.parent)
         hand_over([str(exe)] + rest)
-    exe = _find_executable(root / "build", proj["name"], _config_name(args))
+    exe = _newest(_find_executable(_staged_root(root, proj), proj["name"], _config_name(args)),
+                  _find_executable(root / "build", proj["name"], _config_name(args)))
     if not exe:
         die("built, but couldn't find the executable to run — check the build output above")
     if args.screenshot:

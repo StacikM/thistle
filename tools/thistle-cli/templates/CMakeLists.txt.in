@@ -53,6 +53,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/server.cpp")
     target_link_libraries({{name}}-server PRIVATE thistle_server)
     target_include_directories({{name}}-server PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
     thistle_bundle_assets({{name}}-server "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+    thistle_stage({{name}}-server SERVER)
 endif()
 if(THISTLE_SERVER_ONLY)
     return()
@@ -70,6 +71,10 @@ target_include_directories({{name}} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generat
 # Gets assets/ next to the built executable on every platform — see the
 # function's definition (and why it exists) in the engine's own CMakeLists.txt.
 thistle_bundle_assets({{name}} "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+
+# Puts the built game where you'd ship it from: Builds/<platform>/{{name}}/, with the dedicated server in
+# its Server/ folder and any test programs (thistle_stage(<target> DEV)) in Dev/.
+thistle_stage({{name}} GAME)
 
 # Visual Studio only (other generators ignore these): open the solution with
 # the game as the startup project (CMake's default, ALL_BUILD, can't be run),

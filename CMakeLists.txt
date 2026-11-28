@@ -71,6 +71,44 @@ function(thistle_bundle_assets TARGET ASSETS_DIR)
     endif()
 endfunction()
 
+# Where a built game's programs end up, tidily: the game in the root of its own folder with its assets/, the
+# dedicated server in Server/ (with its own assets/, and the server.json, logs/ and save data it writes there),
+# and test programs in Dev/, which is never shipped:
+#
+#   Builds/Windows/MyGame/   MyGame.exe  assets/  Server/  Dev/
+#
+# ROLE is GAME, SERVER or DEV. Call it on each program before or after thistle_bundle_assets(), which puts
+# assets/ next to wherever the program ends up. THISTLE_STAGE_ROOT overrides the MyGame folder.
+function(thistle_stage TARGET ROLE)
+    if(NOT ROLE MATCHES "^(GAME|SERVER|DEV)$")
+        message(FATAL_ERROR "thistle_stage: ROLE must be GAME, SERVER or DEV, not '${ROLE}'")
+    endif()
+    if(THISTLE_STAGE_ROOT)
+        set(_root "${THISTLE_STAGE_ROOT}")
+    else()
+        if(WIN32)
+            set(_platform "Windows")
+        elseif(APPLE)
+            set(_platform "macOS")
+        else()
+            set(_platform "Linux")
+        endif()
+        set(_root "${CMAKE_SOURCE_DIR}/Builds/${_platform}/${CMAKE_PROJECT_NAME}")
+    endif()
+    if(ROLE STREQUAL "SERVER")
+        set(_dir "${_root}/Server")
+    elseif(ROLE STREQUAL "DEV")
+        set(_dir "${_root}/Dev")
+    else()
+        set(_dir "${_root}")
+    endif()
+    # The per-configuration ones too: a Visual Studio build would otherwise add Debug/ or Release/ below it.
+    set_target_properties(${TARGET} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${_dir}")
+    foreach(_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+        set_target_properties(${TARGET} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_${_config} "${_dir}")
+    endforeach()
+endfunction()
+
 include(FetchContent)
 
 # sokol — windowing + graphics (header-only). Pinned, unlike the other
