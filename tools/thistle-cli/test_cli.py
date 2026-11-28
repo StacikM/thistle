@@ -132,6 +132,21 @@ with tempfile.TemporaryDirectory() as tmp:
     r = thistle("init", "--name", "space-race", cwd=named)
     check(r.returncode == 0 and json.loads((named / "thistle.json").read_text(encoding="utf-8")).get("name") == "space-race", "init --name sets the name")
 
+# thistle run must never pick a stale staged program over a fresh one in build/ (or the other way round).
+import importlib.util
+_spec = importlib.util.spec_from_file_location("thistle_cli_module", CLI)
+cli = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(cli)
+with tempfile.TemporaryDirectory() as _tmp:
+    _old, _new = Path(_tmp) / "old", Path(_tmp) / "new"
+    _old.write_bytes(b"x")
+    _new.write_bytes(b"x")
+    os.utime(_old, (1_000_000, 1_000_000))
+    os.utime(_new, (2_000_000, 2_000_000))
+    check(cli._newest(_old, _new) == _new and cli._newest(_new, _old) == _new, "of two programs found, the more recently built one is the one that runs (either order)")
+    check(cli._newest(None, _old) == _old and cli._newest(_old, None) == _old, "a lone program is the one that runs")
+    check(cli._newest(None, None) is None, "none found stays none")
+
 if failures:
     print(f"{failures} check(s) failed")
     sys.exit(1)

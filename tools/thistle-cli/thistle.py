@@ -318,14 +318,21 @@ def _staged_root(root: Path, proj: dict) -> Path:
     return root / "Builds" / platform / proj["name"]
 
 
+def _newest(*found: "Path | None") -> "Path | None":
+    """Of the programs found, the one built most recently. A project that used thistle_stage and later stopped has an old
+    program left in Builds/; running it instead of the fresh one in build/ would silently run stale code."""
+    existing = [p for p in found if p]
+    return max(existing, key=lambda p: p.stat().st_mtime) if existing else None
+
+
 def cmd_run(args) -> None:
     cmd_build(args)
     root = find_project_root(Path.cwd())
     proj = read_project(root)
     rest = args.args[1:] if args.args[:1] == ["--"] else args.args
     if args.server:
-        exe = (_find_executable(_staged_root(root, proj) / "Server", proj["name"] + "-server", _config_name(args))
-               or _find_executable(root / "build-server", proj["name"] + "-server", _config_name(args)))
+        exe = _newest(_find_executable(_staged_root(root, proj) / "Server", proj["name"] + "-server", _config_name(args)),
+                      _find_executable(root / "build-server", proj["name"] + "-server", _config_name(args)))
         if not exe:
             die("built, but couldn't find the server's executable — check the build output above")
         print("$ " + " ".join([str(exe)] + rest))
@@ -333,8 +340,8 @@ def cmd_run(args) -> None:
         # server.json, logs/ and its save data.
         os.chdir(exe.parent)
         hand_over([str(exe)] + rest)
-    exe = (_find_executable(_staged_root(root, proj), proj["name"], _config_name(args))
-           or _find_executable(root / "build", proj["name"], _config_name(args)))
+    exe = _newest(_find_executable(_staged_root(root, proj), proj["name"], _config_name(args)),
+                  _find_executable(root / "build", proj["name"], _config_name(args)))
     if not exe:
         die("built, but couldn't find the executable to run — check the build output above")
     if args.screenshot:
