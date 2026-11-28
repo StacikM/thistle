@@ -112,4 +112,21 @@ THISTLE_SCREENSHOT=shot.png ./mygame               # the same, on a built game
 
 It still opens a window (briefly: it quits the moment the frame is saved), because the picture comes from the real framebuffer. On a Linux machine with no display, use a virtual one: `xvfb-run -a thistle run --screenshot shot.png` (with Mesa's software OpenGL, no GPU needed). The PNG is the window's size, opaque, 2D and 3D and the debug overlay as drawn.
 
-**What's been verified:** Linux with OpenGL, under `xvfb-run` and Mesa's software renderer (`screenshot_smoketest`, ctest, runs a program that draws a lit 3D box and two 2D rectangles and checks the PNG's size, orientation and pixel colors). **Windows (Direct3D 11): written, compiles in CI, never run**: the code copies the swap chain's back buffer to a staging texture; try it and tell me. **macOS (Metal) and the rest: not supported**, and it says so and exits 3. A multisampled back buffer isn't supported either. The game runs from its own folder, so give a path you mean (`thistle run` makes a relative one absolute for you first).
+### Several pictures in one run: `save_screenshot()`
+
+`THISTLE_SCREENSHOT` saves one frame and quits, so a script that wants six views would launch the game six times. From inside the game, `save_screenshot(path)` saves a frame and keeps going:
+
+```cpp
+app.update([&](Frame f) {
+    // ... draw the frame ...
+    if (settled_frames == 20) save_screenshot("shots/lobby.png");   // written at the end of this frame
+});
+```
+
+- It saves the **finished** frame the call is made in: 3D, 2D, the debug overlay and any post effect, all drawn by the same update callback. The file is written after the frame is complete, never from inside your callback (the 3D scene isn't drawn yet at that point, which is why this is an engine call and not something you can do yourself).
+- Several calls in one frame are fine; each path gets that frame. Missing folders in the path are made.
+- It returns `false` at once, and logs why once, on a backend that can't be read back (below). A read that fails later is logged and that request dropped; the game goes on.
+- `THISTLE_SCREENSHOT` and `THISTLE_SCREENSHOT_FRAME` behave exactly as before (one frame, then exit).
+- If the OS isn't drawing the window at all (minimized), no frame finishes and nothing is saved until it is.
+
+**What's been verified:** Linux with OpenGL, under `xvfb-run` and Mesa's software renderer (`screenshot_smoketest`, ctest, runs a program that draws a lit 3D box and two 2D rectangles and checks the PNG's size, orientation and pixel colors; and a run that calls `save_screenshot()` on three frames and checks three differently-drawn PNGs, each showing its own frame, with the program running on until it quits itself). **Windows (Direct3D 11): written, compiles in CI, never run**: the code copies the swap chain's back buffer to a staging texture; try it and tell me. **macOS (Metal) and the rest: not supported**, and it says so and exits 3. A multisampled back buffer isn't supported either. The game runs from its own folder, so give a path you mean (`thistle run` makes a relative one absolute for you first).

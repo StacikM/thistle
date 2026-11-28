@@ -336,6 +336,7 @@ struct EngineState {
     ThistleGamepad pad_prev{};
 
     uint64_t frame_index = 0;
+    std::vector<std::string> pending_screenshots; // save_screenshot() requests, written at the end of the frame
 
     int menu_focus = 0;      // gamepad-focused menu item
     int menu_last_count = 0; // items in the last menu built
@@ -804,6 +805,31 @@ void draw_debug(Frame& f) {
 }
 #endif
 
+// Writes what save_screenshot() asked for. One read of the finished frame serves every request in it.
+void flush_screenshots(int w, int h) {
+    EngineState& s = *g_state;
+    if (s.pending_screenshots.empty()) return;
+    std::vector<std::string> paths;
+    paths.swap(s.pending_screenshots);
+    std::vector<unsigned char> rgba;
+    std::string why;
+    if (!detail::read_framebuffer(w, h, rgba, why)) {
+        log_error("screenshot: " + why + " (dropped " + std::to_string(paths.size()) + " request(s))");
+        return;
+    }
+    for (size_t i = 3; i < rgba.size(); i += 4) rgba[i] = 255; // not see-through, whatever the window's alpha was
+    for (const std::string& path : paths) {
+        std::error_code ec;
+        const std::filesystem::path parent = std::filesystem::path(path).parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+        if (!stbi_write_png(path.c_str(), w, h, 4, rgba.data(), w * 4)) {
+            log_error("screenshot: couldn't write " + path);
+            continue;
+        }
+        log_info("screenshot: wrote " + path + " (" + std::to_string(w) + "x" + std::to_string(h) + ", frame " + std::to_string(s.frame_index + 1) + ")");
+    }
+}
+
 // THISTLE_SCREENSHOT=out.png: after frame THISTLE_SCREENSHOT_FRAME (default 5), write the screen to that
 // file and quit, exit code 0, or 3 with a message if it couldn't. For checking rendering and layout from a
 // test or by an AI agent, without anyone looking at a window. Nothing to add to a game.
@@ -929,6 +955,7 @@ void frame_cb() {
         sg_draw(0, 3, 1);
         detail::debug_ui_render();
         sg_end_pass();
+        flush_screenshots(w, h);
         maybe_screenshot(w, h);
         sg_commit();
     } else {
@@ -940,6 +967,7 @@ void frame_cb() {
         detail::three_draw_layers();
         detail::debug_ui_render();
         sg_end_pass();
+        flush_screenshots(w, h);
         maybe_screenshot(w, h);
         sg_commit();
     }
@@ -3423,6 +3451,18 @@ void set_sfx_volume(float volume) {
 
 void set_master_volume(float volume) {
     if (g_state->audio_ready) ma_engine_set_volume(&g_state->audio, volume);
+}
+
+bool save_screenshot(const std::string& path) {
+    if (!g_state || path.empty()) return false;
+    if (!detail::framebuffer_readback_supported()) {
+        static bool told = false;
+        if (!told) log_error("save_screenshot: reading the screen back isn't implemented on this platform's graphics backend yet (it works on Linux with OpenGL and on Windows with Direct3D 11)");
+        told = true;
+        return false;
+    }
+    g_state->pending_screenshots.push_back(path);
+    return true;
 }
 
 void set_post_effect(PostEffect effect, float intensity) {
